@@ -1,7 +1,7 @@
 {
-  "name": "yaya_msg-mobile",
+  "name": "yaya-msg-x",
   "version": "2.7.5",
-  "description": "口袋48 第三方 React Native 移动客户端",
+  "description": "牙牙消息 X —— 口袋48 第三方 React Native 移动客户端（独立衍生项目）",
   "homepage": "https://github.com/xuqinghhh/yaya_msg_mobile",
   "repository": {
     "type": "git",
