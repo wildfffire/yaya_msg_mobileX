@@ -499,7 +499,7 @@ public class YayaExoService extends Service {
     try {
       return new Notification.Builder(this, CHANNEL_ID)
           .setSmallIcon(R.mipmap.ic_launcher)
-          .setContentTitle("牙牙消息")
+          .setContentTitle(getString(R.string.app_name))
           .setContentText("正在播放")
           .setCategory(Notification.CATEGORY_TRANSPORT)
           .setOngoing(true)
@@ -509,7 +509,7 @@ public class YayaExoService extends Service {
       try {
         return new Notification.Builder(this)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("牙牙消息").setContentText("正在播放").build();
+            .setContentTitle(getString(R.string.app_name)).setContentText("正在播放").build();
       } catch (Throwable t2) {
         return null;
       }
@@ -574,7 +574,7 @@ public class YayaExoService extends Service {
       if (sig.equals(lastMetaSig)) return;
       lastMetaSig = sig;
       MediaMetadata.Builder b = new MediaMetadata.Builder();
-      b.putString(MediaMetadata.METADATA_KEY_TITLE, title.isEmpty() ? "牙牙消息" : title);
+      b.putString(MediaMetadata.METADATA_KEY_TITLE, title.isEmpty() ? getString(R.string.app_name) : title);
       b.putString(MediaMetadata.METADATA_KEY_ARTIST, artist);
       b.putString(MediaMetadata.METADATA_KEY_ALBUM, album);
       if (dur > 0) b.putLong(MediaMetadata.METADATA_KEY_DURATION, dur);
@@ -585,7 +585,7 @@ public class YayaExoService extends Service {
 
   private Notification buildNotification() {
     try {
-      String sub = artist.isEmpty() ? "牙牙消息" : artist + (album.isEmpty() ? "" : " · " + album);
+      String sub = artist.isEmpty() ? getString(R.string.app_name) : artist + (album.isEmpty() ? "" : " · " + album);
       if (cachedContentPi == null) {
         // 懒建一次（getLaunchIntentForPackage 是包管理器 IPC，每 3s 一次太贵）
         Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
@@ -599,7 +599,7 @@ public class YayaExoService extends Service {
       // 极简系统媒体通知：控制按钮只放系统媒体卡（QS/锁屏由 session 提供），
       // 通知栏仅保留 MediaStyle 收纳条目（可在 系统设置-通知-牙牙消息-后台播放 关闭）
       builder.setSmallIcon(R.mipmap.ic_launcher)
-          .setContentTitle(title.isEmpty() ? "牙牙消息" : title)
+          .setContentTitle(title.isEmpty() ? getString(R.string.app_name) : title)
           .setContentText(sub)
           .setCategory(Notification.CATEGORY_TRANSPORT)
           .setVisibility(Notification.VISIBILITY_PUBLIC)

@@ -75,6 +75,9 @@ class MainActivity : ReactActivity() {
   }
 
   override fun onPause() {
+    // 进 PiP 的路径必须先于 super.onPause()（→ RN AppState 'background'）把状态推给 RN：
+    // JS 侧后台分支靠 isPipActive() 豁免（释放横屏锁/停轮询会和 PiP 转场竞争 → 直播中断）
+    if (isInPictureInPictureMode) PipModule.emitPipChanged(true)
     super.onPause()
     // 视频（直播/录播/网页）在播并被系统小窗（PiP）接管时，绝不重声明音乐会话——
     // 否则 SystemUI 的 PiP/媒体控件会绑到音乐而非画面中的视频（用户反馈"控件控制的是音乐"根因之一）。

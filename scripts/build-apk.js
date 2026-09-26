@@ -7,7 +7,14 @@ const path = require('path');
 
 const projectRoot = path.join(__dirname, '..');
 const androidDir = path.join(projectRoot, 'android');
-const apkOutputDir = path.join('E:/yymsg/APK');
+/**
+ * APK 落地目录。
+ * ⚠️ 以前硬编码成 `E:/yymsg/APK`（原作者机器上的盘符）—— 换台机器没有 E 盘时
+ * 会在「构建成功后、拷贝 APK」这一步抛 ENOENT，构建白跑。
+ * 现在：优先读环境变量 `YAYA_APK_OUT_DIR`，否则落到用户主目录下的 `yaya-apk`
+ *（不写进仓库，避免污染工作区；同时任何机器都能跑通）。
+ */
+const apkOutputDir = process.env.YAYA_APK_OUT_DIR || path.join(require('os').homedir(), 'yaya-apk');
 const pkg = require(path.join(projectRoot, 'package.json'));
 
 console.log('🔨 Building Android release APK...');

@@ -72,12 +72,34 @@ react {
  * Set this to true in release builds to optimize the app using [R8](https://developer.android.com/topic/performance/app-optimization/enable-app-optimization).
  */
 def enableMinifyInReleaseBuilds = (findProperty('android.enableMinifyInReleaseBuilds') ?: false).toBoolean()
-def releaseStoreFile = findProperty('RELEASE_STORE_FILE')
-def releaseStorePassword = findProperty('RELEASE_STORE_PASSWORD')
-def releaseKeyAlias = findProperty('RELEASE_KEY_ALIAS')
-def releaseKeyPassword = findProperty('RELEASE_KEY_PASSWORD')
+/**
+ * 读取签名参数：Gradle 项目属性优先，其次**普通环境变量**。
+ *
+ * ⚠️ 历史坑：此前只用 `findProperty()`，而 Gradle 的 findProperty **读不到普通环境变量**
+ *（只认 `-P` / `gradle.properties` / `ORG_GRADLE_PROJECT_` 前缀）。
+ * 而 `.github/workflows/android-apk.yml` 正是用 `env:` 传 `RELEASE_*` 的 ——
+ * 于是正式签名**从未生效**，release 包一直退回「每次 CI 现场随机生成的 debug keystore」，
+ * 结果前后两个版本的签名不同，用户装新包必然 `INSTALL_FAILED_UPDATE_INCOMPATIBLE`，
+ * 只能卸载重装（丢登录信息）。补上环境变量兜底后，CI secrets 才真正可用。
+ */
+def propOrEnv = { String name ->
+    def v = findProperty(name)
+    if (v == null || !v.toString().trim()) v = System.getenv(name)
+    return (v == null || !v.toString().trim()) ? null : v.toString().trim()
+}
+def releaseStoreFile = propOrEnv('RELEASE_STORE_FILE')
+def releaseStorePassword = propOrEnv('RELEASE_STORE_PASSWORD')
+def releaseKeyAlias = propOrEnv('RELEASE_KEY_ALIAS')
+def releaseKeyPassword = propOrEnv('RELEASE_KEY_PASSWORD')
 def hasReleaseSigning = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { value ->
-    value != null && value.toString().trim()
+    value != null
+}
+// 兜底要「响亮」：没有正式签名时出的包无法覆盖升级任何已装正版包，必须让出包人当场看见
+if (!hasReleaseSigning) {
+    logger.warn('[yaya] ⚠️ 未配置 RELEASE_STORE_FILE / PASSWORD / KEY_ALIAS / KEY_PASSWORD')
+    logger.warn('[yaya] ⚠️ release 包将退回 DEBUG 签名：无法覆盖升级其它签名的已装包（只能卸载重装），')
+    logger.warn('[yaya] ⚠️ 且 debug keystore 若每次重新生成，等于每次换签名。')
+    logger.warn('[yaya] ⚠️ 本地固定签名：写 ~/.gradle/gradle.properties；CI：见 android-apk.yml 的 keystore 注入步骤。')
 }
 
 /**
@@ -116,7 +138,7 @@ android {
         // minSdk 26（Android 8）：兜底兼容 HarmonyOS 2/3/4 全系（基座 Android 8-10）及更老 Android 机型
         minSdkVersion Math.max(rootProject.ext.minSdkVersion as int, 26)
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2075008
+        versionCode 2075023
         versionName "2.7.5"
 
         // 真机架构 + 模拟器架构。MuMu 等安卓模拟器为 x86_64，缺此 ABI 会导致 libhermes 等原生库

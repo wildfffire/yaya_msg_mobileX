@@ -236,7 +236,7 @@ public class RadioForegroundService extends Service {
           ? new Notification.Builder(this, CHANNEL_ID)
           : new Notification.Builder(this);
       b.setSmallIcon(R.mipmap.ic_launcher)
-          .setContentTitle("牙牙消息")
+          .setContentTitle(getString(R.string.app_name))
           .setContentText("后台播放")
           .setCategory(Notification.CATEGORY_TRANSPORT)
           .setVisibility(Notification.VISIBILITY_PUBLIC)
@@ -248,7 +248,7 @@ public class RadioForegroundService extends Service {
       try {
         return new Notification.Builder(this)
             .setSmallIcon(R.mipmap.ic_launcher)
-            .setContentTitle("牙牙消息").setContentText("后台播放").build();
+            .setContentTitle(getString(R.string.app_name)).setContentText("后台播放").build();
       } catch (Throwable t2) {
         return null;
       }
@@ -410,7 +410,7 @@ public class RadioForegroundService extends Service {
         artist == null || artist.isEmpty() ? "" : artist,
         (artist != null && !artist.isEmpty() && album != null && !album.isEmpty()) ? " · " : "",
         album == null || album.isEmpty() ? "" : album).trim();
-    String text = subLine.isEmpty() ? "牙牙消息" : subLine;
+    String text = subLine.isEmpty() ? getString(R.string.app_name) : subLine;
 
     // 点击通知 → 回到 App
     Intent open = getPackageManager().getLaunchIntentForPackage(getPackageName());
@@ -427,7 +427,7 @@ public class RadioForegroundService extends Service {
     // MediaSession 元数据：标题/歌手/专辑/时长 + 封面（锁屏与各厂商媒体中心取封面/时间用）
     try {
       MediaMetadata.Builder md = new MediaMetadata.Builder();
-      md.putString(MediaMetadata.METADATA_KEY_TITLE, (title == null || title.isEmpty()) ? "牙牙消息" : title);
+      md.putString(MediaMetadata.METADATA_KEY_TITLE, (title == null || title.isEmpty()) ? getString(R.string.app_name) : title);
       md.putString(MediaMetadata.METADATA_KEY_ARTIST, artist == null ? "" : artist);
       md.putString(MediaMetadata.METADATA_KEY_ALBUM, album == null ? "" : album);
       if (duration > 0) md.putLong(MediaMetadata.METADATA_KEY_DURATION, duration);
@@ -459,7 +459,7 @@ public class RadioForegroundService extends Service {
       builder.setLargeIcon(appIconBitmap); // 兜底：无封面也显示 app logo（免去系统色块）
     }
     builder.setSmallIcon(R.mipmap.ic_launcher)
-        .setContentTitle((title == null || title.isEmpty()) ? "牙牙消息" : title)
+        .setContentTitle((title == null || title.isEmpty()) ? getString(R.string.app_name) : title)
         .setContentText(text)
         .setCategory(Notification.CATEGORY_TRANSPORT)
         // 公开可见性：锁屏/安全锁下仍显示封面与控件（部分厂商默认 private 会藏内容→看似无封面/无进度）
@@ -476,11 +476,11 @@ public class RadioForegroundService extends Service {
             .setShowActionsInCompactView(0, 1, 2));
     // 展开视图：封面 + 标题 + 歌手·专辑 + 滚动歌词（音乐场景；电台无歌词不发以免空布局）
     boolean hasMusicMeta = (lyric != null && !lyric.isEmpty())
-        || (subLine != null && !subLine.isEmpty() && !"牙牙消息".equals(subLine));
+        || (subLine != null && !subLine.isEmpty() && !getString(R.string.app_name).equals(subLine));
     if (hasMusicMeta) {
       try {
         RemoteViews big = new RemoteViews(getPackageName(), R.layout.notification_media);
-        big.setTextViewText(R.id.mc_title, (title == null || title.isEmpty()) ? "牙牙消息" : title);
+        big.setTextViewText(R.id.mc_title, (title == null || title.isEmpty()) ? getString(R.string.app_name) : title);
         big.setTextViewText(R.id.mc_sub, subLine);
         big.setTextViewText(R.id.mc_lyric, (lyric == null || lyric.isEmpty()) ? "♪" : "♪ " + lyric);
         if (coverBitmap != null) {

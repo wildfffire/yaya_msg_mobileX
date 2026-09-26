@@ -141,10 +141,12 @@ public class LiveExoView extends FrameLayout {
             .setUsage(C.USAGE_MEDIA)
             .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
             .build(), true);
-        player.setWakeMode(C.WAKE_MODE_LOCAL);
       } else {
         player.setVideoTextureView(textureView);
       }
+      // 视频模式同样持局部唤醒锁：PiP/后台时系统省电策略会掐住解码与网络，
+      // 直播几分钟就卡成缓冲→黑屏（用户反馈「系统小窗中断直播」的根因之一）
+      player.setWakeMode(C.WAKE_MODE_LOCAL);
       DataSource.Factory factory = isRtmp(url)
           ? new RtmpDataSource.Factory()
           : new DefaultDataSource.Factory(getContext());
