@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-ff6f91" alt="license" /></a>
-  <a href="https://github.com/Xenia0922/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.5-ff6f91" alt="release" /></a>
+  <a href="https://github.com/xuqinghhh/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.5-ff6f91" alt="release" /></a>
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
 </p>
 
@@ -48,7 +48,7 @@
 
 从[夸克网盘](https://pan.quark.cn/s/5b103245218a)下载
 
-从 [Releases](https://github.com/Xenia0922/yaya_msg_mobile/releases) 下载：
+从 [Releases](https://github.com/xuqinghhh/yaya_msg_mobile/releases) 下载：
 
 - `yaya-msg-mobile-v2.7.5-universal.apk`：通用包（全 ABI，体积最大）
 - `yaya-msg-mobile-v2.7.5-x64.apk`：x86_64 模拟器专用
@@ -73,7 +73,10 @@ node scripts/build-apk.js
 
 ## 致谢
 
-基于 [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg) 二次开发，感谢原作者的开发与贡献。
+- [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg)：本项目最初的源头，感谢原作者的开发与贡献；
+- [Xenia0922/yaya_msg_mobile](https://github.com/Xenia0922/yaya_msg_mobile)：本项目的直接上游基础，感谢其二次开发工作。
+
+本项目按 GPL-3.0 协议开源，在上述项目基础上继续开发。
 
 ## 免责声明
 

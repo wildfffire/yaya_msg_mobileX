@@ -2,15 +2,15 @@
   "name": "yaya_msg-mobile",
   "version": "2.7.5",
   "description": "口袋48 第三方 React Native 移动客户端",
-  "homepage": "https://github.com/Xenia0922/yaya_msg_mobile",
+  "homepage": "https://github.com/xuqinghhh/yaya_msg_mobile",
   "repository": {
     "type": "git",
-    "url": "https://github.com/Xenia0922/yaya_msg_mobile"
+    "url": "https://github.com/xuqinghhh/yaya_msg_mobile"
   },
   "bugs": {
-    "url": "https://github.com/Xenia0922/yaya_msg_mobile/issues"
+    "url": "https://github.com/xuqinghhh/yaya_msg_mobile/issues"
   },
-  "author": "Xenia",
+  "author": "xuqinghhh",
   "license": "GPL-3.0",
   "private": true,
   "main": "index.ts",

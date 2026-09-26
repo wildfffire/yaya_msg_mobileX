@@ -73,6 +73,10 @@ opencode.json
 # WorkBuddy local memory (not part of source)
 .workbuddy/
 
+# AI 助手本地数据（不入库）
+.codebuddy/
+.firecrawl/
+
 # 开发过程产物（QA 截图 / UI dump / 临时图，不入库）
 scratch/
 _*.png
