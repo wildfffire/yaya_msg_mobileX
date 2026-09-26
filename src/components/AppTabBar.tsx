@@ -29,11 +29,15 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { GlassSurface } from './GlassSurface';
 import { usePalette, motion } from '../theme';
 import { typography } from '../theme/typography';
+import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
+import { useIsLandscape } from '../hooks/useIsLandscape';
 
 export interface TabBarItem {
   key: string;
   label: string;
   icon: (props: { color: string; size: number }) => React.ReactNode;
+  /** 右上角数字角标（如房间 tab 的未读总数）；<=0 不显示 */
+  badge?: number;
 }
 
 export interface AppTabBarProps {
@@ -81,6 +85,11 @@ function TabCell({
     >
       <Animated.View style={[styles.cellIcon, { transform: [{ scale: pop }] }]}>
         {item.icon({ color: active ? palette.tint : palette.labelSecondary, size: 23 })}
+        {typeof item.badge === 'number' && item.badge > 0 ? (
+          <View style={[styles.tabBadge, { backgroundColor: palette.danger }]}>
+            <Text style={styles.tabBadgeText}>{item.badge > 99 ? '99+' : String(item.badge)}</Text>
+          </View>
+        ) : null}
       </Animated.View>
       <Text
         style={[
@@ -101,6 +110,16 @@ function TabCell({
 export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const palette = usePalette();
   const isDark = palette.name === 'dark';
+  // 横屏适配：底栏是悬浮胶囊，横屏时窗口高度只有竖屏的一半左右，
+  // 保持 16px 底部留白 + 64px 栏高会吃掉太多纵向空间，且离侧边挖孔/三键导航条太近。
+  // 这里只调「离底距离」与「左右安全边」，不改变胶囊自身尺寸与指示器位移算法
+  //（指示器位移依赖固定 CELL_W，改尺寸会连带影响拖动手势）。
+  const insets = useSafeAreaInsets();
+  const isLandscape = useIsLandscape();
+  const outerPadding = {
+    paddingBottom: isLandscape ? 8 : 16,
+    paddingHorizontal: Math.max(16, isLandscape ? insets.left : 0),
+  };
 
   const activeIndex = Math.max(0, items.findIndex((it) => it.key === activeKey));
   const maxShift = Math.max(0, (items.length - 1) * CELL_W);
@@ -202,7 +221,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
   const litIndex = hoverIndex ?? activeIndex;
 
   return (
-    <View pointerEvents="box-none" style={[styles.outer, { paddingBottom: 16 }]}>
+    <View pointerEvents="box-none" style={[styles.outer, outerPadding]}>
       {/* 作者结构：tab 与选中指示器都作为玻璃的 children ——
           children 会被排除在 backdrop 捕获之外，玻璃只折射底栏背后的内容，
           不会再把 tab 自己折射一遍。PanResponder 挂在外层容器上。 */}
@@ -309,6 +328,20 @@ const styles = StyleSheet.create({
     borderRadius: 28,
   },
   cellIcon: { alignItems: 'center', justifyContent: 'center' },
+  /** tab 右上角数字角标（房间未读总数等） */
+  tabBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -10,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden',
+  },
+  tabBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', textAlign: 'center' },
 });
 
 // 辅助：复用项目里的 MaterialCommunityIcons

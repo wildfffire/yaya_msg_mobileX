@@ -28,10 +28,13 @@ import { useSettingsStore } from '../store';
 import { usePalette } from '../theme';
 import { setPipPlaying, setPipAspect } from '../utils/pip';
 import { useI18n } from '../i18n';
+import { isLandscapeSize } from '../utils/orientation';
 import { LiveExoView } from '../native/LivePlayer';
 import { getPlayerHtml } from './media/player';
 
 const W = 180;
+/** 横屏小窗基准宽：横屏窗口高只有竖屏一半，180 宽 + 9:16 内容会长到接近整屏高 */
+const LANDSCAPE_W = 132;
 /** 高度按内容比例计算（竖屏内容窄条 -> 高条；横屏内容 16:9） */
 const H_MIN = 104;
 /** 纯音频（上麦/电台）小胶囊尺寸：**更窄更高**的圆角 pill（用户要求「缩短加高」） */
@@ -69,15 +72,46 @@ export function MiniPlayer() {
   const [errorMsg, setErrorMsg] = useState('');
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  /** 横竖屏：横屏窗口高只有竖屏的一半左右（400 vs 860），小窗基准尺寸要跟着收 */
+  const isLandscape = isLandscapeSize(winW, winH);
+  /** 小窗基准宽：竖屏 180；横屏 132（否则 9:16 内容的小窗会长到接近整屏高） */
+  const baseW = isLandscape ? LANDSCAPE_W : W;
+  /**
+   * 小窗最大高度：竖屏沿用 420；横屏按窗口高 62% 夹紧。
+   * 超过阈值就退回 cover 填充（hasNatural=false），与既有的「超高即裁剪」策略一致。
+   */
+  const maxBoxH = Math.round(isLandscape ? Math.min(420, Math.max(H_MIN, winH * 0.62)) : 420);
+
   // 实际渲染尺寸（等比缩放）
-  const boxW = Math.round(W * scale);
+  const boxW = Math.round(baseW * scale);
   const boxHNow = Math.max(H_MIN, Math.round(boxH * scale));
   const boxHNowRef = useRef(boxHNow);
   boxHNowRef.current = boxHNow;
 
   // 初始位置：右下角，避开底部 tab dock
-  const pos = useRef(new Animated.ValueXY({ x: winW - W - 12, y: winH - H_MIN - 90 })).current;
-  const basePos = useRef({ x: winW - W - 12, y: winH - H_MIN - 90 });
+  const pos = useRef(new Animated.ValueXY({ x: winW - baseW - 12, y: winH - H_MIN - 90 })).current;
+  const basePos = useRef({ x: winW - baseW - 12, y: winH - H_MIN - 90 });
+
+  /**
+   * 旋转（横竖屏切换）后重排。
+   * `pos` 是 `useRef` 一次性初始化的 `Animated.ValueXY`，旋转时不会自己按新窗口重算 ——
+   * 小窗会停在旧窗口坐标上（竖屏右下角 → 转横屏后可能飞出屏幕/被切掉一半）。
+   * 全局横屏开启后旋转变频繁，这里按新窗口尺寸把当前位置夹回屏内。
+   * 只做夹紧、不主动吸附边缘：避免用户刚摆好的位置被旋转强行挪到左边/右边。
+   */
+  useEffect(() => {
+    const isAudio = !!info?.audioOnly;
+    const w = isAudio ? CAPSULE_W : Math.round(baseW * scale);
+    const h = isAudio ? CAPSULE_H : Math.max(H_MIN, Math.round(boxHRef.current * scale));
+    const maxX = Math.max(6, winW - w - 6);
+    const maxY = Math.max(6, winH - h - 6);
+    const cur = basePos.current;
+    const nx = Math.max(6, Math.min(maxX, cur.x));
+    const ny = Math.max(6, Math.min(maxY, cur.y));
+    if (nx === cur.x && ny === cur.y) return;
+    basePos.current = { x: nx, y: ny };
+    pos.setValue({ x: nx, y: ny });
+  }, [winW, winH, scale, boxH, info?.audioOnly, pos, baseW]);
 
   const showControls = useCallback(() => {
     setControlsVisible(true);
@@ -240,8 +274,13 @@ export function MiniPlayer() {
   const cycleScale = () => setScale((sv) => (sv >= 1.1 ? SCALE_SMALL : sv < 0.9 ? 1 : SCALE_LARGE));
   // 缩放后夹紧在屏内（放大时不超出右/下边缘）
   useEffect(() => {
-    const maxX = Math.max(6, winW - boxW - 6);
-    const maxY = Math.max(6, winH - boxHNow - 6);
+    // 纯音频胶囊（上麦/电台）必须按**胶囊自身尺寸**夹紧：它的高度远小于视频小窗，
+    // 之前误用 boxHNow（视频高度）→ 胶囊被往上顶 ~60dp，永远贴不到屏幕底部。
+    const audio = !!info?.audioOnly;
+    const cw = audio ? CAPSULE_W : boxW;
+    const ch = audio ? CAPSULE_H : boxHNow;
+    const maxX = Math.max(6, winW - cw - 6);
+    const maxY = Math.max(6, winH - ch - 6);
     const bx = Math.min(Math.max(6, basePos.current.x), maxX);
     const by = Math.min(Math.max(6, basePos.current.y), maxY);
     basePos.current = { x: bx, y: by };
@@ -249,7 +288,7 @@ export function MiniPlayer() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // ⚠️ 依赖必须含 boxW/boxHNow/winW/winH：boxH 按内容自适应变高后，位置若不重新夹紧，
     // 高的小窗会直接戳出屏幕下方/盖住 dock（用户反馈「小窗空间有问题」）。
-  }, [scale, boxW, boxHNow, winW, winH]);
+  }, [scale, boxW, boxHNow, winW, winH, info?.audioOnly]);
 
   /**
    * 交棒时带上大窗已知的视频宽高 → **立刻**按比例适配容器（不等 onLoad）。
@@ -262,7 +301,7 @@ export function MiniPlayer() {
     if (!(w > 0 && h > 0)) {
       // 兜底：成员直播（手机摄像头）默认竖屏 9:16 —— 横条窗会把竖屏内容裁得只剩中间一条
       if (info?.isLive && !info?.audioOnly) {
-        const ph = Math.round(W * 16 / 9);
+        const ph = Math.round(baseW * 16 / 9);
         boxHRef.current = ph;
         setBoxH(ph);
         setHasNatural(true);
@@ -272,8 +311,8 @@ export function MiniPlayer() {
       }
       return;
     }
-    const rawH = Math.round((W * h) / w);
-    if (rawH > 420) {
+    const rawH = Math.round((baseW * h) / w);
+    if (rawH > maxBoxH) {
       boxHRef.current = H_MIN;
       setBoxH(H_MIN);
       setHasNatural(false);
@@ -285,7 +324,9 @@ export function MiniPlayer() {
     }
     setPipAspect(w, h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [info?.url, info?.aspectW, info?.aspectH]);
+    // baseW / maxBoxH 必须进依赖：旋转（横竖屏切换）会改变小窗基准宽与高度上限，
+    // 不进依赖则旋转后仍按旧基准算 → 小窗尺寸不跟着窗口变。
+  }, [info?.url, info?.aspectW, info?.aspectH, baseW, maxBoxH]);
 
   // 最后一个 hooks 结束于此；其后不允许再出现任何 hook（早退点）
   if (!visible || !info) return null;
@@ -338,8 +379,8 @@ export function MiniPlayer() {
               const w = e.nativeEvent?.width;
               const h = e.nativeEvent?.height;
               if (w > 0 && h > 0) {
-                const rawH = Math.round((W * h) / w);
-                if (rawH > 420) {
+                const rawH = Math.round((baseW * h) / w);
+                if (rawH > maxBoxH) {
                   boxHRef.current = H_MIN;
                   setBoxH(H_MIN);
                   setHasNatural(false);
@@ -376,8 +417,8 @@ export function MiniPlayer() {
             // 按内容比例自适应小窗高度：竖屏内容竖着小窗、横屏 16:9，比例完全贴合 → contain 无黑边
             const ns = e?.naturalSize;
             if (ns && Number(ns.width) > 0 && Number(ns.height) > 0) {
-              const rawH = Math.round((W * Number(ns.height)) / Number(ns.width));
-              if (rawH > 420) {
+              const rawH = Math.round((baseW * Number(ns.height)) / Number(ns.width));
+              if (rawH > maxBoxH) {
                 // 超长内容（极高宽比）：cover 填满默认容器，避免小窗过高遮挡
                 boxHRef.current = H_MIN;
                 setBoxH(H_MIN);

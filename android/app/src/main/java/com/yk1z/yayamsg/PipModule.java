@@ -151,6 +151,11 @@ public class PipModule extends ReactContextBaseJavaModule {
         RemoteAction action = buildToggleAction();
         if (action != null) b.setActions(java.util.Collections.singletonList(action));
       }
+      // Android 12+：播放中自动进入 PiP（平滑转场，不再依赖 onUserLeaveHint 的时序兜底）。
+      // autoEnterEnabled 会让系统在用户上滑/Home 时直接无缝缩放进画中画。
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        b.setAutoEnterEnabled(videoPlaying && pipEnabled);
+      }
       return b.build();
     } catch (Exception e) {
       return new PictureInPictureParams.Builder().build();
@@ -195,12 +200,17 @@ public class PipModule extends ReactContextBaseJavaModule {
    *  AppState 'background' 不会触发（PiP 下 RN AppState 仍为 active），不能用它驱动盖层。 */
   public static void emitPipChanged(boolean entered) {
     if (savedReactContext == null) return;
-    main.post(() -> {
+    Runnable emit = () -> {
       try {
         savedReactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter.class)
             .emit(EVENT_PIP_CHANGED, entered);
       } catch (Throwable ignored) {}
-    });
+    };
+    // 生命周期回调本来就在主线程：同步发。此前一律 main.post() 会让 PiP 事件排在
+    // onPause（→ RN AppState 'background'）之后入队，JS 侧 AppState 分支拿不到
+    // 「已在 PiP」的状态而误触发后台化联动（用户反馈「系统小窗中断直播」链路之一）。
+    if (Looper.myLooper() == Looper.getMainLooper()) emit.run();
+    else main.post(emit);
   }
 }

@@ -39,11 +39,14 @@ import { useSafeAreaInsets } from './src/hooks/useSafeAreaInsets';
 // 因此在顶层提供纯 JS 经验值上下文，让 react-navigation 走「已有 insets → 普通 View」分支。
 import { SafeAreaInsetsContext } from 'react-native-safe-area-context';
 
-// v2.6.5: 给 react-navigation 提供安全区上下文（纯 JS 经验值，无原生依赖）
+// v2.6.5: 给 react-navigation 提供安全区上下文（纯 JS 经验值，无原生依赖）。
+// 横屏时真实风险在左右两侧（挖孔/三键导航条横屏会挪到侧边），所以 left/right 必须透传 ——
+// 之前写死 0，导致用 `react-native-safe-area-context` 的 useSafeAreaInsets 的消费方
+//（DanmakuListSheet / MediaScreen）在横屏拿不到侧边避让值。
 function SafeAreaBridge({ children }: { children: React.ReactNode }) {
   const insets = useSafeAreaInsets();
   return (
-    <SafeAreaInsetsContext.Provider value={{ top: insets.top, right: 0, bottom: insets.bottom, left: 0 }}>
+    <SafeAreaInsetsContext.Provider value={{ top: insets.top, right: insets.right, bottom: insets.bottom, left: insets.left }}>
       {children}
     </SafeAreaInsetsContext.Provider>
   );

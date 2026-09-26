@@ -11,6 +11,8 @@ import { useSafeAreaInsets } from '../../hooks/useSafeAreaInsets';
 import { enqueueDownload } from '../../services/downloads';
 import { useUiStore } from '../../store';
 import { errorMessage } from '../../utils/data';
+import { isLandscapeSize } from '../../utils/orientation';
+import { useDanmakuSettings } from '../../store/danmakuSettings';
 
 interface Props {
   features?: PlayerFeatures;
@@ -21,6 +23,13 @@ interface Props {
     active?: boolean;
     onPress: () => void;
   }>;
+  /** 顶栏左上按钮（返回键右侧、标题前）：如公告开关，收起后仍可随时点开（2026-09-26） */
+  topLeftAction?: {
+    icon: string;
+    label: string;
+    active?: boolean;
+    onPress: () => void;
+  };
   onClose?: () => void;
   /** 内嵌模式：不渲染顶栏（列表页内嵌播放器），仅底坞 + 全屏 */
   inline?: boolean;
@@ -41,7 +50,7 @@ const TINT = '#ff6f91';
  * 唯一播放器控制层（重写核心）：渐变遮罩顶栏 + 悬浮底坞（可拖进度/倍速/弹幕/全屏）+ 更多面板。
  * 所有页面共用；能力按 features 声明渲染。
  */
-export function PlayerChrome({ features = {}, extraActions = [], onClose, inline = false, onRetry, barrageInput }: Props) {
+export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, onClose, inline = false, onRetry, barrageInput }: Props) {
   const { t } = useI18n();
   const palette = usePalette();
   const meta = usePlayerStore((s) => s.meta);
@@ -53,13 +62,17 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
   const fullscreen = usePlayerStore((s) => s.fullscreen);
   const source = usePlayerStore((s) => s.source);
   const useWebKernel = usePlayerStore((s) => s.useWebKernel);
-  const danmakuOn = usePlayerStore((s) => s.danmakuOn);
   const rate = usePlayerStore((s) => s.rate);
   const rotateDeg = usePlayerStore((s) => s.rotateDeg);
   const mirrorMode = usePlayerStore((s) => s.mirrorMode);
+  // 弹幕显示开关：唯一来源 = 弹幕设置（useDanmakuSettings，AsyncStorage 持久化）。
+  // 与 DanmakuSettingsSheet 里的「显示弹幕」总开关是同一个值 —— 两处不会再互相打架。
+  const danmakuOn = useDanmakuSettings((s) => s.enabled);
   const [moreVisible, setMoreVisible] = useState(false);
   const [rateSheetVisible, setRateSheetVisible] = useState(false);
-  const { width: screenW } = useWindowDimensions();
+  const { width: screenW, height: screenH } = useWindowDimensions();
+  /** 横屏专用布局开关：横屏走「顶栏压缩 + 底坞单行 + 右侧快捷栏」 */
+  const isLandscape = isLandscapeSize(screenW, screenH);
   // 安全区：顶栏保留「系统通知栏」冗余（避免弹幕/标题压到状态栏），底坞避开手势导航条
   const insets = useSafeAreaInsets();
   /**
@@ -216,7 +229,19 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
     setTimeout(() => {
       if (tapRef.current && tapRef.current.t === now) {
         tapRef.current = null;
-        showControls();
+        /**
+         * 单击 = 切换沉浸。
+         * 以前只做「唤出控制条」，想进沉浸只能干等 CONTROLS_HIDE_MS(3.5s) 自动隐藏
+         *（用户反馈「直播中点一下屏幕要进入沉浸状态，现在只有放置一段时间自动进入」）。
+         * 现在：控制条可见 → 立刻收起（进沉浸）；已隐藏 → 唤出。双击仍然只做 ±10s。
+         */
+        const st = usePlayerStore.getState();
+        if (st.controlsVisible) {
+          if (hideTimer.current) clearTimeout(hideTimer.current);
+          st.toggleControls(false);
+        } else {
+          showControls();
+        }
       }
     }, 320);
   }, [showControls]);
@@ -284,7 +309,9 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
   };
 
   const toggleDanmaku = () => {
-    usePlayerStore.getState().toggleDanmaku();
+    // 写持久化的弹幕总开关（与设置面板同一来源；原先写 playerStore.danmakuOn 会被 open() 重置）
+    const s = useDanmakuSettings.getState();
+    s.set({ enabled: !s.enabled });
     showControls();
   };
 
@@ -329,14 +356,101 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
   // 让 PanResponder 经 ref 拿到本次渲染的最新实现（须在定义之后、早退之前赋值）
   progCtl.current = { down: onProgDown, move: onProgMove, up: onProgUp };
 
+  /* ==================== 横屏专用布局派生值 ==================== */
+  /**
+   * 左右安全边：横屏时挖孔/三键导航条会挪到侧边（竖屏它在底部），
+   * 顶栏 / 底坞统一按 `insets.left` 内缩。竖屏 `insets.left = 0` → 仍是原来的 16。
+   */
+  const hPad = isLandscape ? Math.max(insets.left, 16) : 16;
+  /**
+   * 顶栏顶部留白：横屏全屏是沉浸态（状态栏已隐藏）→ 只需 8；
+   * 非沉浸（页面级播放器直接旋转到横屏）仍要避让状态栏，否则返回钮会压进通知栏。
+   */
+  const topPad = isLandscape ? (fullscreen ? 8 : insets.top + 6) : insets.top + 6;
+  /** 底部渐变压暗层高度：横屏窗口矮，竖屏的 200 会糊掉大半个画面 */
+  const shadeH = isLandscape ? 120 : 200;
+
+  /**
+   * 进度行：竖屏独占一行（底坞第一行）；横屏内联进控制行中段。
+   * 抽成变量避免两套布局各写一遍（也避免同时挂载两个 `progTrackRef`）。
+   */
+  const progressRow = !isLive ? (
+    <View style={styles.progressRow}>
+      <Text style={styles.timeText}>{formatPlayTime(shownPos)}</Text>
+      <View
+        ref={progTrackRef}
+        style={styles.progressTouch}
+        onLayout={(e) => {
+          progW.current = e.nativeEvent.layout.width;
+          progTrackRef.current?.measureInWindow?.((x) => { progX.current = x; });
+        }}
+        {...progPan.panHandlers}
+      >
+        <View style={styles.progressTrackBg}>
+          <View style={[styles.progressFill, { width: `${shownRatio * 100}%` }]} />
+        </View>
+        <View style={[styles.progressThumb, { left: `${shownRatio * 100}%` }]} />
+      </View>
+      <Text style={styles.timeText}>{formatPlayTime(duration)}</Text>
+    </View>
+  ) : null;
+
+  /** 控制行右侧功能组（竖屏/横屏共用）：倍速 / 弹幕开关 / 小窗 / 全屏 */
+  const rightControls = (
+    <>
+      {features.rate && !isLive && !useWebKernel ? (
+        <TouchableOpacity style={styles.ctrlBtn} onPress={() => setRateSheetVisible(true)} activeOpacity={0.75}>
+          <Text style={[styles.rateText, rate !== 1 && { color: TINT }]}>{rate}x</Text>
+        </TouchableOpacity>
+      ) : null}
+      {features.danmaku && !useWebKernel ? (
+        <TouchableOpacity style={styles.ctrlBtn} onPress={toggleDanmaku} activeOpacity={0.75}>
+          <MaterialCommunityIcons
+            name={danmakuOn ? 'comment-text-multiple' : 'comment-text-multiple-outline'}
+            size={20}
+            color={danmakuOn ? TINT : 'rgba(255,255,255,0.9)'}
+          />
+        </TouchableOpacity>
+      ) : null}
+      {/* 「小窗」按钮直接放 dock（用户反馈「小窗在软件内点没用」真因之一：原 extraActions
+          藏在右上「...」二级菜单，用户找不到）。从 extraActions 提 pip 渲染到 dock 直达。 */}
+      {(() => {
+        const pipAction = extraActions.find((a) => a.key === 'pip');
+        if (!pipAction) return null;
+        return (
+          <TouchableOpacity
+            style={styles.ctrlBtn}
+            onPress={() => { pipAction.onPress(); showControls(); }}
+            activeOpacity={0.75}
+          >
+            <MaterialCommunityIcons name="picture-in-picture-bottom-right-outline" size={20} color="rgba(255,255,255,0.92)" />
+          </TouchableOpacity>
+        );
+      })()}
+      {!inline || fullscreen ? (
+        <TouchableOpacity style={styles.ctrlBtn} onPress={toggleFullscreen} activeOpacity={0.75}>
+          <MaterialCommunityIcons name={fullscreen ? 'fullscreen-exit' : 'fullscreen'} size={21} color="rgba(255,255,255,0.92)" />
+        </TouchableOpacity>
+      ) : null}
+    </>
+  );
+
   return (
     <>
       {/* 顶栏：常规/卡片全屏均显示（卡片全屏必须有返回钮，否则无法退出） */}
       {!inline || fullscreen ? (
-        <Animated.View style={[styles.topWrap, { opacity: controlsOpacity, paddingTop: insets.top + 6 }]} pointerEvents={controlsVisible ? 'auto' : 'none'}>
+        <Animated.View
+          style={[
+            styles.topWrap,
+            { opacity: controlsOpacity, paddingTop: topPad },
+            isLandscape ? styles.topWrapLandscape : null,
+            isLandscape ? { paddingHorizontal: hPad } : null,
+          ]}
+          pointerEvents={controlsVisible ? 'auto' : 'none'}
+        >
           <LinearGradient colors={['rgba(0,0,0,0.55)', 'rgba(0,0,0,0)']} style={StyleSheet.absoluteFill} />
           <TouchableOpacity
-            style={styles.topBtn}
+            style={[styles.topBtn, isLandscape ? styles.topBtnLandscape : null]}
             onPress={() => {
               // 卡片全屏：返回 = 退出全屏回卡片；页面播放器：返回 = 关闭（onClose）
               if (inline && fullscreen) usePlayerStore.getState().setFullscreen(false);
@@ -344,16 +458,41 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
               else usePlayerStore.getState().close();
             }}
           >
-            <MaterialCommunityIcons name={inline ? 'chevron-down' : 'chevron-down'} size={24} color="#fff" />
+            <MaterialCommunityIcons name={inline ? 'chevron-down' : 'chevron-down'} size={isLandscape ? 21 : 24} color="#fff" />
           </TouchableOpacity>
+          {/* 顶栏左上按钮（如公告开关）：公告收起后仍可随时从这里点开（用户反馈「关闭后看不到」） */}
+          {topLeftAction ? (
+            <TouchableOpacity
+              style={[styles.topBtn, isLandscape ? styles.topBtnLandscape : null]}
+              accessibilityLabel={topLeftAction.label}
+              onPress={topLeftAction.onPress}
+            >
+              <MaterialCommunityIcons
+                name={topLeftAction.icon as any}
+                size={21}
+                color={topLeftAction.active ? palette.tint : '#fff'}
+              />
+            </TouchableOpacity>
+          ) : null}
           <View style={styles.titleWrap}>
             <Text style={styles.titleText} numberOfLines={1}>{meta.title}</Text>
+            {/* 小指标胶囊：直播=聊天室在线人数；录播=累计播放数（官方数据，见 PlayerMeta.stat） */}
+            {meta.stat ? (
+              <View style={styles.onlinePill}>
+                <MaterialCommunityIcons name={meta.stat.icon as any} size={11} color="rgba(255,255,255,0.92)" />
+                <Text style={styles.onlineText} numberOfLines={1}>{meta.stat.text}</Text>
+              </View>
+            ) : null}
           </View>
-          <TouchableOpacity style={styles.topBtn} onPress={() => setMoreVisible(true)}>
+          <TouchableOpacity style={[styles.topBtn, isLandscape ? styles.topBtnLandscape : null]} onPress={() => setMoreVisible(true)}>
             <MaterialCommunityIcons name="dots-horizontal" size={22} color="#fff" />
           </TouchableOpacity>
         </Animated.View>
       ) : null}
+
+      {/* 说明：横屏曾有一版「右侧竖向快捷栏」，按用户要求已移除 ——
+          礼物/贡献榜/公告/弹幕设置/弹幕列表/清晰度统一留在右上「…」的更多面板里，
+          横屏不再另起一级入口（避免两套入口语义重复、也少挡画面）。 */}
 
       {/* 错误浮层 */}
       {error ? (
@@ -435,76 +574,51 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
         <Animated.View pointerEvents="none" style={{ opacity: controlsOpacity }}>
           <LinearGradient
             colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.68)']}
-            style={styles.bottomShade}
+            style={[styles.bottomShade, isLandscape ? { height: shadeH } : null]}
           />
         </Animated.View>
-        <Animated.View style={[styles.dockWrap, { opacity: controlsOpacity, paddingBottom: Math.max(insets.bottom, 12) + 4 + kbHeight }]} pointerEvents="box-none">
-          {/* 进度行：当前时间 —— 可拖进度 —— 总时间（直播仅显示 直播） */}
-          {!isLive ? (
-          <View style={styles.progressRow}>
-            <Text style={styles.timeText}>{formatPlayTime(shownPos)}</Text>
-            <View
-              ref={progTrackRef}
-              style={styles.progressTouch}
-              onLayout={(e) => {
-                progW.current = e.nativeEvent.layout.width;
-                progTrackRef.current?.measureInWindow?.((x) => { progX.current = x; });
-              }}
-              {...progPan.panHandlers}
-            >
-              <View style={styles.progressTrackBg}>
-                <View style={[styles.progressFill, { width: `${shownRatio * 100}%` }]} />
-              </View>
-              <View style={[styles.progressThumb, { left: `${shownRatio * 100}%` }]} />
-            </View>
-            <Text style={styles.timeText}>{formatPlayTime(duration)}</Text>
-          </View>
-          ) : null}
-          {/* 直播弹幕输入条：与控制条同一个底坞容器 → 一起自动隐藏/呼出 */}
-          {barrageInput ? <View style={styles.dockBarrageRow}>{barrageInput}</View> : null}
-          {/* 控制行：播放/暂停（主按钮）+ 右侧功能 */}
+        {/* 底坞：竖屏 = 三行（进度行 / 弹幕输入条 / 控制行）；横屏 = 单行
+            （左：播放钮 / 中：录播进度条 或 直播弹幕输入条 / 右：功能组） */}
+        <Animated.View
+          style={[
+            styles.dockWrap,
+            {
+              opacity: controlsOpacity,
+              // 竖屏：底坞要避开底部手势导航条（insets.bottom≈48）。
+              // 横屏：导航条已挪到侧边（由 hPad 处理），底部只需一点呼吸空间 ——
+              // 再按 48 算会在 400dp 高的横屏窗口里白吃掉 1/8 高度。
+              paddingBottom: (isLandscape ? 12 : Math.max(insets.bottom, 12)) + 4 + kbHeight,
+            },
+            isLandscape ? { paddingHorizontal: hPad } : null,
+          ]}
+          pointerEvents="box-none"
+        >
+          {/* 竖屏：进度行独占一行（横屏它内联在下面的控制行中段） */}
+          {!isLandscape ? progressRow : null}
+          {/* 竖屏：直播弹幕输入条叠在控制行之上（横屏它占据控制行中段） */}
+          {!isLandscape && barrageInput ? <View style={styles.dockBarrageRow}>{barrageInput}</View> : null}
+          {/* 控制行：播放/暂停（主按钮）+ 中间区 + 右侧功能 */}
           <View style={styles.ctrlRow}>
-            <TouchableOpacity style={styles.playBtn} onPress={togglePlay} activeOpacity={0.85}>
-              <MaterialCommunityIcons name={playing ? 'pause' : 'play'} size={24} color="#16181c" style={!playing ? { marginLeft: 3 } : undefined} />
+            <TouchableOpacity
+              style={[styles.playBtn, isLandscape ? styles.playBtnLandscape : null]}
+              onPress={togglePlay}
+              activeOpacity={0.85}
+            >
+              <MaterialCommunityIcons name={playing ? 'pause' : 'play'} size={isLandscape ? 22 : 24} color="#16181c" style={!playing ? { marginLeft: 3 } : undefined} />
             </TouchableOpacity>
-            <Text style={styles.ctrlHintText} numberOfLines={1}>
-              {source.audioOnly ? t('纯音频') : ''}
-            </Text>
-            <View style={{ flex: 1 }} />
-            {features.rate && !isLive && !useWebKernel ? (
-              <TouchableOpacity style={styles.ctrlBtn} onPress={() => setRateSheetVisible(true)} activeOpacity={0.75}>
-                <Text style={[styles.rateText, rate !== 1 && { color: TINT }]}>{rate}x</Text>
-              </TouchableOpacity>
-            ) : null}
-            {features.danmaku && !useWebKernel ? (
-              <TouchableOpacity style={styles.ctrlBtn} onPress={toggleDanmaku} activeOpacity={0.75}>
-                <MaterialCommunityIcons
-                  name={danmakuOn ? 'comment-text-multiple' : 'comment-text-multiple-outline'}
-                  size={20}
-                  color={danmakuOn ? TINT : 'rgba(255,255,255,0.9)'}
-                />
-              </TouchableOpacity>
-            ) : null}
-            {/* 「小窗」按钮直接放 dock（用户反馈「小窗在软件内点没用」真因之一：原 extraActions
-                藏在右上「...」二级菜单，用户找不到）。从 extraActions 提 pip 渲染到 dock 直达。 */}
-            {(() => {
-              const pipAction = extraActions.find((a) => a.key === 'pip');
-              if (!pipAction) return null;
-              return (
-                <TouchableOpacity
-                  style={styles.ctrlBtn}
-                  onPress={() => { pipAction.onPress(); showControls(); }}
-                  activeOpacity={0.75}
-                >
-                  <MaterialCommunityIcons name="picture-in-picture-bottom-right-outline" size={20} color="rgba(255,255,255,0.92)" />
-                </TouchableOpacity>
-              );
-            })()}
-            {!inline || fullscreen ? (
-              <TouchableOpacity style={styles.ctrlBtn} onPress={toggleFullscreen} activeOpacity={0.75}>
-                <MaterialCommunityIcons name={fullscreen ? 'fullscreen-exit' : 'fullscreen'} size={21} color="rgba(255,255,255,0.92)" />
-              </TouchableOpacity>
-            ) : null}
+            {isLandscape ? (
+              <View style={styles.dockCenterLandscape}>
+                {barrageInput ? barrageInput : progressRow}
+              </View>
+            ) : (
+              <>
+                <Text style={styles.ctrlHintText} numberOfLines={1}>
+                  {source.audioOnly ? t('纯音频') : ''}
+                </Text>
+                <View style={{ flex: 1 }} />
+              </>
+            )}
+            {rightControls}
           </View>
         </Animated.View>
       </View>
@@ -513,7 +627,7 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
       {/* 倍速抽屉（点播/回放） */}
       <Modal visible={rateSheetVisible} transparent animationType="slide" onRequestClose={() => setRateSheetVisible(false)}>
         <TouchableOpacity activeOpacity={1} style={styles.rateMask} onPress={() => setRateSheetVisible(false)}>
-          <View style={[styles.rateSheet, { backgroundColor: palette.surface }]}>
+          <View style={[styles.rateSheet, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}>
             <Text style={[styles.rateSheetTitle, { color: palette.labelSecondary }]}>{t('播放速度')}</Text>
             <View style={styles.rateGrid}>
               {RATES.map((r) => (
@@ -534,7 +648,7 @@ export function PlayerChrome({ features = {}, extraActions = [], onClose, inline
       {/* 更多面板 */}
       <Modal visible={moreVisible} transparent animationType="slide" onRequestClose={() => setMoreVisible(false)}>
         <View style={styles.modalShade}>
-          <View style={[styles.morePanel, { backgroundColor: palette.surface }]}>
+          <View style={[styles.morePanel, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}>
             <View style={styles.moreHeader}>
               <Text style={[styles.moreTitle, { color: palette.label }]}>{t('播放器功能')}</Text>
               <TouchableOpacity onPress={() => setMoreVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -625,17 +739,28 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center',
     paddingBottom: 24, paddingHorizontal: 8,
   },
+  /** 横屏：顶栏收紧（横屏窗口矮，竖屏那 24px 底部留白纯浪费） */
+  topWrapLandscape: { paddingBottom: 12 },
   topBtn: {
     width: 40, height: 40, borderRadius: 20,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(20,20,24,0.34)',
     shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 5, shadowOffset: { width: 0, height: 1 },
   },
+  /** 横屏：36×36（40 在横屏偏大，视觉上会盖住画面） */
+  topBtnLandscape: { width: 36, height: 36, borderRadius: 18 },
   titleWrap: { flex: 1, marginHorizontal: 10, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
   titleText: {
     color: '#fff', fontSize: 14, fontWeight: '600', flexShrink: 1,
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4,
   },
+  /** 在线人数胶囊：贴在标题右侧，不抢标题宽度（flexShrink 保住标题省略号） */
+  onlinePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3, flexShrink: 0,
+    marginLeft: 8, paddingHorizontal: 7, paddingVertical: 2, borderRadius: 999,
+    backgroundColor: 'rgba(20,20,24,0.42)',
+  },
+  onlineText: { color: 'rgba(255,255,255,0.92)', fontSize: 11, fontWeight: '700' },
   bottomShade: {
     position: 'absolute', left: 0, right: 0, bottom: 0, height: 200,
   },
@@ -659,12 +784,19 @@ const styles = StyleSheet.create({
     shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 3, shadowOffset: { width: 0, height: 1 },
   },
   ctrlRow: { flexDirection: 'row', alignItems: 'center', marginTop: 0 },
+  /**
+   * 横屏底坞中段：录播放「时间 + 进度条 + 时间」，直播放弹幕输入条。
+   * flex:1 让它吃掉播放钮与右侧功能组之间的全部宽度。
+   */
+  dockCenterLandscape: { flex: 1, marginHorizontal: 12, justifyContent: 'center' },
   playBtn: {
     width: 46, height: 46, borderRadius: 23,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.94)',
     shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 7, shadowOffset: { width: 0, height: 2 },
   },
+  /** 横屏：播放钮略小（与 36 的顶栏钮同级，底栏整体更薄） */
+  playBtnLandscape: { width: 40, height: 40, borderRadius: 20 },
   ctrlHintText: { color: 'rgba(255,255,255,0.6)', fontSize: 11, marginLeft: 8, flexShrink: 1 },
   ctrlBtn: { width: 40, height: 40, borderRadius: 20, alignItems: 'center', justifyContent: 'center' },
   rateText: { color: '#fff', fontSize: 12, fontWeight: '700', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 3 },
@@ -710,6 +842,8 @@ const styles = StyleSheet.create({
   morePanel: {
     borderTopLeftRadius: 18, borderTopRightRadius: 18, paddingBottom: 28, paddingTop: 14,
   },
+  /** 横屏：底部弹层不再横跨整个宽屏（800px 宽的「更多」菜单很难扫读），收窄居中 */
+  sheetLandscape: { maxWidth: 460, width: '100%', alignSelf: 'center' },
   moreHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 18, paddingBottom: 10,

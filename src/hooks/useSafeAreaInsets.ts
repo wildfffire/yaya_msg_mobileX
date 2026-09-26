@@ -14,8 +14,20 @@
  *
  * 数据有偏差但足够定位内容 —— 玻璃底栏 / Toast / MiniPlayer 已用这些值，不会出现
  * "No safe area value available" 启动崩溃。
+ *
+ * 横屏（全局横屏改造新增）：
+ *  - Android 横屏时状态栏仍在顶部（高度基本不变），因此 `top` 不归零 —— 归零会让所有页面
+ *    的内容上滑压进状态栏。播放器进入全屏沉浸后才需要去掉顶部留白，那是 `PlayerChrome`
+ *    横屏分支自己处理（按 `fullscreen` 判定），不属于本 hook 的职责。
+ *  - 横屏真正的风险在左右两侧：挖孔/圆角/三键导航条会贴到侧边（三键导航竖屏在底部、
+ *    横屏会挪到左侧或右侧）。而 `top/bottom` 无法表达左右，故横屏时给 `left/right` 一个
+ *    保守常量。全仓现有消费方只读 `top/bottom`，`left/right` 此前恒为 0、无人使用，
+ *    因此这里新增值不会影响任何既有竖屏布局。
+ *  - 不引入 react-native-safe-area-context 的 `useSafeAreaInsets`：App 根节点没有
+ *    SafeAreaProvider，直接调用会抛 "No safe area value available" 启动崩溃。
  */
-import { Platform, StatusBar } from 'react-native';
+import { Platform, StatusBar, useWindowDimensions } from 'react-native';
+import { isLandscapeSize } from '../utils/orientation';
 
 export interface SafeAreaInsets {
   top: number;
@@ -26,6 +38,11 @@ export interface SafeAreaInsets {
 
 const ANDROID_NAV_BAR = 48;
 const IOS_HOME_INDICATOR = 34;
+/**
+ * 横屏左右安全边保守估计：覆盖 Android 三键导航条（横屏挪到侧边）与主流挖孔/圆角避让。
+ * 取值偏小是有意的 —— 宁可让控件靠近边缘，也不要无谓地把横屏可用宽度再切掉 96dp。
+ */
+const LANDSCAPE_SIDE_INSET = 32;
 
 export function useSafeAreaInsets(): SafeAreaInsets {
   const top =
@@ -33,5 +50,9 @@ export function useSafeAreaInsets(): SafeAreaInsets {
       ? StatusBar.currentHeight || 44
       : StatusBar.currentHeight || 24;
   const bottom = Platform.OS === 'ios' ? IOS_HOME_INDICATOR : ANDROID_NAV_BAR;
+  const { width, height } = useWindowDimensions();
+  if (isLandscapeSize(width, height)) {
+    return { top, bottom, left: LANDSCAPE_SIDE_INSET, right: LANDSCAPE_SIDE_INSET };
+  }
   return { top, bottom, left: 0, right: 0 };
 }

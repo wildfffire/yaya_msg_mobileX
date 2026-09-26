@@ -29,6 +29,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useI18n } from '../i18n';
+import { useIsLandscape } from '../hooks/useIsLandscape';
 
 export interface DanmakuListEntry {
   id: string;
@@ -118,11 +119,18 @@ export function DanmakuListSheet({
 }: DanmakuListSheetProps) {
   const { t } = useI18n();
   const insets = useSafeAreaInsets();
-  const { height: screenH } = useWindowDimensions();
+  const { width: screenW, height: screenH } = useWindowDimensions();
+  const isLandscape = useIsLandscape();
 
   const MIN_H = Math.round(screenH * 0.3);
   const MAX_H = Math.round(screenH * 0.86);
   const [panelH, setPanelH] = useState(Math.round(screenH * 0.52));
+  /**
+   * 横屏改用右侧抽屉（而不是底部抽屉）：
+   * 横屏窗口高度只有竖屏一半左右，「底部 52% 高」的面板会盖掉多半画面 + 挡住所看内容。
+   * 右侧抽屉占 42% 宽度、满高，是横屏播放器的行业惯例（B站/YouTube 同款）。
+   */
+  const drawerW = Math.round(Math.min(420, Math.max(280, screenW * 0.42)));
   const panelHRef = useRef(panelH);
   panelHRef.current = panelH;
 
@@ -240,11 +248,13 @@ export function DanmakuListSheet({
           dragStartRef.current = panelHRef.current;
         },
         onPanResponderMove: (_e, g) => {
+          // 横屏是右侧满高抽屉：没有「高度」可拖（拖高度会把它变成窄条，反而怪）
+          if (isLandscape) return;
           const next = Math.min(MAX_H, Math.max(MIN_H, dragStartRef.current - g.dy));
           setPanelH(next);
         },
       }),
-    [MAX_H, MIN_H],
+    [MAX_H, MIN_H, isLandscape],
   );
 
   const renderRow = useCallback(
@@ -315,11 +325,25 @@ export function DanmakuListSheet({
   );
 
   const body = (
-    <View style={[styles.sheet, { height: panelH, paddingBottom: Math.max(insets.bottom, 8) }]}>
-      {/* 拖拽手柄 + 标题行 */}
-      <View {...pan.panHandlers} style={styles.handleArea}>
-        <View style={styles.handle} />
-      </View>
+    <View
+      style={[
+        styles.sheet,
+        isLandscape
+          ? { width: drawerW, height: screenH, paddingBottom: Math.max(insets.bottom, 8) }
+          // panelH 是 useState 首帧算的（竖屏高度×0.52）：旋转后可能低于 MIN_H /
+          // 高于 MAX_H，这里统一夹紧，避免出现「矮条面板」或越过上限。
+          : { height: Math.min(Math.max(panelH, MIN_H), MAX_H), paddingBottom: Math.max(insets.bottom, 8) },
+        isLandscape && styles.sheetLandscape,
+      ]}
+    >
+      {/* 拖拽手柄 + 标题行（横屏右侧抽屉不做高度拖拽，保留同高占位对齐标题） */}
+      {isLandscape ? (
+        <View style={styles.handleArea} />
+      ) : (
+        <View {...pan.panHandlers} style={styles.handleArea}>
+          <View style={styles.handle} />
+        </View>
+      )}
       <View style={styles.headerRow}>
         <MaterialCommunityIcons name="comment-text-multiple-outline" size={15} color="rgba(255,255,255,0.85)" />
         <Text style={styles.title} numberOfLines={1}>
@@ -439,7 +463,7 @@ export function DanmakuListSheet({
 
   return (
     <Modal visible={visible} transparent animationType="slide" statusBarTranslucent onRequestClose={onClose}>
-      <View style={styles.root}>
+      <View style={[styles.root, isLandscape && styles.rootLandscape]}>
         {/* 点空白处关闭；面板自身是兄弟节点，不会误触关闭 */}
         <Pressable style={styles.backdrop} onPress={onClose} />
         {body}
@@ -450,6 +474,8 @@ export function DanmakuListSheet({
 
 const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: 'flex-end' },
+  /** 横屏：右侧抽屉 —— 底板横排、面板贴右 */
+  rootLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
   backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)' },
   sheet: {
     backgroundColor: 'rgba(18,18,20,0.96)',
@@ -457,6 +483,8 @@ const styles = StyleSheet.create({
     borderTopRightRadius: 20,
     overflow: 'hidden',
   },
+  /** 横屏右侧抽屉：只有左侧两角圆角（右侧贴屏幕边缘） */
+  sheetLandscape: { borderTopRightRadius: 0, borderBottomLeftRadius: 20, borderBottomRightRadius: 0 },
   // 手柄命中区做高一些（22px）：太窄会「拖不动面板」
   handleArea: { alignItems: 'center', justifyContent: 'center', height: 22 },
   handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.35)' },

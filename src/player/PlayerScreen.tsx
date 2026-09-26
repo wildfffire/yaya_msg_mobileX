@@ -2,6 +2,7 @@ import React, { ReactNode, useEffect, useRef } from 'react';
 import { Modal, StyleSheet, View } from 'react-native';
 import { usePlayerStore } from './store/playerStore';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
+import { useUiStore } from '../store';
 import { PlayerCore } from './core/PlayerCore';
 import { PlayerChrome } from './chrome/PlayerChrome';
 import { FullscreenManager } from './chrome/FullscreenManager';
@@ -39,7 +40,7 @@ interface Props extends PlayerScreenProps {
  *   onClose={() => ...}
  * />
  */
-export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], onClose, children, persistent = false, inline = false, onVideoSize, resumeAt, onRetry, barrageInput }: Props) {
+export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], topLeftAction, onClose, children, persistent = false, inline = false, onVideoSize, resumeAt, onRetry, barrageInput }: Props) {
   // 播放错误自动重解析（假死/URL 失效场景）：RTMP 流 URL 带 wsSecret 且多为单次有效，
   // 原生重连同 URL 只会再拿一帧；有 onRetry（页面重新解析新地址）时自动触发，同源最多 2 次。
   const dbgState = usePlayerStore((s) => s.state);
@@ -57,6 +58,18 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
     const t = setTimeout(() => { try { onRetry(); } catch {} }, 900);
     return () => clearTimeout(t);
   }, [dbgState, onRetry]);
+  /**
+   * 播放器存在期间锁定「底部 Tab 横划切页」：
+   * 进度条拖动是横向手势，48px 阈值一定会被误判成切页（用户体感：拖进度条整页跳走）。
+   * 用 useUiStore 的计数锁，与「进房间」的锁互不干扰。
+   */
+  const lockTabSwipe = useUiStore((s) => s.lockTabSwipe);
+  const unlockTabSwipe = useUiStore((s) => s.unlockTabSwipe);
+  useEffect(() => {
+    lockTabSwipe();
+    return () => unlockTabSwipe();
+  }, [lockTabSwipe, unlockTabSwipe]);
+
   // R4: 把页面 onClose 注册进 playerStore，硬件返回键经 FullscreenManager 调它（清理页面状态）
   useEffect(() => {
     if (!onClose) return;
@@ -100,6 +113,28 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceUrl]);
 
+  /**
+   * meta 同步：open() 只在 sourceUrl 变化时跑一次，之后页面上**异步到达**的 meta 字段
+   * （典型：在线人数 stat —— 详情接口要单独请求几百 ms~数秒后才返回）更新了 meta prop，
+   * store 里的 meta 却不会被刷新，PlayerChrome 读 store → 胶囊永远不出现。
+   *
+   * 这正是「直播板块录播有人数、房间内直播/回放永远没有」的根因：
+   *   - Media 页先以 url=''(resolving) 挂载，在线人数先取到、真实流地址后到 →
+   *     sourceUrl 变化重新 open 时 meta 刚好已带 stat（时序巧合掩盖了缺陷）
+   *   - 房间是解析完一次性挂载（sourceUrl 不再变）→ stat 永远赶不上 open
+   * 这里把后续 meta 变化同步进 store（有变化才写，避免无谓渲染）。
+   */
+  const lastSyncedStatRef = useRef<string>('');
+  useEffect(() => {
+    if (openedFor.current !== sourceUrl) return;
+    const st = usePlayerStore.getState();
+    if (!st.source) return;
+    const statKey = `${meta?.title || ''}|${meta?.stat?.text || ''}`;
+    if (lastSyncedStatRef.current === statKey) return;
+    lastSyncedStatRef.current = statKey;
+    usePlayerStore.setState({ meta });
+  }, [meta, sourceUrl]);
+
   // 跨页播放互斥：全局播放器同一时刻只播一路。本播放器打开的源被其它页面
   // 的新播放器顶替（store.url ≠ 本组件声明的源）→ 本页自动退出播放器
   //（如 Media tab 后台直播被房间点播顶掉，Media 页自动停止播放态）。
@@ -123,7 +158,7 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
         </View>
       </View>
       {children}
-      <PlayerChrome features={features} extraActions={extraActions} onClose={onClose} inline={inline} onRetry={onRetry} barrageInput={barrageInput} />
+      <PlayerChrome features={features} extraActions={extraActions} topLeftAction={topLeftAction} onClose={onClose} inline={inline} onRetry={onRetry} barrageInput={barrageInput} />
       <FullscreenManager />
     </View>
   );

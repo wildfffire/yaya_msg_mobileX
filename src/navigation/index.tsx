@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
 import { BlurTargetProvider, BlurTargetSurface } from '../components/BlurTarget';
-import { NavigationContainer, DefaultTheme, DarkTheme, useFocusEffect } from '@react-navigation/native';
+import { NavigationContainer, DefaultTheme, DarkTheme, useFocusEffect, useNavigation, useNavigationState } from '@react-navigation/native';
+import { useRoomUnreadStore } from '../services/roomUnread';
+import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { createStackNavigator } from '@react-navigation/stack';
@@ -91,12 +93,69 @@ function withPageMotion<T extends object>(
   };
 }
 
+/** 底部 Tab 顺序：左右横划按这个顺序切换（与 Tab.Screen 声明顺序保持一致） */
+const TAB_ORDER: Array<keyof TabParamList> = ['Home', 'Media', 'Rooms', 'Settings'];
+
+/**
+ * 给「底部 Tab 场景」套上左右横划切换手势（用户需求：横划能切换页面）。
+ *
+ * 关键设计：**只包场景内容、不包底栏**。
+ * 底栏自己有「按住拖动选中胶囊」的 PanResponder，若把手势圈到整个 Tab.Navigator 上，
+ * 横划会把它吃掉（底栏拖动失效）。包在场景里则两者互不干扰。
+ *
+ * 阈值取舍：横向 48px（或甩动速度 > 800）才切页，且竖向位移必须小于横向 ——
+ * 这样列表上下滚动、横向 chips 行的小幅滑动都不会误触发切页。
+ */
+function withTabSwipe<T extends object>(Screen: React.ComponentType<T>) {
+  function TabSwipeScreen(props: T) {
+    const navigation = useNavigation<any>();
+    // 当前激活的 tab（跟随导航状态，外部跳转/返回也能对上）
+    const activeKey = useNavigationState(
+      (s) => ((s?.routes?.[s.index]?.name as keyof TabParamList) || 'Home'),
+    );
+    /**
+     * 横划开关：进房间 / 打开播放器时全局锁掉（useUiStore 的计数锁）。
+     * 例：房间内页面本身有横向手势；播放器进度条拖动也是横向的 —— 都会被 48px 阈值误判成切页。
+     */
+    const swipeLocked = useUiStore((s) => s.tabSwipeLocked);
+    const gesture = useMemo(
+      () =>
+        Gesture.Pan()
+          // 回调跑在 JS 线程（不引入 worklet，避免与现有逻辑混用出问题）
+          .runOnJS(true)
+          .enabled(!swipeLocked)
+          .activeOffsetX([-48, 48])
+          .failOffsetY([-18, 18])
+          .onEnd((e) => {
+            const dx = e.translationX;
+            const flung = Math.abs(e.velocityX) > 800;
+            if (!flung && Math.abs(dx) < 48) return;
+            if (Math.abs(dx) < Math.abs(e.translationY)) return;
+            const idx = TAB_ORDER.indexOf(activeKey);
+            if (idx < 0) return;
+            const next = TAB_ORDER[idx + (dx < 0 ? 1 : -1)];
+            if (next) navigation.navigate(next as never);
+          }),
+      [activeKey, navigation, swipeLocked],
+    );
+    return (
+      <GestureDetector gesture={gesture}>
+        <View style={styles.tabScene}>
+          <Screen {...props} />
+        </View>
+      </GestureDetector>
+    );
+  }
+  TabSwipeScreen.displayName = `withTabSwipe(${Screen.displayName || Screen.name || 'Tab'})`;
+  return TabSwipeScreen;
+}
+
 // 注：4 个 tab 的入场淡入（opacity+translateY）自项目基线(ed271c0)起就由 withPageMotion 提供，
 // 是用户预期的转场观感，非性能负优化。保留 withPageMotion，不做无动画替换。
-const HomeTabScreen = withPageMotion(HomeScreen);
-const MediaTabScreen = withPageMotion(MediaScreen);
-const RoomsTabScreen = withPageMotion(FollowedRoomsScreen);
-const SettingsTabScreen = withPageMotion(SettingsScreen);
+const HomeTabScreen = withTabSwipe(withPageMotion(HomeScreen));
+const MediaTabScreen = withTabSwipe(withPageMotion(MediaScreen));
+const RoomsTabScreen = withTabSwipe(withPageMotion(FollowedRoomsScreen));
+const SettingsTabScreen = withTabSwipe(withPageMotion(SettingsScreen));
 const MessagesStackScreen = withPageMotion(MessagesScreen, ui.motion.stackDuration, 10, true);
 const LoginStackScreen = withPageMotion(LoginScreen, ui.motion.stackDuration, 10, true);
 const RechargeStackScreen = withPageMotion(RechargeScreen, ui.motion.stackDuration, 10, true);
@@ -126,6 +185,10 @@ function MainTabBar({
 }: BottomTabBarProps & { hidden: boolean }) {
   const { t } = useI18n();
   const palette = usePalette();
+  // 房间 tab 未读总数：本地累计的各房间未读之和（房间列表有新消息时在 tab 右上角显示数量）
+  const roomUnreadTotal = useRoomUnreadStore((s) =>
+    Object.values(s.counts).reduce((acc, n) => acc + (Number(n) || 0), 0),
+  );
   if (hidden) return null;
 
   const items = state.routes.map((route, index) => {
@@ -142,6 +205,7 @@ function MainTabBar({
       key: route.name,
       icon: fallback.icon,
       label: fallback.label,
+      badge: route.name === 'Rooms' ? roomUnreadTotal : undefined,
       onPress: () => {
         const event = navigation.emit({ type: 'tabPress', target: route.key, canPreventDefault: true });
         if (state.index !== index && !event.defaultPrevented) navigation.navigate(route.name);
@@ -192,6 +256,8 @@ const styles = StyleSheet.create({
   tabBarWrap: {
     position: 'absolute', left: 0, right: 0, bottom: 0, height: 116,
   },
+  /** 横划切页手势的场景容器（必须是 flex:1 的原生视图，GestureDetector 才能接管触摸） */
+  tabScene: { flex: 1 },
 });
 
 const AppTheme = {

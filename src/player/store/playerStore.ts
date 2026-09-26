@@ -42,8 +42,6 @@ interface PlayerState {
   mirrorMode: 'none' | 'horizontal' | 'vertical';
   /** seek 指令：UI 写入，PlayerCore 消费后清零（与音乐 store seekTarget 同模式） */
   seekTarget: number;
-  /** 弹幕开关 */
-  danmakuOn: boolean;
 
   // Actions
   open: (source: PlayerSource, meta?: PlayerMeta, danmaku?: DanmakuSource) => void;
@@ -63,7 +61,6 @@ interface PlayerState {
   setRotateDeg: (deg: number) => void;
   setMirrorMode: (m: 'none' | 'horizontal' | 'vertical') => void;
   setSeekTarget: (t: number) => void;
-  toggleDanmaku: () => void;
   /** 播放失败时切到下一候选线路；返回是否切换成功（无候选/已到末尾 → false） */
   nextCandidate: () => boolean;
   /** 页面级 onClose 回调（PlayerScreen 挂载时注册；返回键/关闭时先调用它清理页面状态） */
@@ -105,7 +102,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   rotateDeg: 0,
   mirrorMode: 'none' as const,
   seekTarget: 0,
-  danmakuOn: true,
 
   open: (source, meta = { title: '' }, danmaku = { type: 'none' }) => {
     // 播放互斥：后播者胜 —— 直播/录播/电台/视频开播时，后台音乐自动暂停（可再点回播放）
@@ -135,7 +131,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
         rotateDeg: 0,
         mirrorMode: 'none' as const,
         seekTarget: 0,
-        danmakuOn: true,
         candidateUrls: urls,
         candidateIndex: 0,
         ...(urls[0] && urls[0] !== source.url ? { source: { ...source, url: urls[0] } } : {}),
@@ -170,7 +165,6 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
   setRotateDeg: (rotateDeg) => set({ rotateDeg: ((rotateDeg % 360) + 360) % 360 }),
   setMirrorMode: (mirrorMode) => set({ mirrorMode }),
   setSeekTarget: (seekTarget) => set({ seekTarget }),
-  toggleDanmaku: () => set((s) => ({ danmakuOn: !s.danmakuOn })),
   nextCandidate: () => {
     let switched = false;
     set((s) => {

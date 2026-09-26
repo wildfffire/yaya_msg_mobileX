@@ -24,6 +24,22 @@ export interface PlayerSource {
 export interface PlayerMeta {
   title: string;
   cover?: string;
+  /**
+   * 标题右侧的小指标胶囊（可选）。
+   * 页面按内容自己决定放什么（官方数据的口径差异很大，不宜把字段写死在类型里）：
+   *   - 直播：在线人数 `account-multiple`（官方直播接口**没有**热度/人气字段，
+   *     见 docs/BUG_LIST_2026-09-18.md 的实测结论，在线人数是最近替代）
+   *   - 回放/录播：**不传 stat**（详见下）
+   * undefined 时不渲染。
+   *
+   * ⚠️【产品规则】在线人数只在**真正的直播**里显示：
+   *   - `getLiveOne` 虽然对已结束的场次也能读到 `onlineNum`（该场结束时的值），
+   *     但那是历史数字，写成「N 人在线」属语义误导 → 回放一律不显示
+   *   - 持有 `stat` 能力的有两处：MediaScreen（`playerIsLive` 守卫）与
+   *     BilibiliLiveScreen；**房间内直播/回放**（FollowedRoomsScreen）已按要求完全不传
+   * 改动这里前，先确认这三处口径一致。
+   */
+  stat?: { icon: string; text: string };
 }
 
 /** 弹幕源（三引擎统一）：poll=口袋直播 HTTP 轮询；lrc=录播 LRC 文件；ws=B站 WebSocket */
@@ -64,5 +80,12 @@ export interface PlayerScreenProps {
     active?: boolean;
     onPress: () => void;
   }>;
+  /** 顶栏左上按钮（返回键右侧、标题前）：如公告开关 —— 收起后仍可随时点开（2026-09-26） */
+  topLeftAction?: {
+    icon: string;
+    label: string;
+    active?: boolean;
+    onPress: () => void;
+  };
   onClose?: () => void;
 }

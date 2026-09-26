@@ -13,6 +13,7 @@ import { LiveChatroom, type ChatroomStatus } from '../services/pocketNim/chatroo
 import { loadNimCredentials, loadSelfProfile } from '../services/pocketNim/credentials';
 import { getNimSessionEpoch, subscribeNimSession } from '../services/pocketNim/session';
 import { BarrageItem } from '../services/pocketNim/types';
+import { onChatroomOnline } from '../native/PocketNimChatroom';
 
 /** 弹幕列表上限（超出丢弃最旧的，避免长时间挂直播间内存膨胀） */
 const MAX_ITEMS = 300;
@@ -32,6 +33,14 @@ export interface UseLiveBarrageResult {
   error: string;
   /** 是否已连上聊天室（可发送） */
   ready: boolean;
+  /**
+   * 聊天室在线人数（0 = 未知/未连接）。
+   *
+   * ⚠️ 当前 UI **不用**这个值：播放器顶栏的「N 人在线」改成官方
+   * `getLiveOne.content.onlineNum`（实测确认存在，且录播也能读到该场数值）。
+   * 这里保留作为更实时的备用通道（原生连接后立即 + 每 10s 上报一次）。
+   */
+  online: number;
   send: (text: string) => Promise<void>;
   clear: () => void;
   retry: () => void;
@@ -43,6 +52,7 @@ export function useLiveBarrage(options: UseLiveBarrageOptions): UseLiveBarrageRe
   const [status, setStatus] = useState<ChatroomStatus | 'idle' | 'resolving'>('idle');
   const [error, setError] = useState('');
   const [retryToken, setRetryToken] = useState(0);
+  const [online, setOnline] = useState(0);
   /**
    * 云信会话世代：切号 / 换号后 +1。
    * 连接是用「当时的账号凭证」建立的，换代后必须整条重连
@@ -72,6 +82,17 @@ export function useLiveBarrage(options: UseLiveBarrageOptions): UseLiveBarrageRe
 
     setError('');
     setStatus('resolving');
+    setOnline(0); // 换房间先清零，避免显示上一间的人数
+    setItems([]); // ⚠️【串台修复】换房间清空旧弹幕列表，避免上一间的弹幕残留到新直播间（弹幕列表/飘屏同源）
+    /**
+     * 在线人数：原生聊天室连接后立即上报一次、之后每 10s 一次
+     *（NimChatroomClient.handleOnlineCount → PocketNimChatroomModule.emit('online')）。
+     * 事件是全局的，这里用 seq 守卫，只认当前这次连接的房间。
+     */
+    const offOnline = onChatroomOnline((count) => {
+      if (cancelled || seqRef.current !== seq) return;
+      setOnline(Number(count) > 0 ? Number(count) : 0);
+    });
 
     (async () => {
       const [credentials, chatroom] = await Promise.all([
@@ -132,6 +153,7 @@ export function useLiveBarrage(options: UseLiveBarrageOptions): UseLiveBarrageRe
 
     return () => {
       cancelled = true;
+      offOnline();
       const instance = chatroomRef.current;
       chatroomRef.current = null;
       instance?.dispose();
@@ -168,6 +190,7 @@ export function useLiveBarrage(options: UseLiveBarrageOptions): UseLiveBarrageRe
     status,
     error,
     ready: status === 'connected',
+    online,
     send,
     clear,
     retry,

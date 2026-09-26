@@ -3,10 +3,12 @@
  * 设置来自 useDanmakuSettings，记忆持久化。全主题化（usePalette）+ 统一 Pill/Button。
  */
 import React from 'react';
-import { Modal, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, View } from 'react-native';
+import { Modal, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useDanmakuSettings, DanmakuArea } from '../store/danmakuSettings';
 import { useI18n } from '../i18n';
+import { useIsLandscape } from '../hooks/useIsLandscape';
+import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
 import { usePalette, radii, spacing } from '../theme';
 import { typography } from '../theme/typography';
 import { Pill } from './Pill';
@@ -45,6 +47,14 @@ export default function DanmakuSettingsSheet({ visible, onClose }: Props) {
   const palette = usePalette();
   const { t } = useI18n();
   const { enabled, area, speed, fontSize, opacity, set, reset } = useDanmakuSettings();
+  const { width: winW } = useWindowDimensions();
+  const isLandscape = useIsLandscape();
+  const insets = useSafeAreaInsets();
+  /**
+   * 横屏：底部抽屉（maxHeight 82%）会把画面几乎压没 → 改右侧抽屉。
+   * 宽 40% 窗口（260~400 夹紧），满高、只圆左侧两角。
+   */
+  const drawerW = Math.round(Math.min(400, Math.max(260, winW * 0.4)));
 
   /** 选项行 = 玻璃滑动选中块（与底栏同一套） */
   const chipRow = (items: { key?: string; label: string; active: boolean; onPress: () => void }[]) => {
@@ -61,14 +71,18 @@ export default function DanmakuSettingsSheet({ visible, onClose }: Props) {
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
-      <TouchableOpacity style={styles.mask} activeOpacity={1} onPress={onClose}>
+      <TouchableOpacity style={[styles.mask, isLandscape && styles.maskLandscape]} activeOpacity={1} onPress={onClose}>
         <GlassSurface radius={20} role="card"
           style={[
             styles.sheet,
+            // 横屏右侧抽屉：满高 + 顶部避让状态栏（100% 高度是从屏幕最上沿算起的，
+            // 不补 paddingTop 的话标题行会压进通知栏）
+            isLandscape && { width: drawerW, maxHeight: '100%', height: '100%', paddingTop: insets.top },
             {
               backgroundColor: 'transparent',
               borderTopLeftRadius: radii.sheet,
-              borderTopRightRadius: radii.sheet,
+              borderTopRightRadius: isLandscape ? 0 : radii.sheet,
+              borderBottomLeftRadius: isLandscape ? radii.sheet : 0,
             },
           ]}
           onStartShouldSetResponder={() => true}
@@ -121,6 +135,8 @@ export default function DanmakuSettingsSheet({ visible, onClose }: Props) {
 
 const styles = StyleSheet.create({
   mask: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
+  /** 横屏：右侧抽屉 —— 底板横排、面板贴右 */
+  maskLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
   sheet: {
     maxHeight: '82%',
     paddingBottom: 18,

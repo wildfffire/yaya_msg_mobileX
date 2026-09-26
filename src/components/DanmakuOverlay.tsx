@@ -14,6 +14,7 @@ import { Animated, StyleSheet, Text, useWindowDimensions } from 'react-native';
 import { DanmakuItem } from '../utils/danmaku';
 import { useDanmakuSettings } from '../store/danmakuSettings';
 import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
+import { isLandscapeSize } from '../utils/orientation';
 
 const BASE_DURATION = 7000; // 基础横穿时长（ms），speed 越大越快
 const SAFE_GAP = 600; // 同泳道两条之间的安全间隔（ms），杜绝重叠
@@ -82,13 +83,21 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
   // 顶部安全区：edge-to-edge 下 overlay 顶到屏幕最上沿，弹幕会压进系统通知栏。
   // 第一条泳道从「状态栏下方 + 8」开始，泳道数也按可用高度重算。
   const insets = useSafeAreaInsets();
+  const isLandscape = isLandscapeSize(width, screenH);
+  /**
+   * 横屏：状态栏仍在顶部（沉浸全屏时状态栏已隐藏，多留 24 也无害且能避开顶栏按钮），
+   * 所以这里保留 `insets.top` 而不是按 8 顶格 —— 顶格会让第一泳道与顶栏控件糊在一起。
+   */
   const topOffset = (insets?.top || 0) + 8;
+  /** 横屏：底部控制坞（播放/进度/功能组）约占 72dp，泳道不要铺到它后面去 */
+  const bottomReserve = isLandscape ? 64 : 0;
 
   // 显示区域 → 泳道数（顶部少、全屏多）
   const rowH = fontSize + 10;
-  let laneCount = Math.max(8, Math.floor(((screenH - topOffset) * 0.92) / rowH));
-  if (area === 'top') laneCount = Math.max(4, Math.min(6, Math.floor(((screenH - topOffset) * 0.4) / rowH)));
-  else if (area === 'half') laneCount = Math.max(6, Math.floor(((screenH - topOffset) * 0.55) / rowH));
+  const usableH = Math.max(rowH, screenH - topOffset - bottomReserve);
+  let laneCount = Math.max(isLandscape ? 4 : 8, Math.floor((usableH * 0.92) / rowH));
+  if (area === 'top') laneCount = Math.max(4, Math.min(6, Math.floor((usableH * 0.4) / rowH)));
+  else if (area === 'half') laneCount = Math.max(6, Math.floor((usableH * 0.55) / rowH));
   // 区域 / 字号变化时同步泳道数组长度
   useEffect(() => {
     if (laneFreeAt.current.length !== laneCount) laneFreeAt.current = new Array(laneCount).fill(0);

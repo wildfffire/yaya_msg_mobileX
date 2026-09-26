@@ -10,6 +10,7 @@
 import React, { useEffect, useRef } from 'react';
 import {
   Animated,
+  AppState,
   Easing,
   StyleProp,
   TouchableOpacity,
@@ -56,10 +57,29 @@ export function FadeInView({
       easing: EASE_OUT,
       useNativeDriver: true,
     });
-    animation.start();
-    // 兜底：动画未回调（native driver 异常/被打断）时强制可见，避免整块内容消失
+    /**
+     * ⚠️ 三重收尾保险（少一个都可能让整块常驻内容永久不可见）：
+     *  1) 动画被中断（native 节点在页面 detach / 列表回收时丢失、被后续动画抢占）
+     *     → 完成回调 finished=false，立刻补到 1；
+     *  2) native driver 异常时动画可能**整体不执行**（见本文件 EASE_OUT 的注释）
+     *     → 定时器兜底；
+     *  3) 后台的 JS 定时器会被系统节流/暂停（兜底 2 可能不触发）
+     *     → 回到前台再兜一次。
+     * 这正是「首页快捷入口/工具上下互动后莫名消失」的根因类问题；
+     * 常驻高频内容建议直接用普通 View，别依赖「靠动画才可见」的写法。
+     */
+    animation.start(({ finished }) => {
+      if (!finished) value.setValue(1);
+    });
     const guard = setTimeout(() => value.setValue(1), delay + duration + 150);
-    return () => { animation.stop(); clearTimeout(guard); };
+    const appStateSub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') value.setValue(1);
+    });
+    return () => {
+      animation.stop();
+      clearTimeout(guard);
+      appStateSub.remove();
+    };
   }, [delay, duration, value]);
 
   return (
@@ -139,12 +159,23 @@ export function MotionIcon({
 
   useEffect(() => {
     value.setValue(0);
-    Animated.spring(value, {
+    // 同 FadeInView：动画被打断 / 不执行都必须收尾到 1，否则图标永久不可见
+    const animation = Animated.spring(value, {
       toValue: 1,
       speed: 20,
       bounciness: 7,
       useNativeDriver: true,
-    }).start();
+    });
+    animation.start(({ finished }) => {
+      if (!finished) value.setValue(1);
+    });
+    const appStateSub = AppState.addEventListener('change', (s) => {
+      if (s === 'active') value.setValue(1);
+    });
+    return () => {
+      animation.stop();
+      appStateSub.remove();
+    };
   }, [value]);
 
   return (
