@@ -79,20 +79,28 @@ export const POCKET_GIFT_DATA: GiftItem[] = [
   { id: '42', name: '雪糕', cost: 19999 },
 ];
 
+/**
+ * 各队应援色（2026-09-26 按官方代表色校对过一轮，来源：中文维基各团成员列表「代表色」）：
+ *   SNH48  SII 浅蓝 A1D5ED / NII 紫 BE98C7 / HII 柑橘橙 F8941D / X 浅绿(黄绿) B1D61B
+ *   GNZ48  G 鲜绿 9FBF40 / NIII 鲜黄 FFE249 / Z 蜜桃 EA617B
+ *   BEJ48  B 玫瑰红 FF4083 / E 蓝绿 0CC8C3（J 队已并入，保留旧值）
+ *   CKG48  K 鲜黄 / C 橘红（维基未给 RGB，按色名取近似）
+ *   预备生 固定灰（用户要求）
+ */
 export const TEAM_COLORS: Record<string, string> = {
-  'TEAM SII': '#0095D5',
-  'TEAM NII': '#9B26B6',
-  'TEAM HII': '#FF7F00',
-  'TEAM X': '#4CAF50',
-  'TEAM G': '#4CAF50',
-  'TEAM NIII': '#FDD835',
-  'TEAM Z': '#E91E63',
-  'TEAM B': '#E91E63',
-  'TEAM E': '#00BCD4',
+  'TEAM SII': '#A1D5ED',
+  'TEAM NII': '#BE98C7',
+  'TEAM HII': '#F8941D',
+  'TEAM X': '#B1D61B',
+  'TEAM G': '#9FBF40',
+  'TEAM NIII': '#FFE249',
+  'TEAM Z': '#EA617B',
+  'TEAM B': '#FF4083',
+  'TEAM E': '#0CC8C3',
   'TEAM J': '#FF5722',
-  'TEAM C': '#9C27B0',
-  'TEAM K': '#FF9800',
-  CII: '#9C27B0',
+  'TEAM C': '#FF6136',
+  'TEAM K': '#FFD400',
+  CII: '#9C27B0', // CGT48：未查到权威代表色，沿用旧值
   '预备生': '#757575',
 };
 
