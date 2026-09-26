@@ -13,7 +13,8 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import * as ScreenOrientation from 'expo-screen-orientation';
+import { followSystem } from '../utils/orientation';
+import { isPipActive } from '../utils/pip';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import { useSettingsStore } from '../store';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
@@ -30,6 +31,7 @@ import bilibiliApi from '../api/bilibili';
 import { BilibiliDanmaku } from '../services/bilibiliDanmaku';
 import { DanmakuOverlay } from '../components/DanmakuOverlay';
 import DanmakuSettingsSheet from '../components/DanmakuSettingsSheet';
+import { useDanmakuSettings } from '../store/danmakuSettings';
 import { DanmakuItem } from '../utils/danmaku';
 import { errorMessage, normalizeUrl } from '../utils/data';
 import { NetworkImage } from '../components/NetworkImage';
@@ -87,13 +89,14 @@ export default function BilibiliLiveScreen() {
   const [fetchError, setFetchError] = useState('');
   const [configError, setConfigError] = useState('');
   const [useWebPlayer, setUseWebPlayer] = useState(false);
-  const [isFullscreen, setIsFullscreen] = useState(false);
-  const [isLandscape, setIsLandscape] = useState(false);
   const [paused, setPaused] = useState(false);
   const [moreVisible, setMoreVisible] = useState(false);
   // B站直播弹幕：WebSocket 实时接收 → DanmakuOverlay（live 模式立即上屏）
   const [showDanmaku, setShowDanmaku] = useState(false);
-  const playerDanmakuOn = usePlayerStore((s) => s.danmakuOn);
+  // 弹幕显示开关：统一读弹幕设置里的总开关（AsyncStorage 持久化）。
+  // 不再读 playerStore.danmakuOn —— 那个字段每次 open() 都被强制重置为 true，
+  // 用户关掉弹幕后一换直播间就又飘起来（「关了还飘」的根因）。
+  const playerDanmakuOn = useDanmakuSettings((s) => s.enabled);
   const [dmItems, setDmItems] = useState<DanmakuItem[]>([]);
   const [dmTick, setDmTick] = useState(0);
   const danmakuRef = useRef<BilibiliDanmaku | null>(null);
@@ -167,6 +170,19 @@ export default function BilibiliLiveScreen() {
   }, [currentCandidate]);
   const qualityLabel = qualities.find((q) => q.qn === qualityQn)?.label || '';
 
+  /**
+   * 标题右侧**不显示任何指标**（用户要求：B站不要关注数）。
+   *
+   * ⚠️ 实测结论（2026-09-26 直接打 B站接口核实，不是猜的）—— 记录在此避免以后又有人来加：
+   *   - `room/v1/Room/get_info`（本文件已有的 getRoomInfo）**有** `online` 字段，但**恒为 0**
+   *     —— B站不再通过这个公开接口下发实时在线人数
+   *   - `xlive/web-room/v1/index/getInfoByRoom`（能拿到 room_info.online 的那个）
+   *     在未登录/无签名时被风控，直接返回 `-352`
+   *   - 同一响应里的 `attention`（关注数）是真实数字，但**语义不是在线人数**，用户明确不要
+   * → 所以 B站不传 `meta.stat`（保持只有标题）。别再试图用口袋的 `getLiveOne` 顶上：
+   *   B站 `roomId` 不是口袋 `liveId`，调用必然失败。
+   */
+
   useEffect(() => {
     const parent = navigation.getParent?.();
     parent?.setOptions({ tabBarStyle: streamUrl ? { display: 'none' } : undefined });
@@ -197,14 +213,18 @@ export default function BilibiliLiveScreen() {
     dmFlushTimer.current = null;
     qualityHintTimer.current = null;
     hideControlsTimer.current = null;
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    followSystem();
   }, []);
 
   // 切到后台时复位横屏锁（防退到桌面/其它 App 仍锁横屏）；回到前台由上方 effect 按状态重新锁定
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
       if (state !== 'active') {
-        ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+        // ⚠️ 进系统 PiP 时 AppState 也报 background（PiP 事件随后才到）→ 延迟确认豁免，
+        // 否则方向锁释放会和 PiP 转场竞争 → 直播黑屏/中断
+        setTimeout(() => {
+          if (!isPipActive()) followSystem();
+        }, 600);
       }
     });
     return () => sub.remove();
@@ -224,12 +244,19 @@ export default function BilibiliLiveScreen() {
     setQualityQn(null);
     setActiveRoom(null);
     setPlayerError('');
-    setIsFullscreen(false);
-    setIsLandscape(false);
+    setBuffering(false);
+    setFetchError('');
+    usePlayerStore.getState().setFullscreen(false);
     setLiveImmersiveMode(false);
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
+    followSystem();
     // 从主页公演栏直达进来的：退出播放器直接回主页（不再落到 B站列表二级菜单）
-    if (route.params?.roomId) navigation.goBack();
+    // ⚠️【加载圈修复】goBack 转场期间组件仍挂载，此时 candidates 已清空（streamUrl=''），
+    // 若 route.params.roomId 还在会误渲染「正在进入直播间…」全屏加载分支（屏幕中间转圈）。
+    // 先把 roomId 从 params 里清掉，短路该分支后再返回。
+    if (route.params?.roomId) {
+      navigation.setParams({ roomId: undefined });
+      navigation.goBack();
+    }
   };
 
   // 应用内小窗：直播流交棒给悬浮小窗
@@ -380,8 +407,11 @@ export default function BilibiliLiveScreen() {
       });
       setStatus('');
       showControls();
-      setIsLandscape(true);
-      setIsFullscreen(true); // 进入直播间即自动横屏+全屏沉浸（用户偏好：B站直播只看横屏）
+      // 进入直播间即自动横屏 + 全屏沉浸（用户偏好：B站直播只看横屏）。
+      // 原先是写本地 isFullscreen/isLandscape 两个从不参与渲染的死状态 → 实际从未生效；
+      // 现在改为写全局 playerStore.fullscreen，由 FullscreenManager 统一执行
+      // 沉浸式 + 锁横屏。
+      usePlayerStore.getState().setFullscreen(true);
     } catch (error) {
       setFetchError(errorMessage(error));
       setStatus(t('获取直播流失败：{msg}', { msg: errorMessage(error) }));
@@ -414,16 +444,10 @@ export default function BilibiliLiveScreen() {
     setPlayerError('');
   };
 
-  // 从主页公演栏直达：解析直播流期间显示全屏加载（避免闪一下列表页/长时间黑屏无反馈）
+  // 从主页公演栏直达：解析直播流期间只显示黑屏（用户要求 2026-09-26：去掉中间的
+  // 转圈和「正在进入直播间…」文字），保留纯黑占位避免闪一下列表页
   if (route.params?.roomId && !streamUrl && !fetchError) {
-    return (
-      <View style={styles.playerPage}>
-        <View style={styles.startingWrap}>
-          <ActivityIndicator color="#ffffff" size="large" />
-          <Text style={styles.startingText}>{t('正在进入直播间…')}</Text>
-        </View>
-      </View>
-    );
+    return <View style={styles.playerPage} />;
   }
 
   if (streamUrl) {
@@ -443,6 +467,7 @@ export default function BilibiliLiveScreen() {
             volume: 1,
             volumeBoost: 1.8, // B站源弱响度：网页内核经 WebAudio 预放大（Exo 原生音量 clamp ≤1 提不了）
           }}
+          // B站不传 stat：没有在线人数数据源，关注数用户也不要（见上方说明）
           meta={{ title: streamTitle || t('B站直播') }}
           features={{ kernelSwitch: true, danmaku: true }}
           extraActions={[
@@ -584,8 +609,6 @@ const styles = StyleSheet.create({
   playerPage: { flex: 1, backgroundColor: '#000' },
   player: { flex: 1, backgroundColor: '#000' },
   nativeVideo: { flex: 1, backgroundColor: '#000' },
-  startingWrap: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 14 },
-  startingText: { color: 'rgba(255,255,255,0.75)', fontSize: 13, fontWeight: '600' },
   bufferingWrap: {
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center', justifyContent: 'center', gap: 12,

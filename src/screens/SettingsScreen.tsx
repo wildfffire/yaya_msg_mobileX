@@ -257,12 +257,15 @@ export default function SettingsScreen() {
         {/* 关于 hero 卡 */}
         <Section title="" delay={60}>
           <View style={styles.aboutHero}>
-            <View style={[styles.aboutLogoWrap, { backgroundColor: palette.fill3 }]}>
-              <Image source={require('../../assets/logo.jpg')} style={styles.aboutLogoImg} />
+            <View style={styles.aboutLogoWrap}>
+              {/* 与 APK 桌面图标同一份 PNG（自带圆角、角是透明的）。此前外层 fill3 底 + 20 圆角 +
+                  overflow:hidden 又对它剪了一刀 → 图标角被削掉一圈（用户反馈）。
+                  现在不再二次剪裁/不垫底，原样显示，与桌面图标观感一致。 */}
+              <Image source={require('../../assets/logo.png')} style={styles.aboutLogoImg} />
             </View>
             <View style={{ flex: 1, marginLeft: 14 }}>
-              <Text style={[styles.aboutName, { color: palette.label }]}>{t('牙牙消息')}</Text>
-              <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={1}>{t('Yaya Message · 口袋48 第三方客户端')}</Text>
+              <Text style={[styles.aboutName, { color: palette.label }]}>{t('牙牙消息 X')}</Text>
+              <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={1}>{t('Yaya Message X · 口袋48 第三方客户端')}</Text>
             </View>
             <View style={styles.verChipWrap}>
               <TouchableOpacity
@@ -461,20 +464,15 @@ const styles = StyleSheet.create({
   rowValue: { flexShrink: 1, fontSize: 12, marginRight: 6, maxWidth: '48%', textAlign: 'right' },
   rowLabel: { fontSize: 12, lineHeight: 18, marginBottom: 6 },
   divider: { height: StyleSheet.hairlineWidth, marginLeft: 54 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { paddingHorizontal: 14, paddingVertical: 9, borderRadius: radiiAlias.button },
-  chipText: { fontSize: 13, fontWeight: '700' },
   // 关于 hero
   aboutHero: { flexDirection: 'row', alignItems: 'center', padding: 14 },
   aboutLogoWrap: {
     width: 52,
     height: 52,
-    borderRadius: 20,
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden',
   },
-  aboutLogoImg: { width: 52, height: 52, borderRadius: 20 },
+  aboutLogoImg: { width: 52, height: 52 },
   aboutName: { fontSize: 20, fontWeight: '800' },
   aboutSub: { fontSize: 12, marginTop: 4 },
   verChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radiiAlias.button },
@@ -503,13 +501,5 @@ const styles = StyleSheet.create({
   },
   autoSyncText: { fontSize: 12, marginLeft: 8, fontWeight: '600' },
   note: { marginHorizontal: 14, marginTop: 10, fontSize: 11, lineHeight: 16 },
-  textInput: {
-    marginTop: 8,
-    borderRadius: 10,
-    borderWidth: 1,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    fontSize: 13,
-  },
   footer: { textAlign: 'center', fontSize: 12, marginTop: 24 },
 });

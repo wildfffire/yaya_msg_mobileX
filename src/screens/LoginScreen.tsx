@@ -11,7 +11,7 @@ import {
   View, Text, TextInput, StyleSheet, ScrollView, KeyboardAvoidingView, Platform,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import * as ScreenOrientation from 'expo-screen-orientation';
+
 import { useNavigation } from '@react-navigation/native';
 import QRCode from 'qrcode';
 import { WebView } from 'react-native-webview';
@@ -191,10 +191,11 @@ export default function LoginScreen() {
   const { t } = useI18n();
   const pollingRef = useRef(true);
   useEffect(() => { return () => { pollingRef.current = false; }; }, []);
-  // 账号设置页固定竖屏：避免从横屏播放器进入时内容被横向挤压（布局按竖屏设计）
-  useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP).catch(() => {});
-  }, []);
+  /**
+   * 方向：**跟随系统**（用户要求账号页也支持横屏，与全局一致）。
+   * 以前这里锁竖屏是怕「从横屏播放器进来被挤扁」—— 现在改用「内容限宽居中」解决：
+   * 横屏下表单最大宽度 560、水平居中，不会被拉伸成难看的长条（见 styles.content）。
+   */
   const [mode, setMode] = useState<LoginMode>('sms');
   const [phone, setPhone] = useState('');
   const [area, setArea] = useState('86');
@@ -773,7 +774,11 @@ const styles = StyleSheet.create({
     borderRadius: 14,
   },
   container: { flex: 1 },
-  content: { paddingBottom: 32, paddingHorizontal: 16 },
+  /**
+   * 内容限宽居中：竖屏时窗口 < 560 无影响（全宽不变）；
+   * 横屏时表单最多 560 宽并水平居中，避免被拉伸成长条（取代原先「锁竖屏」的做法）。
+   */
+  content: { paddingBottom: 32, paddingHorizontal: 16, width: '100%', maxWidth: 560, alignSelf: 'center' },
   cardMargin: { marginHorizontal: 16, marginTop: 16 },
   // 分段控件
   segment: {

@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
@@ -15,19 +15,26 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import PlayerScreen, { buildPocketHeaders } from '../player';
 import { Member } from '../types';
 import MemberPicker from '../components/MemberPicker';
-import { useSettingsStore, useUiStore } from '../store';
+import { useSettingsStore, useUiStore, useMemberStore } from '../store';
+import TeamBadge from '../components/TeamBadge';
 import { FadeInView, ScalePressable } from '../components/Motion';
 import ScreenHeader from '../components/ScreenHeader';
 import { HeaderAction } from '../components/HeaderAction';
 import { Skeleton } from '../components/Skeleton';
 import { EmptyState, ErrorState } from '../components/StateViews';
 import pocketApi from '../api/pocket48';
+import { useNavigation } from '@react-navigation/native';
 import { translate, useI18n } from '../i18n';
 import { enqueueDownload } from '../services/downloads';
+import {
+  fetchUpcomingPerformances,
+  type PerformanceShow,
+} from '../services/performanceSchedule';
 import { errorMessage, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
 import { formatTimestamp } from '../utils/format';
 import { usePalette } from '../theme';
 import { GlassSurface } from '../components/GlassSurface';
+import PerformanceStrip from '../components/PerformanceStrip';
 
 interface OpenLiveItem {
   key: string;
@@ -158,6 +165,13 @@ export default function OpenLiveScreen() {
   const { t } = useI18n();
   const showToast = useUiStore((state) => state.showToast);
   const [member, setMember] = useState<Member | null>(null);
+  /** 昵称 → 成员（队伍应援色标注用）：公演记录可能来自任意成员，按条目昵称反查 */
+  const allMembers = useMemberStore((s) => s.members);
+  const memberByNickname = useMemo(() => {
+    const map = new Map<string, Member>();
+    for (const m of allMembers) map.set(String(m.ownerName || '').trim(), m);
+    return map;
+  }, [allMembers]);
   const [items, setItems] = useState<OpenLiveItem[]>([]);
   const [query, setQuery] = useState('');
   const [nextTime, setNextTime] = useState(0);
@@ -166,6 +180,7 @@ export default function OpenLiveScreen() {
   const [status, setStatus] = useState('');
   const [listError, setListError] = useState('');
   const [playing, setPlaying] = useState<{ url: string; title: string } | null>(null);
+  const [upcoming, setUpcoming] = useState<PerformanceShow[]>([]);
   const loadingRef = useRef(false);
 
   // 播放器生命周期已由统一 PlayerScreen/FullscreenManager 管理（横屏/竖屏/PiP/返回键）
@@ -178,6 +193,26 @@ export default function OpenLiveScreen() {
     });
     return () => subscription.remove();
   }, [playing]);
+
+  /**
+   * 即将开演的剧场公演（与「公演记录」不同：那份是已发生的回放，这份是未来场次）。
+   * 数据源与成员无关，所以进页面就拉一次，失败静默 —— 预告拉不到不应该影响公演记录列表。
+   */
+  useEffect(() => {
+    let alive = true;
+    fetchUpcomingPerformances()
+      .then((list) => { if (alive) setUpcoming(list); })
+      .catch(() => {});
+    return () => { alive = false; };
+  }, []);
+
+  const reloadUpcoming = useCallback(() => {
+    fetchUpcomingPerformances(true)
+      .then(setUpcoming)
+      .catch(() => {});
+  }, []);
+
+  const navigation = useNavigation<any>();
 
   const filtered = useMemo(() => {
     const text = query.trim().toLowerCase();
@@ -281,7 +316,15 @@ export default function OpenLiveScreen() {
   return (
     <View style={styles.container}>
       <ScreenHeader title={t('公演记录')} right={
-        <HeaderAction label={t('刷新')} disabled={!member || loading} onPress={() => member && loadMemberShows(member)} />
+        <HeaderAction
+          label={t('刷新')}
+          // 不再要求先选成员：刷新同时拉「即将开演」，而预告与成员无关
+          disabled={loading}
+          onPress={() => {
+            reloadUpcoming();
+            if (member) loadMemberShows(member);
+          }}
+        />
       } />
 
       <FadeInView delay={80} duration={300} style={{ flex: 1 }}>
@@ -317,6 +360,10 @@ export default function OpenLiveScreen() {
           windowSize={7}
           removeClippedSubviews
           onEndReached={loadMore}
+          /* 即将开演：横向排开的剧场场次预告（与首页「公演直播」区块共用 PerformanceStrip）。
+             放在列表头而不是固定区 —— 用户往下翻历史记录时它应该跟着滚走，否则永久占掉半屏。
+             没有未来场次时组件自身返回 null（不显示空状态，避免在「公演记录」里塞一个空盒子）。 */
+          ListHeaderComponent={<PerformanceStrip shows={upcoming} showCount />}
           onEndReachedThreshold={0.35}
           ListEmptyComponent={
             loading ? (
@@ -367,7 +414,13 @@ export default function OpenLiveScreen() {
                 )}
                 <View style={styles.cardBody}>
                   <Text style={[styles.cardTitle, { color: palette.label }]} numberOfLines={2}>{item.title}</Text>
-                  <Text style={[styles.meta, { color: palette.labelSecondary }]} numberOfLines={1}>{item.nickname || shortMemberName(member) || t('成员')}</Text>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 }}>
+                    <TeamBadge
+                      team={memberByNickname.get(String(item.nickname || '').trim())?.team || member?.team}
+                      fontSize={11}
+                    />
+                    <Text style={[styles.meta, { color: palette.labelSecondary }]} numberOfLines={1}>{item.nickname || shortMemberName(member) || t('成员')}</Text>
+                  </View>
                   <View style={styles.cardFoot}>
                     <Text style={[styles.time, { color: palette.labelSecondary }]}>{formatTimestamp(item.msgTime)}</Text>
                     <View style={[styles.badge, { backgroundColor: palette.tintSoft }]}>
