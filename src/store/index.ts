@@ -50,6 +50,19 @@ interface UiState {
    * 让房间里的玻璃折射房间背景而不是全局软件背景；离开屏幕清 null 还原全局。
    */
   screenBackdrop: { uri: string; scrim: string } | null;
+  /**
+   * 底部 Tab「左右横划切页」的锁定计数（>0 即禁用）。
+   *
+   * 为什么用**计数**而不是布尔：锁的来源可能重叠（例：房间内且播放器已开 → 两个来源同时锁），
+   * 布尔会被其中一个先解锁而误放行。零散场景下计数最省心。
+   * 需要锁的场景：
+   *   - 进了某个成员的房间（房间页内容会横向手势）
+   *   - 打开了统一播放器（进度条拖动是横向的，48px 阈值会被误判成切页）
+   */
+  tabSwipeLockCount: number;
+  tabSwipeLocked: boolean;
+  lockTabSwipe: () => void;
+  unlockTabSwipe: () => void;
   setTabBarHidden: (hidden: boolean) => void;
   showToast: (message: string) => void;
   hideToast: () => void;
@@ -60,6 +73,16 @@ export const useUiStore = create<UiState>((set) => ({
   tabBarHidden: false,
   toastMessage: '',
   screenBackdrop: null,
+  tabSwipeLockCount: 0,
+  tabSwipeLocked: false,
+  lockTabSwipe: () => set((s) => {
+    const next = s.tabSwipeLockCount + 1;
+    return { tabSwipeLockCount: next, tabSwipeLocked: next > 0 };
+  }),
+  unlockTabSwipe: () => set((s) => {
+    const next = Math.max(0, s.tabSwipeLockCount - 1);
+    return { tabSwipeLockCount: next, tabSwipeLocked: next > 0 };
+  }),
   setTabBarHidden: (hidden) => set({ tabBarHidden: hidden }),
   showToast: (message) => set({ toastMessage: message }),
   hideToast: () => set({ toastMessage: '' }),

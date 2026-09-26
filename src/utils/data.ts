@@ -65,6 +65,25 @@ export function normalizeUrl(value: any): string {
   return raw;
 }
 
+/**
+ * 从播放地址里抽 liveId（红播/VOD 地址把 liveId 直接写在路径里）。
+ *
+ * 实测（2026-09-26 打接口）：成员回放地址形如
+ *   https://cychengyuan-vod.48.cn/1/20220216/cy/700777459261181952-ugm0ig8iuan6f6b8xe52.m3u8
+ * 其中 `700777459261181952` 就是该场的 liveId。
+ *
+ * 用途：房间里的**回放**多半是从消息卡片点开的，卡片里不一定带 liveId →
+ * `getLiveOne` 拿不到详情 → 「在线人数」永远不显示。有了这个兜底就不依赖卡片内容。
+ * 而回放详情的 `onlineNum` 是**真有值**的（实测 2260 / 4289 / 5278），只是需要 liveId 才取得到。
+ *
+ * 只认 15~20 位的纯数字段，且两侧必须是分隔符：避免把日期（20220216）、
+ * 端口号、画质参数等误当成 id。
+ */
+export function liveIdFromUrl(url: string): string {
+  const matched = String(url || '').match(/(?:^|[/=_-])(\d{15,20})(?:[-/._?&#]|$)/);
+  return matched ? matched[1] : '';
+}
+
 export function parseMaybeJson(value: any): any {
   if (!value) return null;
   if (typeof value === 'object') return value;
