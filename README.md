@@ -2,12 +2,12 @@
   <img src="assets/banner.svg" width="100%" alt="牙牙消息 X" />
 </p>
 <p align="center">
-  <img src="assets/logo-rounded.png" width="96" alt="logo" />
+  <img src="assets/icon.png" width="96" alt="logo" />
 </p>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-ff6f91" alt="license" /></a>
-  <a href="https://github.com/xuqinghhh/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.5--x.1-ff6f91" alt="release" /></a>
+  <a href="https://github.com/xuqinghhh/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.5--X1-ff6f91" alt="release" /></a>
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
 </p>
 
