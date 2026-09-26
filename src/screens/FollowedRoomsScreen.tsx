@@ -1621,8 +1621,10 @@ const route = useRoute<any>();
   useFocusEffect(
     useCallback(() => {
       setScreenBackdrop(
+        // 深色主题不再压黑幕（用户反馈 2026-09-26：夜间房间背景像蒙了层黑纱）——
+        // 深色下不叠遮罩直接露出背景原图，浅色仍用白雾保证文字可读
         selectedRoom && roomMeta.bg
-          ? { uri: roomMeta.bg, scrim: resolvedTheme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.42)' }
+          ? { uri: roomMeta.bg, scrim: resolvedTheme === 'dark' ? 'transparent' : 'rgba(255,255,255,0.42)' }
           : null,
       );
       return () => setScreenBackdrop(null);
@@ -3781,7 +3783,8 @@ const route = useRoute<any>();
     // 房间名加载前用中性占位「房间」，不回退成员名 —— 避免「先显示成员名再被真实房间名替换」的闪烁
     const headerTitle = roomMeta.name ? capText(roomMeta.name, 18) : t('房间');
     const roomBgUri = roomMeta.bg || '';
-    const roomScrim = resolvedTheme === 'dark' ? 'rgba(0,0,0,0.5)' : 'rgba(255,255,255,0.42)';
+    // 深色不压黑幕（用户反馈 2026-09-26：夜间房间背景像蒙了层黑纱）；浅色保留白雾
+    const roomScrim = resolvedTheme === 'dark' ? 'transparent' : 'rgba(255,255,255,0.42)';
     return (
       /*
        * ⚠️【背景图修复】背景层必须放在**键盘 padding 容器之外**。
@@ -4268,8 +4271,14 @@ const route = useRoute<any>();
               <Chat
                 messages={chatIms}
                 messagesContainerRef={chatListRef}
-                // 背景透明：露出页面/房间背景图（库默认灰底会把它整块盖住）
+                /* ⚠️ colorScheme 必须跟 App 的 resolvedTheme：库内部自己读系统深浅色
+                   （react-native-chat/lib/index.js useColorScheme），夜间系统进深色后
+                   库走 darkTheme 分支，而下面 theme 是浅色槽 → 透明背景覆盖被丢弃，
+                   消息列表区显示库默认深色黑底、整块盖住房间背景图（用户反馈 2026-09-26）。
+                   跟随 App 主题后，浅色下永远走浅色槽；theme/darkTheme 两槽都给透明背景。 */
+                colorScheme={resolvedTheme}
                 theme={{ colors: { background: 'transparent' } }}
+                darkTheme={{ colors: { background: 'transparent' } }}
                 locale="zh"
                 // 日期分隔：纯数字「今天/昨天/x月x日」，居中显示（renderDayLabel）
                 // 整行自定义：用页面既有的 renderChatItem —— 头像、气泡外的发送者名字、

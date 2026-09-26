@@ -32,6 +32,7 @@ import { parseDurationSeconds } from '../utils/duration';
 import { errorMessage, messagePayload, messageText, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
 import pocketApi from '../api/pocket48';
 import { usePalette, usePageBackground } from '../theme';
+import { useResolvedTheme } from '../hooks/useAppTheme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { translate, useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
@@ -301,6 +302,7 @@ function lowestPrice(item: any) {
 export default function PrivateMessagesScreen() {
   const navigation = useNavigation<StackNavigationProp<RootStackParamList>>();
   const palette = usePalette();
+  const resolvedTheme = useResolvedTheme();
   const { t } = useI18n();
   const members = useMemberStore((s) => s.members);
   const showToast = useUiStore((s) => s.showToast);
@@ -884,8 +886,12 @@ export default function PrivateMessagesScreen() {
         <View style={{ flex: 1 }}>
         <Chat
           messages={ims}
-          // 背景透明：露出页面/房间背景图（库默认灰底会把它整块盖住）
+          /* ⚠️ colorScheme 跟 App 的 resolvedTheme：库内部自己读系统深浅色，夜间系统
+             进深色会走 darkTheme 分支丢弃下面浅色槽的透明背景 → 列表区黑底盖住背景
+             （与房间页同一问题，2026-09-26 修复）。theme/darkTheme 两槽都给透明背景。 */
+          colorScheme={resolvedTheme}
           theme={{ colors: { background: 'transparent' } }}
+          darkTheme={{ colors: { background: 'transparent' } }}
           locale="zh"
           renderBubble={renderEllipseGlassBubble}
           // 日期分隔（用户要求加回）：跨天消息只显示 HH:mm 会看反顺序，加 yyyy/mm/dd 分隔
