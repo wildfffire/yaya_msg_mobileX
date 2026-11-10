@@ -7,7 +7,7 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-ff6f91" alt="license" /></a>
-  <a href="https://github.com/wildfffire/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v3.0.0-ff6f91" alt="release" /></a>
+  <a href="https://github.com/wildfffire/yaya_msg_mobileX/releases"><img src="https://img.shields.io/badge/release-v3.0.0-ff6f91" alt="release" /></a>
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
   <img src="https://img.shields.io/badge/React%20Native-0.83-61dafb?logo=react" alt="React Native" />
 </p>
@@ -30,7 +30,6 @@
 ## 接下来的开发目标
 
 - **更多个性化选择**：把「能调的都做成可选项」——头像来源（房间内 / 房间外）、播放器行为、界面信息密度、列表与弹幕展示等会继续拆成独立开关，优先满足「按自己的习惯用」
-- **更多主题颜色**：在现有的深色 / 浅色两套主题之上，增加可选的配色方案（主题色 / 强调色），并保证房间、播放器、弹幕在每套配色下都保持可读
 - 主线不变：仍以横屏平板场景下的**房间与直播体验**为优化重点（见上方「项目定位」）
 
 ## 相对上游的主要变化
@@ -40,7 +39,7 @@
 - **公演**：公演排期卡条（未来 10 天），已开演场次 **B站优先**，B站未开播才走应用内信号
 - **成员**：自建成员库镜像（每日同步 + 人工修正）、成员档案就地内嵌、成员动态、鸡腿榜
 - **观看历史 / 稍后再看**：同一直播只留一条记录，退出播放回到来源列表页
-- **体验**：全局横竖屏、深色模式、中 / 繁 / 英 / 日 / 韩五语言、画中画与小窗
+- **体验**：全局横竖屏、深色 / 浅色模式、多套主题配色（主题色 / 强调色）、中 / 繁 / 英 / 日 / 韩五语言、画中画与小窗
 - **工程**：出包脚本化（默认仅 arm64-v8a）、版本号三处一致性校验、纯 Node 回归测试
 
 ## 功能
@@ -52,11 +51,11 @@
 | 媒体 | 官方音乐库、视频库、电台节目、观看历史、稍后再看、下载管理 |
 | 成员 | 成员库、成员档案、成员动态、鸡腿榜、公演记录 |
 | 账号 | 验证码登录、Token 登录与校验、大小号切换、私信、翻牌统计、充值、开发票 |
-| 其他 | 深色模式、横竖屏、五语言、图片查看器、运行时日志 |
+| 其他 | 深色 / 浅色模式、主题配色、横竖屏、五语言、图片查看器、运行时日志 |
 
 ## 安装
 
-从 [Releases](https://github.com/wildfffire/yaya_msg_mobile/releases) 下载 APK。
+从 [Releases](https://github.com/wildfffire/yaya_msg_mobileX/releases) 下载 APK。
 
 文件名为 `yaya-msg-mobile-v<版本>-b<小版本>-<abi>.apk`，例如 `yaya-msg-mobile-v3.0.0-b3000002-v8a.apk`：
 
@@ -171,7 +170,7 @@ React Native 0.83.10 · Expo 55 · TypeScript 5.9 · zustand · react-native-vid
 
 ## 反馈
 
-- 问题与建议：[Issues](https://github.com/wildfffire/yaya_msg_mobile/issues)
+- 问题与建议：[Issues](https://github.com/wildfffire/yaya_msg_mobileX/issues)
 - 提交代码前请确保 `npm run typecheck` 与 `npm run test:core` 全绿
 
 ## 致谢

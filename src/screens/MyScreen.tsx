@@ -171,7 +171,12 @@ export default function MyScreen() {
               </View>
               <View style={{ flex: 1, marginLeft: 14 }}>
                 <Text style={[styles.aboutName, { color: palette.label }]}>{t('牙牙消息 X')}</Text>
-                <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={1}>{t('Yaya Message X · 口袋48 第三方客户端')}</Text>
+                <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={2}>
+                  {t('口袋48 / SNH48 Group 的第三方 Android 客户端')}
+                </Text>
+                <Text style={[styles.aboutSub2, { color: palette.labelTertiary }]} numberOfLines={1}>
+                  {t('面向安卓平板的定制版本')}
+                </Text>
               </View>
               <View style={styles.verChipWrap}>
                 <TouchableOpacity style={[styles.verChip, { backgroundColor: palette.tintSoft }]} onPress={checkVersion} activeOpacity={0.85}>
@@ -267,6 +272,7 @@ const styles = StyleSheet.create({
   aboutLogoImg: { width: 52, height: 52 },
   aboutName: { fontSize: 20, fontWeight: '800' },
   aboutSub: { fontSize: 12, marginTop: 4 },
+  aboutSub2: { fontSize: 11, marginTop: 2 },
   verChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radiiAlias.button },
   verChipWrap: { alignItems: 'flex-end' },
   verDot: { position: 'absolute', top: -2, right: -2, width: 9, height: 9, borderRadius: 5, borderWidth: 1.5 },

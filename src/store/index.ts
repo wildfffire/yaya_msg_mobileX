@@ -145,9 +145,9 @@ AsyncStorage.getItem(ANNOUNCEMENT_SEEN_KEY)
 
 // --- 版本更新检测 ---
 
-const GITHUB_RELEASES_URL = 'https://api.github.com/repos/wildfffire/yaya_msg_mobile/releases/latest';
+const GITHUB_RELEASES_URL = 'https://api.github.com/repos/wildfffire/yaya_msg_mobileX/releases/latest';
 // 降级源：GitHub release 页面 HTML（无 API 匿名限流；共享出口 IP 触发 403 时自动切换）
-const GITHUB_RELEASES_PAGE = 'https://github.com/wildfffire/yaya_msg_mobile/releases/latest';
+const GITHUB_RELEASES_PAGE = 'https://github.com/wildfffire/yaya_msg_mobileX/releases/latest';
 // 更新跳转链接：统一指向用户自建下载页（夸克网盘 + GitHub 双渠道，可随时改页内链接无需发版）
 const UPDATE_DOWNLOAD_PAGE = 'https://010push.a23xyz.xyz/app/';
 const UPDATE_TIMEOUT = 8000;

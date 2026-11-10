@@ -2,13 +2,13 @@
   "name": "yaya-msg-x",
   "version": "3.0.0",
   "description": "牙牙消息 X —— 口袋48 第三方 React Native 移动客户端（独立衍生项目）",
-  "homepage": "https://github.com/wildfffire/yaya_msg_mobile",
+  "homepage": "https://github.com/wildfffire/yaya_msg_mobileX",
   "repository": {
     "type": "git",
-    "url": "https://github.com/wildfffire/yaya_msg_mobile"
+    "url": "https://github.com/wildfffire/yaya_msg_mobileX"
   },
   "bugs": {
-    "url": "https://github.com/wildfffire/yaya_msg_mobile/issues"
+    "url": "https://github.com/wildfffire/yaya_msg_mobileX/issues"
   },
   "author": "wildfffire",
   "license": "GPL-3.0",
