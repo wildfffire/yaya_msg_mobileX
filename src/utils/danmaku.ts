@@ -5,6 +5,12 @@
  *   - 直播回放风格:  [hh:mm:ss]       或  [hh:mm:ss.xxx]
  *   - 标准 LRC:      [mm:ss]          或  [mm:ss.xx]
  * 且正文常为 `昵称\t内容` 形式。逐行容错，任何一行解析失败都不影响整体。
+ *
+ * 正文里的表情短码（`[流泪]` 等）在此统一替换成 emoji —— 录播弹幕和直播弹幕同源，
+ * 官方下发的就是未替换的短码，不处理的话飘屏上就是一串代码。
+ *
+ * 正文偶尔还是**官方 H5 / 其他端发出的 HTML 富文本**（`<div><span style=…>正文</span></div>`、
+ * 图片表情 `<img src="/backstage/…">`），统一在 `stripRichText` 里剥干净再上屏。
  */
 
 export interface DanmakuItem {
@@ -15,6 +21,9 @@ export interface DanmakuItem {
   /** 若存在 `\t` 分隔的昵称则保留 */
   nick?: string;
 }
+
+import { replaceEmojiText } from './emoji';
+import { stripRichText } from './richtext';
 
 const TIME_RE = /^\s*\[\s*(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?(?:\.(\d{1,3}))?\s*\]([\s\S]*)$/;
 
@@ -52,9 +61,16 @@ export function parseDanmaku(raw: string): DanmakuItem[] {
     // `昵称\t内容` 形式：剥离昵称，保留内容
     const tabIdx = text.indexOf('\t');
     if (tabIdx >= 0) {
-      nick = text.slice(0, tabIdx).trim();
+      nick = stripRichText(text.slice(0, tabIdx).trim());
       text = text.slice(tabIdx + 1).trim();
     }
+
+    /*
+     * 录播 LRC 与直播弹幕同源，正文同样可能是官方 H5 / 其他端发出的 HTML 富文本
+     * （`<div><span style="color:#fffff">正文</span></div>`、图片表情 `<img src=…>`）。
+     * 先剥标签后换短码；图片表情折成 `[表情]` 占位（不整条消失，也不糊标签上屏）。
+     */
+    text = replaceEmojiText(stripRichText(text));
 
     if (!text) continue;
 

@@ -176,11 +176,8 @@ export default function MiniPlayerBar({ onOpenFullScreen }: Props) {
           backgroundColor: 'transparent',
           borderColor: palette.innerStroke,
           transform: [{ translateY }],
-          // 音乐页为栈页面（无悬浮 TabBar），贴底悬浮；覆盖 shadows.md 的 elevation（过高会渲染深色边缘）
-          // 位置修正：insets.bottom 是硬编码的系统栏估算，直接贴底（与 dock 一致，不再浮高）
-          // 音乐页为栈页面（无悬浮 TabBar），贴底悬浮
+          // 扁平化（用户 2026-11-09）：去掉投影与 elevation，只留纯色胶囊 + 细描边
           bottom: Math.max(10, insets.bottom - 32),
-          elevation: 3,
         },
       ]}
       {...panResponder.panHandlers}

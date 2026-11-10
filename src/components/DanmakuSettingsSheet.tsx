@@ -1,20 +1,20 @@
 /**
  * 弹幕设置面板（哔哩哔哩风格）：总开关、显示区域、速度、字号、不透明度、重置。
- * 设置来自 useDanmakuSettings，记忆持久化。全主题化（usePalette）+ 统一 Pill/Button。
+ * 设置来自 useDanmakuSettings，记忆持久化。
+ *
+ * 用户 2026-11-09：「弹幕设置这一页的字体、颜色之类的风格和弹幕列表统一一下，都做成这种黑白的」
+ * → 全部取值收敛到 ./danmakuSheetTokens（与 DanmakuListSheet 共用同一套黑白阶），
+ *   不再用 palette.tint 做选中色（深底上会发灰，且 Modal 里会透出房间背景）。
  */
 import React from 'react';
-import { Modal, ScrollView, StyleSheet, Switch, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { Modal, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useDanmakuSettings, DanmakuArea } from '../store/danmakuSettings';
 import { useI18n } from '../i18n';
 import { useIsLandscape } from '../hooks/useIsLandscape';
 import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
-import { usePalette, radii, spacing } from '../theme';
-import { typography } from '../theme/typography';
-import { Pill } from './Pill';
-import { Button } from './Button';
-import { GlassSurface } from '../components/GlassSurface';
-import { GlassSegmented } from '../components/GlassSegmented';
+import { DANMAKU } from './danmakuSheetTokens';
+import { SoleSwitch } from './SoleSwitch';
 
 interface Props {
   visible: boolean;
@@ -44,114 +44,138 @@ const OPACITIES: { v: number; label: string }[] = [
 ];
 
 export default function DanmakuSettingsSheet({ visible, onClose }: Props) {
-  const palette = usePalette();
   const { t } = useI18n();
-  const { enabled, area, speed, fontSize, opacity, set, reset } = useDanmakuSettings();
+  const { enabled, area, speed, fontSize, opacity, giftEffect, avoidOverlap, set, reset } = useDanmakuSettings();
   const { width: winW } = useWindowDimensions();
   const isLandscape = useIsLandscape();
   const insets = useSafeAreaInsets();
-  /**
-   * 横屏：底部抽屉（maxHeight 82%）会把画面几乎压没 → 改右侧抽屉。
-   * 宽 40% 窗口（260~400 夹紧），满高、只圆左侧两角。
-   */
+  /** 横屏：底部抽屉会把画面压没 → 改右侧抽屉（宽 40% 窗口，260~400 夹紧，只圆左侧两角） */
   const drawerW = Math.round(Math.min(400, Math.max(260, winW * 0.4)));
 
-  /** 选项行 = 玻璃滑动选中块（与底栏同一套） */
-  const chipRow = (items: { key?: string; label: string; active: boolean; onPress: () => void }[]) => {
-    const activeIdx = Math.max(0, items.findIndex((i) => i.active));
-    return (
-      <GlassSegmented
-        options={items.map((item, i) => ({ key: String(i), label: item.label }))}
-        value={String(activeIdx)}
-        onChange={(k: string) => items[Number(k)]?.onPress()}
-        height={34}
-      />
-    );
-  };
+  /** 选项行 = 实心黑白胶囊（选中白底黑字，未选白 0.1 底白字） */
+  const chipRow = (items: { key?: string; label: string; active: boolean; onPress: () => void }[]) => (
+    <View style={styles.chipWrap}>
+      {items.map((item) => (
+        <TouchableOpacity
+          key={item.key || item.label}
+          activeOpacity={0.85}
+          onPress={item.onPress}
+          style={[styles.chip, { backgroundColor: item.active ? DANMAKU.chipOnBg : DANMAKU.chipBg }]}
+        >
+          <Text style={[DANMAKU.chipText, { color: item.active ? DANMAKU.chipOnFg : DANMAKU.chipFg }]}>
+            {item.label}
+          </Text>
+        </TouchableOpacity>
+      ))}
+    </View>
+  );
+
+  /**
+   * 开关行（字体/配色与面板其余部分统一）。
+   * 用户 2026-11-09：「黑色的在黑色背景底下看不清」→ 换成黑白描边开关（SoleSwitch）。
+   */
+  const switchRow = (label: string, value: boolean, onChange: (v: boolean) => void) => (
+    <View style={styles.row}>
+      <Text style={DANMAKU.text}>{label}</Text>
+      <SoleSwitch value={value} onValueChange={onChange} label={label} />
+    </View>
+  );
 
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose}>
       <TouchableOpacity style={[styles.mask, isLandscape && styles.maskLandscape]} activeOpacity={1} onPress={onClose}>
-        <GlassSurface radius={20} role="card"
+        {/* 实心深黑底（用户 2026-11-09：玻璃会把房间背景透出来） */}
+        <View
           style={[
             styles.sheet,
-            // 横屏右侧抽屉：满高 + 顶部避让状态栏（100% 高度是从屏幕最上沿算起的，
-            // 不补 paddingTop 的话标题行会压进通知栏）
             isLandscape && { width: drawerW, maxHeight: '100%', height: '100%', paddingTop: insets.top },
             {
-              backgroundColor: 'transparent',
-              borderTopLeftRadius: radii.sheet,
-              borderTopRightRadius: isLandscape ? 0 : radii.sheet,
-              borderBottomLeftRadius: isLandscape ? radii.sheet : 0,
+              backgroundColor: DANMAKU.bg,
+              borderTopLeftRadius: DANMAKU.radius,
+              borderTopRightRadius: isLandscape ? 0 : DANMAKU.radius,
+              borderBottomLeftRadius: isLandscape ? DANMAKU.radius : 0,
             },
           ]}
           onStartShouldSetResponder={() => true}
         >
-          <View style={[styles.handle, { backgroundColor: palette.fill3 }]} />
+          <View style={[styles.handle, { backgroundColor: DANMAKU.handle }]} />
           <View style={styles.header}>
-            <Text style={[typography.headline, { color: palette.label }]}>{t('弹幕设置')}</Text>
+            <Text style={DANMAKU.title}>{t('弹幕设置')}</Text>
             <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.6}>
-              <MaterialCommunityIcons name="close" size={20} color={palette.labelSecondary} />
+              <MaterialCommunityIcons name="close" size={18} color="rgba(255,255,255,0.7)" />
             </TouchableOpacity>
           </View>
 
           <ScrollView style={styles.body} showsVerticalScrollIndicator={false}>
-            {/* 总开关 */}
-            <View style={styles.row}>
-              <Text style={[typography.subhead, { color: palette.label, fontWeight: '600' }]}>{t('显示弹幕')}</Text>
-              <Switch
-                value={enabled}
-                onValueChange={(v) => set({ enabled: v })}
-                thumbColor={enabled ? palette.tint : palette.onTint}
-                trackColor={{ false: palette.fill2, true: palette.tint }}
-              />
-            </View>
+            {switchRow(t('显示弹幕'), enabled, (v) => set({ enabled: v }))}
+            {/* 礼物特效独立于弹幕总开关：关掉弹幕仍可看礼物卡片 */}
+            {switchRow(t('礼物特效'), giftEffect, (v) => set({ giftEffect: v }))}
+            {switchRow(t('防重叠'), avoidOverlap, (v) => set({ avoidOverlap: v }))}
 
-            {/* 显示区域 */}
-            <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('显示区域')}</Text>
+            <View style={[styles.divider, { backgroundColor: DANMAKU.hairline }]} />
+
+            <Text style={[DANMAKU.group, styles.groupLabel]}>{t('显示区域')}</Text>
             {chipRow(AREAS.map((a) => ({ key: a.key, label: t(a.label), active: area === a.key, onPress: () => set({ area: a.key }) })))}
 
-            {/* 速度 */}
-            <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('滚动速度')}</Text>
+            <Text style={[DANMAKU.group, styles.groupLabel]}>{t('滚动速度')}</Text>
             {chipRow(SPEEDS.map((s) => ({ key: s.label, label: t(s.label), active: speed === s.v, onPress: () => set({ speed: s.v }) })))}
 
-            {/* 字号 */}
-            <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('字号')}</Text>
+            <Text style={[DANMAKU.group, styles.groupLabel]}>{t('字号')}</Text>
             {chipRow(SIZES.map((s) => ({ key: s.label, label: t(s.label), active: fontSize === s.v, onPress: () => set({ fontSize: s.v }) })))}
 
-            {/* 不透明度 */}
-            <Text style={[styles.section, { color: palette.labelTertiary }]}>{t('不透明度')}</Text>
+            <Text style={[DANMAKU.group, styles.groupLabel]}>{t('不透明度')}</Text>
             {chipRow(OPACITIES.map((o) => ({ key: o.label, label: t(o.label), active: opacity === o.v, onPress: () => set({ opacity: o.v }) })))}
 
+            {/* 恢复默认：白字文本按钮（不用主题色 Button，保持黑白） */}
             <View style={styles.resetWrap}>
-              <Button title={t('恢复默认')} onPress={() => reset()} variant="plain" size="sm" />
+              <TouchableOpacity
+                onPress={() => reset()}
+                activeOpacity={0.7}
+                style={[styles.resetBtn, { borderColor: DANMAKU.hairline }]}
+              >
+                <MaterialCommunityIcons name="restore" size={14} color="rgba(255,255,255,0.75)" />
+                <Text style={[styles.resetText, { color: 'rgba(255,255,255,0.75)' }]}>{t('恢复默认')}</Text>
+              </TouchableOpacity>
             </View>
           </ScrollView>
-        </GlassSurface>
+        </View>
       </TouchableOpacity>
     </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  mask: { flex: 1, backgroundColor: 'rgba(0,0,0,0.55)', justifyContent: 'flex-end' },
+  mask: { flex: 1, backgroundColor: DANMAKU.scrim, justifyContent: 'flex-end' },
   /** 横屏：右侧抽屉 —— 底板横排、面板贴右 */
   maskLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
-  sheet: {
-    maxHeight: '82%',
-    paddingBottom: 18,
+  chipWrap: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  chip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 999,
   },
-  handle: { width: 38, height: 4, borderRadius: 2, alignSelf: 'center', marginTop: 8, marginBottom: 4 },
+  sheet: { maxHeight: '82%', paddingBottom: 18 },
+  handle: { width: 40, height: 4, borderRadius: 2, alignSelf: 'center', marginTop: 8, marginBottom: 4 },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: spacing.md,
-    paddingVertical: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
   },
-  body: { paddingHorizontal: spacing.md },
-  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 10 },
-  section: { fontSize: 12, fontWeight: '700', marginTop: 12, marginBottom: 6 },
-  chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.xs },
-  resetWrap: { marginTop: 18, alignItems: 'center' },
+  body: { paddingHorizontal: 14 },
+  row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 9 },
+  divider: { height: StyleSheet.hairlineWidth, marginVertical: 6 },
+  groupLabel: { marginTop: 10, marginBottom: 6 },
+  resetWrap: { marginTop: 18, marginBottom: 6, alignItems: 'center' },
+  resetBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 5,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: 999,
+    borderWidth: StyleSheet.hairlineWidth,
+  },
+  resetText: { fontSize: 12, fontWeight: '700' },
 });

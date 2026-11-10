@@ -30,6 +30,10 @@ import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityI
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useI18n } from '../i18n';
 import { useIsLandscape } from '../hooks/useIsLandscape';
+import { usePlayerStore } from '../player/store/playerStore';
+import { replaceEmojiText } from '../utils/emoji';
+// 弹幕列表整块保持黑白阶（与弹幕设置面板共用同一套 token）
+import { DANMAKU } from './danmakuSheetTokens';
 
 export interface DanmakuListEntry {
   id: string;
@@ -89,7 +93,10 @@ function fmtTime(sec: number): string {
   return h > 0 ? `${h}:${pad(m)}:${pad(ss)}` : `${pad(m)}:${pad(ss)}`;
 }
 
-/** 直播弹幕类别 → 强调色（成员/礼物/进场用主色与弱化色区分，普通观众保持白色） */
+/**
+ * 直播弹幕类别 → 黑白阶强调（用户 2026-11-09：弹幕面板统一黑白，不再用主题色区分）。
+ * 成员/礼物等「重要发言」= 接近纯白；进场/系统 = 弱化灰。
+ */
 function kindColor(kind: string | undefined): string | null {
   switch (kind) {
     case 'member':
@@ -97,7 +104,7 @@ function kindColor(kind: string | undefined): string | null {
     case 'gift':
     case 'pay':
     case 'starwo':
-      return '#FF6FA5';
+      return DANMAKU.accent;
     case 'enter':
     case 'system':
       return 'rgba(255,255,255,0.45)';
@@ -110,7 +117,7 @@ export function DanmakuListSheet({
   visible,
   onClose,
   entries,
-  currentTime = 0,
+  currentTime,
   onSeek,
   live = false,
   loading = false,
@@ -119,6 +126,13 @@ export function DanmakuListSheet({
 }: DanmakuListSheetProps) {
   const { t } = useI18n();
   const insets = useSafeAreaInsets();
+  /**
+   * 弹幕时钟：外部显式传入优先；**未传则自行订阅 `playerStore.position`**。
+   * 这样父级巨型屏（MediaScreen / FollowedRoomsScreen）不必订阅 4Hz 的 position
+   * 再透传，避免整屏每 250ms 全量 reconcile。
+   */
+  const storeTime = usePlayerStore((s) => s.position);
+  const clock = currentTime !== undefined ? currentTime : storeTime;
   const { width: screenW, height: screenH } = useWindowDimensions();
   const isLandscape = useIsLandscape();
 
@@ -194,7 +208,7 @@ export function DanmakuListSheet({
   /** 当前播放位置对应的条目下标（仅录播；filtered 为升序，二分查找，长录播也不卡） */
   const activeIndex = useMemo(() => {
     if (live || !filtered.length) return -1;
-    const target = currentTime + 0.05;
+    const target = clock + 0.05;
     let lo = 0;
     let hi = filtered.length - 1;
     let idx = -1;
@@ -208,7 +222,7 @@ export function DanmakuListSheet({
       }
     }
     return idx;
-  }, [filtered, currentTime, live]);
+  }, [filtered, clock, live]);
 
   // 跟随播放：把当前条目滚到列表上方 1/3 处（提词器式，不做动画避免逐帧重排）
   useEffect(() => {
@@ -266,13 +280,13 @@ export function DanmakuListSheet({
           onPress={() => jumpTo(item)}
           style={({ pressed }) => [
             styles.row,
-            isActive && styles.rowActive,
-            pressed && { backgroundColor: 'rgba(255,255,255,0.1)' },
+            isActive && { backgroundColor: DANMAKU.rowActive },
+            pressed && { backgroundColor: DANMAKU.rowPressed },
           ]}
         >
-          {isActive ? <View style={styles.activeBar} /> : null}
+          {isActive ? <View style={[styles.activeBar, { backgroundColor: DANMAKU.accent }]} /> : null}
           {live ? null : (
-            <Text style={[styles.time, isActive && { color: '#FF6FA5' }]}>{fmtTime(item.time)}</Text>
+            <Text style={[styles.time, isActive && { color: DANMAKU.accent }]}>{fmtTime(item.time)}</Text>
           )}
           <Text style={styles.rowText} numberOfLines={ROW_LINES}>
             <Text
@@ -289,7 +303,8 @@ export function DanmakuListSheet({
             >
               {item.nick ? `${item.nick}：` : ''}
             </Text>
-            <Text style={accent ? { color: accent } : undefined}>{item.text}</Text>
+            {/* 与飘屏同一道防线：抽屉里的正文也过表情替换（上游新增来源时不会再漏短码） */}
+            <Text style={accent ? { color: accent } : undefined}>{replaceEmojiText(item.text)}</Text>
           </Text>
         </Pressable>
       );
@@ -355,13 +370,17 @@ export function DanmakuListSheet({
             : `${filtered.length}/${entries.length}`}
         </Text>
         {!live && onSeek ? (
-          <TouchableOpacity onPress={toggleFollow} activeOpacity={0.75} style={[styles.followBtn, follow && styles.followBtnOn]}>
+          <TouchableOpacity
+            onPress={toggleFollow}
+            activeOpacity={0.75}
+            style={[styles.followBtn, follow && { backgroundColor: DANMAKU.chipOnBg }]}
+          >
             <MaterialCommunityIcons
               name={follow ? 'crosshairs-gps' : 'crosshairs'}
               size={12}
-              color={follow ? '#fff' : 'rgba(255,255,255,0.75)'}
+              color={follow ? DANMAKU.chipOnFg : 'rgba(255,255,255,0.75)'}
             />
-            <Text style={[styles.followText, follow && { color: '#fff' }]}>{t('跟随')}</Text>
+            <Text style={[styles.followText, follow && { color: DANMAKU.chipOnFg }]}>{t('跟随')}</Text>
           </TouchableOpacity>
         ) : null}
         <TouchableOpacity onPress={onClose} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} activeOpacity={0.7}>
@@ -412,7 +431,7 @@ export function DanmakuListSheet({
                 {t('只看：{name}', { name: nickFilter })}
               </Text>
               <TouchableOpacity onPress={() => setNickFilter('')} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-                <Text style={styles.filterClear}>{t('清除')}</Text>
+                <Text style={[styles.filterClear, { color: DANMAKU.accent }]}>{t('清除')}</Text>
               </TouchableOpacity>
             </View>
           ) : null}
@@ -476,21 +495,21 @@ const styles = StyleSheet.create({
   root: { flex: 1, justifyContent: 'flex-end' },
   /** 横屏：右侧抽屉 —— 底板横排、面板贴右 */
   rootLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
-  backdrop: { flex: 1, backgroundColor: 'rgba(0,0,0,0.42)' },
+  backdrop: { flex: 1, backgroundColor: DANMAKU.scrim },
   sheet: {
-    backgroundColor: 'rgba(18,18,20,0.96)',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
+    backgroundColor: DANMAKU.bg,
+    borderTopLeftRadius: DANMAKU.radius,
+    borderTopRightRadius: DANMAKU.radius,
     overflow: 'hidden',
   },
   /** 横屏右侧抽屉：只有左侧两角圆角（右侧贴屏幕边缘） */
-  sheetLandscape: { borderTopRightRadius: 0, borderBottomLeftRadius: 20, borderBottomRightRadius: 0 },
+  sheetLandscape: { borderTopRightRadius: 0, borderBottomLeftRadius: DANMAKU.radius, borderBottomRightRadius: 0 },
   // 手柄命中区做高一些（22px）：太窄会「拖不动面板」
   handleArea: { alignItems: 'center', justifyContent: 'center', height: 22 },
-  handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: 'rgba(255,255,255,0.35)' },
+  handle: { width: 40, height: 4, borderRadius: 2, backgroundColor: DANMAKU.handle },
   headerRow: { flexDirection: 'row', alignItems: 'center', gap: 6, paddingHorizontal: 14, paddingBottom: 8 },
-  title: { fontSize: 13, fontWeight: '700', color: 'rgba(255,255,255,0.94)', flexShrink: 1 },
-  total: { fontSize: 11, color: 'rgba(255,255,255,0.5)', marginLeft: 'auto' },
+  title: { ...DANMAKU.title, flexShrink: 1 },
+  total: { ...DANMAKU.meta, marginLeft: 'auto' },
   followBtn: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -498,15 +517,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 8,
     paddingVertical: 3,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.14)',
+    backgroundColor: DANMAKU.chipBg,
   },
-  followBtnOn: { backgroundColor: '#FF6FA5' },
-  followText: { fontSize: 10, fontWeight: '700', color: 'rgba(255,255,255,0.75)' },
+  followBtnOn: { backgroundColor: DANMAKU.chipOnBg },
+  followText: { fontSize: 10, fontWeight: '700', color: DANMAKU.chipFg },
   tabRow: { flexDirection: 'row', gap: 6, paddingHorizontal: 14, paddingBottom: 8 },
-  tab: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: 'rgba(255,255,255,0.1)' },
-  tabOn: { backgroundColor: 'rgba(255,255,255,0.9)' },
-  tabText: { fontSize: 11, fontWeight: '700', color: 'rgba(255,255,255,0.75)' },
-  tabTextOn: { color: '#111' },
+  tab: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, backgroundColor: DANMAKU.chipBg },
+  tabOn: { backgroundColor: DANMAKU.chipOnBg },
+  tabText: { ...DANMAKU.chipText, color: DANMAKU.chipFg },
+  tabTextOn: { color: DANMAKU.chipOnFg },
   searchRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -515,12 +534,12 @@ const styles = StyleSheet.create({
     paddingHorizontal: 10,
     height: 34,
     borderRadius: 999,
-    backgroundColor: 'rgba(255,255,255,0.12)',
+    backgroundColor: DANMAKU.fieldBg,
   },
   searchInput: { flex: 1, fontSize: 12, color: 'rgba(255,255,255,0.94)', padding: 0 },
   filterRow: { flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 16, paddingTop: 8 },
   filterLabel: { fontSize: 11, color: 'rgba(255,255,255,0.7)', flexShrink: 1 },
-  filterClear: { fontSize: 11, fontWeight: '700', color: '#FF6FA5' },
+  filterClear: { fontSize: 11, fontWeight: '700', color: DANMAKU.accent },
   listContent: { paddingTop: 6, paddingBottom: 12 },
   row: {
     flexDirection: 'row',
@@ -531,8 +550,8 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 4,
   },
-  rowActive: { backgroundColor: 'rgba(255,111,165,0.16)' },
-  activeBar: { position: 'absolute', left: 0, top: 6, bottom: 6, width: 3, borderRadius: 2, backgroundColor: '#FF6FA5' },
+  rowActive: { backgroundColor: DANMAKU.rowActive },
+  activeBar: { position: 'absolute', left: 0, top: 6, bottom: 6, width: 3, borderRadius: 2, backgroundColor: DANMAKU.accent },
   time: { fontSize: 11, color: 'rgba(255,255,255,0.45)', width: 52, fontVariant: ['tabular-nums'] },
   rowText: { flex: 1, fontSize: 12.5, lineHeight: 18, color: 'rgba(255,255,255,0.92)' },
   nick: { fontWeight: '700', color: 'rgba(255,255,255,0.72)' },

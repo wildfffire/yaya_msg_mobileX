@@ -1,9 +1,9 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Animated, GestureResponderEvent, Keyboard, Modal, PanResponder, Platform, Pressable, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
+import { ActivityIndicator, Animated, GestureResponderEvent, Keyboard, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { usePlayerStore } from '../store/playerStore';
-import { PlayerFeatures } from '../types';
+import { PlayerFeatures, PlayerExtraActionOption } from '../types';
 import { useI18n } from '../../i18n';
 import { usePalette } from '../../theme';
 import { formatPlayTime } from './FullscreenManager';
@@ -13,6 +13,8 @@ import { useUiStore } from '../../store';
 import { errorMessage } from '../../utils/data';
 import { isLandscapeSize } from '../../utils/orientation';
 import { useDanmakuSettings } from '../../store/danmakuSettings';
+import { useWatchLaterStore, watchLaterBucket } from '../../services/watchLater';
+import TeamBadge from '../../components/TeamBadge';
 
 interface Props {
   features?: PlayerFeatures;
@@ -21,7 +23,10 @@ interface Props {
     icon: string;
     label: string;
     active?: boolean;
-    onPress: () => void;
+    /** 选项下拉（B站画质）：带此项时点击「播放器功能」条目 → 关闭面板并从播放器右侧弹出独立小面板 */
+    options?: PlayerExtraActionOption[];
+    /** 带 options 时可省略（条目仅作展开/收起入口） */
+    onPress?: () => void;
   }>;
   /** 顶栏左上按钮（返回键右侧、标题前）：如公告开关，收起后仍可随时点开（2026-09-26） */
   topLeftAction?: {
@@ -31,6 +36,11 @@ interface Props {
     onPress: () => void;
   };
   onClose?: () => void;
+  /**
+   * 右上角「成员名 + 队伍」点击（进入成员房间）：不传 = 只展示不可点。
+   * 用户 2026-11-04 定版：进房入口从标题挪到成员名，标题恢复为纯文本。
+   */
+  memberAction?: () => void;
   /** 内嵌模式：不渲染顶栏（列表页内嵌播放器），仅底坞 + 全屏 */
   inline?: boolean;
   /** 错误重试回调：页面可传「重新解析地址」而非仅重播同 URL（直播流地址有时效） */
@@ -41,16 +51,67 @@ interface Props {
 
 /** 控制条自动隐藏间隔 */
 const CONTROLS_HIDE_MS = 3500;
-/** 可用倍速档（点播/回放） */
-const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2];
-/** 触控色（全屏黑底上固定亮色，不随主题） */
+/** 可用倍速档（点播/回放）：用户 2026-09-30 要求补上 3x / 4x（回放赶进度用） */
+const RATES = [0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4];
+/**
+ * 触控色：运行时一律用 palette.tint（用户 2026-11-09 要求弹幕开关等随主题色变化）。
+ * 这个常量只留给 StyleSheet 里的静态兜底（错误重试按钮），实际渲染时再用内联色覆盖。
+ * 全屏黑底上仍需要亮色：深色主题下 palette.tint 会自动提亮，浅色主题下保持种子色。
+ */
 const TINT = '#ff6f91';
+/** 录播跳转步长（秒）：播放键两侧的圆圈箭头按钮用它 */
+const SEEK_STEP_SEC = 10;
+/** 双击判定窗口（毫秒）：两次点击间隔小于它算双击 */
+const DOUBLE_TAP_MS = 320;
+/** 长按快放的倍速（松手恢复原倍速）：用户 2026-09-30 要求从 2x 提到 4x */
+const BOOST_RATE = 4;
+/**
+ * 直播暂停「落后 ≥ 多少秒」才给「回到直播」按钮。
+ * 阈值与 PlayerCore 的 LIVE_RESUME_EDGE_MS 保持一致：低于它恢复时不会重建内核，
+ * 也就没必要引导用户点（点了也只是原地继续）。
+ */
+const LIVE_LAG_HINT_SEC = 5;
+
+/**
+ * 暂停态「中央提示」的样式变体（用户 2026-09-30 觉得原大白圆钮太丑，要备选）。
+ *
+ *   glass = 玻璃胶囊（半透明深底 + 播放三角 + 「已暂停」文字）：信息最清楚，默认
+ *   ring  = 细线圆环（1.5px 白描边，无填充）：最轻、几乎不挡画面
+ *   bare  = 无底大三角（只有带阴影的白色三角）：极简
+ *   tint  = 品牌色小圆钮（52px 粉色实心 + 白三角）：与 App 主题呼应
+ *
+ * 左下角的播放/暂停键**不受影响**（用户明确说那里可以不动）。
+ * 变体存放在模块级变量里：本会话内用播放器「…」面板的「暂停钮样式」项循环切换即时对比，
+ * 用户选定后把下面的默认值改成那个即可（届时可删掉调试项）。
+ */
+type CenterPlayVariant = 'glass' | 'ring' | 'bare' | 'tint';
+const CENTER_PLAY_VARIANTS: CenterPlayVariant[] = ['glass', 'ring', 'bare', 'tint'];
+const CENTER_PLAY_LABELS: Record<CenterPlayVariant, string> = {
+  glass: 'Glass',
+  ring: 'Ring',
+  bare: 'Bare',
+  tint: 'Tint',
+};
+/** 默认 = ring（用户 2026-09-30 在四个备选里选了 B「圆环」，并要求圆环与其中的三角都再大一些） */
+let centerPlayVariant: CenterPlayVariant = 'ring';
+
+/**
+ * 直播判定：kind 或流形态（rtmp/rtmps/.flv 铁定直播）。
+ *
+ * ⚠️ 渲染层与手势层必须同源：kind 被误标成 vod 的直播流若走了「录播语义」，
+ * 双击会去暂停直播（无意义）、按钮会去 seek（拖直播流会崩原生播放器）。
+ */
+function sourceIsLive(src?: { kind?: string; url?: string } | null): boolean {
+  if (!src) return false;
+  const u = String(src.url || '').toLowerCase();
+  return src.kind === 'live' || u.startsWith('rtmp://') || u.startsWith('rtmps://') || u.includes('.flv');
+}
 
 /**
  * 唯一播放器控制层（重写核心）：渐变遮罩顶栏 + 悬浮底坞（可拖进度/倍速/弹幕/全屏）+ 更多面板。
  * 所有页面共用；能力按 features 声明渲染。
  */
-export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, onClose, inline = false, onRetry, barrageInput }: Props) {
+export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, onClose, inline = false, onRetry, barrageInput, memberAction }: Props) {
   const { t } = useI18n();
   const palette = usePalette();
   const meta = usePlayerStore((s) => s.meta);
@@ -69,6 +130,8 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
   // 与 DanmakuSettingsSheet 里的「显示弹幕」总开关是同一个值 —— 两处不会再互相打架。
   const danmakuOn = useDanmakuSettings((s) => s.enabled);
   const [moreVisible, setMoreVisible] = useState(false);
+  /** 选项动作（如 B站画质）的右侧独立小面板：非 null 时从右侧弹出（用户 2026-10-02：不内嵌在功能面板里） */
+  const [optionSheet, setOptionSheet] = useState<{ title: string; options: PlayerExtraActionOption[] } | null>(null);
   const [rateSheetVisible, setRateSheetVisible] = useState(false);
   const { width: screenW, height: screenH } = useWindowDimensions();
   /** 横屏专用布局开关：横屏走「顶栏压缩 + 底坞单行 + 右侧快捷栏」 */
@@ -92,9 +155,62 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
   const kbVisibleRef = useRef(false);
   /** showControls 的 ref（键盘收起后要重启自动隐藏计时，而 effect 定义在 showControls 之前） */
   const showControlsRef = useRef<(() => void) | null>(null);
-  const tapRef = useRef<{ t: number; side: 'l' | 'r' } | null>(null);
+  /** 上次单击时间戳（双击判定用）：不再区分左右 —— 双击语义已统一为「暂停/播放」 */
+  const tapRef = useRef<{ t: number } | null>(null);
+  /** 双击判定 / 长按抑制复位的定时器句柄：卸载时统一清理（见下方 unmount effect） */
+  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pressResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [seekFlash, setSeekFlash] = useState<number | null>(null);
   const seekFlashTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /**
+   * 直播判定（kind 或 rtmp/rtmps/.flv 形态），**在早退之前算好**：
+   * 下面「直播暂停计时」是一个 useEffect，而 hooks 绝不能放在 `if (!source) return null` 之后
+   *（source 短暂为空时 hook 数变化 → "Rendered more hooks"）。
+   */
+  const liveSource = sourceIsLive(source);
+  /**
+   * 长按快放（建议 3，用户 2026-09-30 选定）：按住 350ms → 2x，松手恢复原倍速。
+   * boostRef 记住「按住之前的倍速」，active 标记当前是否处于快放中。
+   * 仅录播放行：直播 2x 只会让缓冲永远追不上实时。
+   */
+  const boostRef = useRef<{ prevRate: number; active: boolean }>({ prevRate: 1, active: false });
+  /** 长按结束后**紧随其后的 onPress 必须被吞掉**（否则会顺带切控制条 / 进双击判定） */
+  const suppressTapRef = useRef(false);
+  const [boosting, setBoosting] = useState(false);
+  /**
+   * 直播暂停时长（秒）：直播暂停期间**服务器时间照走**，所以「落后多少秒」≈ 暂停了多久。
+   * PlayerCore 会在恢复时把落后超过 5s 的直播重建内核拉回实时，这里只是让用户看得见。
+   */
+  const [livePausedSec, setLivePausedSec] = useState(0);
+  /** 暂停态中央提示的样式变体（见顶部 CENTER_PLAY_VARIANTS 注释）：可在「…」面板里循环切换对比 */
+  const [centerVariant, setCenterVariant] = useState<CenterPlayVariant>(centerPlayVariant);
+  /**
+   * 「稍后再看」内置动作的状态（用户 2026-09-30：入口从列表行书签挪到播放器的功能面板）。
+   *
+   * 只对**能事后重新解析地址**的内容开放 —— 也就是带 `source.ref` 的（官方视频库 / 公演回放 /
+   * 房间直播回放）。直播没有 ref（地址当场有效、过期作废），所以面板里不显示这个动作，
+   * 避免「加了却播不了」。收藏内容由 store 统一管理（见 services/watchLater.ts）。
+   */
+  const watchLaterRef = source?.ref && source.ref.id ? source.ref : undefined;
+  const inWatchLater = useWatchLaterStore((s) =>
+    /**
+     * 用「同一场内容」桶判定，而不是精确 key（用户 2026-09-30：「同一个直播多次记录」）：
+     * openlive / replay 的 id 都是 liveId → 从任一入口收藏过，另一个入口进来也该显示"已收藏"。
+     */
+    !!watchLaterRef && s.items.some((it) => watchLaterBucket(it.kind, it.id) === watchLaterBucket(watchLaterRef.kind, watchLaterRef.id)),
+  );
+  useEffect(() => {
+    if (!liveSource || state !== 'paused') {
+      setLivePausedSec(0);
+      return undefined;
+    }
+    const startedAt = Date.now();
+    setLivePausedSec(0);
+    const timer = setInterval(() => {
+      setLivePausedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [liveSource, state]);
   const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // 控制条淡入淡出
   const controlsOpacity = useRef(new Animated.Value(1)).current;
@@ -205,46 +321,69 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
     };
   }, [showControls, source?.url]);
 
-  // 双击快进/快退：±10s（点播）；单击唤出/隐藏控制条（延迟 320ms 等双击判定）
-  const onVideoTap = useCallback((side: 'l' | 'r') => {
+  /**
+   * 屏幕点按分流（用户 2026-09-30 定版）：
+   *  - 双击 = 暂停 / 继续，**直播与录播一视同仁**（用户后续明确要求「所有直播也要」）
+   *  - 单击 = 唤出/隐藏控制条（延迟 DOUBLE_TAP_MS 等双击判定）
+   *
+   * 历史：最初双击是「左侧 -10s / 右侧 +10s」，按用户要求已移除 ——
+   * 那对操作挪到了播放键两侧的圆圈箭头按钮（seekBy），双击让位给暂停/继续。
+   * 好处：画面任意处双击都能暂停，不必去够底部那排按钮。
+   *
+   * 直播暂停由各内核真实执行（不是仅改 UI 状态）：
+   *  - Exo(LiveExoView)：paused → 原生 playWhenReady=false；
+   *  - RNV(native)：paused prop；
+   *  - Web(flv.js/hls.js)：PlayerCore 经 postMessage 下发 setPaused。
+   * 恢复直播时 PlayerCore 会把长时间暂停的直播拉回实时边缘（见其「回到直播边缘」注释）。
+   */
+  const onVideoTap = useCallback(() => {
+    /**
+     * 单击语义 = 切换沉浸。
+     * 以前只做「唤出控制条」，想进沉浸只能干等 CONTROLS_HIDE_MS(3.5s) 自动隐藏
+     *（用户反馈「直播中点一下屏幕要进入沉浸状态，现在只有放置一段时间自动进入」）。
+     * 现在：控制条可见 → 立刻收起（进沉浸）；已隐藏 → 唤出。
+     */
+    const flipControls = () => {
+      const st = usePlayerStore.getState();
+      if (st.controlsVisible) {
+        if (hideTimer.current) clearTimeout(hideTimer.current);
+        st.toggleControls(false);
+      } else {
+        showControls();
+      }
+    };
     const now = Date.now();
     const prev = tapRef.current;
-    if (prev && now - prev.t < 320 && prev.side === side) {
-      tapRef.current = null;
-      const s = usePlayerStore.getState();
-      if (s.source?.kind !== 'live' && s.duration > 0 && (s.state === 'playing' || s.state === 'paused')) {
-        const delta = side === 'r' ? 10 : -10;
-        const base = s.position;
-        const target = Math.max(0, Math.min(s.duration - 0.3, base + delta));
-        // 不依赖闭包 seekTo（useCallback 锁首帧作用域会 TDZ）——直接走 store
-        s.setPosition(target);
-        s.setSeekTarget(target);
-        setSeekFlash(delta);
-        if (seekFlashTimer.current) clearTimeout(seekFlashTimer.current);
-        seekFlashTimer.current = setTimeout(() => setSeekFlash(null), 900);
-      }
+    if (prev && now - prev.t < DOUBLE_TAP_MS) {
+      tapRef.current = null; // 置空即可让上一次单击的延时回调自动失效（无需额外计时器）
+      const st = usePlayerStore.getState();
+      // 只在实际可播状态切换（loading/error 期间切态会让内核收到矛盾指令）；
+      // 直播与录播走同一分支 —— 直播暂停＝停住画面，继续＝恢复（长时间暂停会被拉回实时）
+      if (st.state === 'playing') st.setState('paused');
+      else if (st.state === 'paused') st.setState('playing');
       return;
     }
-    tapRef.current = { t: now, side };
-    setTimeout(() => {
+    tapRef.current = { t: now };
+    if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+    tapTimerRef.current = setTimeout(() => {
+      tapTimerRef.current = null;
       if (tapRef.current && tapRef.current.t === now) {
         tapRef.current = null;
-        /**
-         * 单击 = 切换沉浸。
-         * 以前只做「唤出控制条」，想进沉浸只能干等 CONTROLS_HIDE_MS(3.5s) 自动隐藏
-         *（用户反馈「直播中点一下屏幕要进入沉浸状态，现在只有放置一段时间自动进入」）。
-         * 现在：控制条可见 → 立刻收起（进沉浸）；已隐藏 → 唤出。双击仍然只做 ±10s。
-         */
-        const st = usePlayerStore.getState();
-        if (st.controlsVisible) {
-          if (hideTimer.current) clearTimeout(hideTimer.current);
-          st.toggleControls(false);
-        } else {
-          showControls();
-        }
+        flipControls();
       }
-    }, 320);
+    }, DOUBLE_TAP_MS);
   }, [showControls]);
+
+  /**
+   * 卸载时清掉所有「延迟回调」定时器（用户 2026-09-30：「直播退出所有界面都出现卡顿」的普查要求）。
+   * 双击判定 / 长按抑制复位 / ±10s 闪示 这三处 setTimeout 以前都没有卸载清理 ——
+   * 退出播放器后仍会 fire（写 store / setState），属于"退出后还在动"的残留。
+   */
+  useEffect(() => () => {
+    if (tapTimerRef.current) { clearTimeout(tapTimerRef.current); tapTimerRef.current = null; }
+    if (pressResetTimerRef.current) { clearTimeout(pressResetTimerRef.current); pressResetTimerRef.current = null; }
+    if (seekFlashTimer.current) { clearTimeout(seekFlashTimer.current); seekFlashTimer.current = null; }
+  }, []);
 
   // 播放器内下载（替代长按）：点播/回放/音频可下载；HLS 分段与直播不提供
   // ⚠️ hooks 必须在 line `if (!source) return null`（更下方）之前：source 短暂为空时
@@ -273,18 +412,44 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
     && !/\.m3u8/i.test(source.url);
   const moreActions = useMemo(() => {
     if (!downloadAvailable) return extraActions;
-    return [{ key: 'download', icon: 'download', label: t('下载'), onPress: runDownload } as any, ...extraActions];
+    return [{ key: 'download', icon: 'download', label: t('下载'), onPress: runDownload }, ...extraActions];
   }, [downloadAvailable, extraActions, runDownload, t]);
 
   if (!source) return null;
 
   const playing = state === 'playing';
-  // 直播判定 = kind 或流形态（rtmp/rtmps/.flv 铁定直播）：防止 kind 误标成 vod 时直播
-  // 出现可拖进度条（拖动 seek 直播流 → RNV 原生异常闪退）与错误的时间样式
-  const _u = String((source && source.url) || '').toLowerCase();
-  const isLive = source.kind === 'live' || _u.startsWith('rtmp://') || _u.startsWith('rtmps://') || _u.includes('.flv');
+  // 直播判定：kind 或流形态（rtmp/rtmps/.flv 铁定直播）—— 见顶部 sourceIsLive。
+  // 防止 kind 误标成 vod 时直播出现可拖进度条（拖动 seek 直播流 → RNV 原生异常闪退）、
+  // 出现 ±10s 圆圈箭头与「双击暂停」。渲染层与手势层共用同一函数，避免判定漂移。
+  // 值来自早退之前算好的 liveSource（供 hooks 复用，见那里的注释）。
+  const isLive = liveSource;
   // 卡片内嵌态（inline 且未全屏）：不叠任何控制坞，点击即进全屏
   const cardMode = inline && !fullscreen;
+  /**
+   * 长按快放：按住 → 2x；松手 / 手指移出 → 恢复原倍速。
+   * 仅录播 + 正在播放时生效（暂停中快放没有意义；卡片态的长按留给拖拽排序语义，不抢）。
+   */
+  const startBoost = () => {
+    if (isLive || cardMode || inline) return;
+    const st = usePlayerStore.getState();
+    if (st.state !== 'playing' || boostRef.current.active) return;
+    boostRef.current = { prevRate: st.rate > 0 ? st.rate : 1, active: true };
+    st.setRate(BOOST_RATE);
+    setBoosting(true);
+  };
+  const endBoost = () => {
+    if (!boostRef.current.active) return;
+    boostRef.current.active = false;
+    setBoosting(false);
+    // 吞掉紧随其后的 onPress（长按松手 RN 也会派发 onPress）；400ms 后自动复位防残留
+    suppressTapRef.current = true;
+    if (pressResetTimerRef.current) clearTimeout(pressResetTimerRef.current);
+    pressResetTimerRef.current = setTimeout(() => {
+      pressResetTimerRef.current = null;
+      suppressTapRef.current = false;
+    }, 400);
+    usePlayerStore.getState().setRate(boostRef.current.prevRate);
+  };
   const progRatio = duration > 0 ? Math.max(0, Math.min(1, position / duration)) : 0;
   // 拖动中显示本地预览比例与目标时间（跟手），不依赖高频 store 写入
   const shownRatio = dragRatio != null ? dragRatio : progRatio;
@@ -322,6 +487,26 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
     // seek 指令交给 PlayerCore（内核消费后清零）
     s.setSeekTarget(t);
     showControls();
+  };
+
+  /**
+   * 录播跳转 ±SEEK_STEP_SEC（播放键两侧的圆圈箭头，用户 2026-09-30 要求）。
+   * 原先是「双击屏幕左侧 -10s / 右侧 +10s」，已移除 —— 双击改作暂停/播放，
+   * 跳转收进控制坞按钮，既能精确点按又不会在拖动画面时误触。
+   * 与 seekTo 一样：直接走 store，不依赖闭包（本函数在早退之后定义，闭包锁首帧会 TDZ）。
+   */
+  const seekBy = (delta: number) => {
+    if (isLive) return;
+    const s = usePlayerStore.getState();
+    if (!(s.duration > 0) || (s.state !== 'playing' && s.state !== 'paused')) return;
+    const target = Math.max(0, Math.min(s.duration - 0.3, s.position + delta));
+    s.setPosition(target);
+    s.setSeekTarget(target);
+    // 画面中央闪一下 ±10s（原生播放器 seek 有肉眼可见的滞后，需要即时反馈）
+    setSeekFlash(delta);
+    if (seekFlashTimer.current) clearTimeout(seekFlashTimer.current);
+    seekFlashTimer.current = setTimeout(() => setSeekFlash(null), 900);
+    showControls(); // 正在操作：重置自动隐藏计时，别刚点完就把控制坞淡走
   };
 
   const ratioFromX = (pageX: number): number | null => {
@@ -400,7 +585,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
     <>
       {features.rate && !isLive && !useWebKernel ? (
         <TouchableOpacity style={styles.ctrlBtn} onPress={() => setRateSheetVisible(true)} activeOpacity={0.75}>
-          <Text style={[styles.rateText, rate !== 1 && { color: TINT }]}>{rate}x</Text>
+          <Text style={[styles.rateText, rate !== 1 && { color: palette.tint }]}>{rate}x</Text>
         </TouchableOpacity>
       ) : null}
       {features.danmaku && !useWebKernel ? (
@@ -408,7 +593,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
           <MaterialCommunityIcons
             name={danmakuOn ? 'comment-text-multiple' : 'comment-text-multiple-outline'}
             size={20}
-            color={danmakuOn ? TINT : 'rgba(255,255,255,0.9)'}
+            color={danmakuOn ? palette.tint : 'rgba(255,255,255,0.9)'}
           />
         </TouchableOpacity>
       ) : null}
@@ -420,7 +605,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
         return (
           <TouchableOpacity
             style={styles.ctrlBtn}
-            onPress={() => { pipAction.onPress(); showControls(); }}
+            onPress={() => { pipAction.onPress?.(); showControls(); }}
             activeOpacity={0.75}
           >
             <MaterialCommunityIcons name="picture-in-picture-bottom-right-outline" size={20} color="rgba(255,255,255,0.92)" />
@@ -476,7 +661,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
           ) : null}
           <View style={styles.titleWrap}>
             <Text style={styles.titleText} numberOfLines={1}>{meta.title}</Text>
-            {/* 小指标胶囊：直播=聊天室在线人数；录播=累计播放数（官方数据，见 PlayerMeta.stat） */}
+            {/* 小指标胶囊：直播=聊天室实时在线；拿不到 / 录播=本场累计观看人次（见 PlayerMeta.stat） */}
             {meta.stat ? (
               <View style={styles.onlinePill}>
                 <MaterialCommunityIcons name={meta.stat.icon as any} size={11} color="rgba(255,255,255,0.92)" />
@@ -484,6 +669,25 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
               </View>
             ) : null}
           </View>
+          {/**
+           * 右上角「队伍徽章 + 成员名」（用户 2026-11-04）：
+           * 显示口径与直播列表卡片一致（TeamBadge 在前、成员名在后）；
+           * 点击进入该成员的房间（直播页 / 历史 / 稍后再看统一）。
+           * 房间内播放（roomLink=false）仍展示，但不可点。
+           */}
+          {meta.owner || meta.team ? (
+            <TouchableOpacity
+              style={styles.memberChip}
+              onPress={memberAction}
+              disabled={!memberAction}
+              activeOpacity={0.75}
+            >
+              {meta.team ? <TeamBadge team={meta.team} fontSize={9} /> : null}
+              {meta.owner ? (
+                <Text style={styles.memberName} numberOfLines={1}>{meta.owner}</Text>
+              ) : null}
+            </TouchableOpacity>
+          ) : null}
           <TouchableOpacity style={[styles.topBtn, isLandscape ? styles.topBtnLandscape : null]} onPress={() => setMoreVisible(true)}>
             <MaterialCommunityIcons name="dots-horizontal" size={22} color="#fff" />
           </TouchableOpacity>
@@ -499,7 +703,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
         <View style={styles.errorWrap} pointerEvents="box-none">
           <Text style={styles.errorText}>{error}</Text>
           <TouchableOpacity
-            style={styles.errorBtn}
+            style={[styles.errorBtn, { backgroundColor: palette.tint }]}
             onPress={() => {
               // 有 onRetry（页面重新解析）优先；否则仅重播同 URL
               if (onRetry) onRetry();
@@ -512,35 +716,94 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
         </View>
       ) : null}
 
-      {/* 缓冲/加载中：中央转圈（内核 onLoad 前；仅在非 error 时） */}
-      {state === 'loading' && !error ? (
+      {/**
+       * 缓冲/加载中：中央转圈。
+       *
+       * ⚠️ 直播不显示（`!isLive`）：用户在直播开播那一刻要的是"直接出画面"，
+       * 大号白转圈闪一下非常割裂。与 2026-09-26 已确定的「解析直播流期间纯黑占位、
+       * 不闪加载圈」保持同一观感 —— 直播加载中就是黑屏，出画面即播放。
+       * 录播保留转圈（时长较长、黑屏会让用户以为卡死）。
+       */}
+      {state === 'loading' && !error && !isLive ? (
         <LoadingHint />
       ) : null}
 
-      {/* 暂停/停止态：中央播放钮。音频源（语音卡）原地播放；视频卡片点击进全屏续播；页面播放器原地续播 */}
-      {!error && !isLive && state !== 'playing' && state !== 'loading' ? (
-        <Pressable
-          style={styles.centerPlayWrap}
-          onPress={() => {
-            if (cardMode && source.kind !== 'audio' && !source.audioOnly) {
-              usePlayerStore.getState().setFullscreen(true);
-            } else {
-              togglePlay();
+      {/* 暂停态：中央播放钮 —— **纯视觉提示，不可点**（用户 2026-09-30 明确要求「双击恢复」）。
+          为什么不能点：它盖在画面正中，自己是可点按钮时，用户双击中央想恢复，
+          第一下就被它吃掉变成「单击恢复」，观感正好与需求相反。
+          现在触摸穿透到下面的点按层：单击 = 控制条显隐、双击 = 暂停/继续
+          （底部播放键仍然可以单击直接恢复，两套入口都保留）。
+          录播：非 playing/loading（含播完停在结尾）都显示；
+          直播：只在显式暂停时显示（idle/loading 不是「暂停」，给个提示钮只会让人以为卡住）。 */}
+      {!error && (isLive ? state === 'paused' : (state !== 'playing' && state !== 'loading')) ? (
+        <View style={styles.centerPlayWrap} pointerEvents="none">
+          {(() => {
+            // 音频源（语音卡/电台）整体小一号：这些形态下列表里没有画面，大提示会盖住文字
+            const small = source.kind === 'audio' || !!source.audioOnly;
+            if (centerVariant === 'ring') {
+              return (
+                <View style={[styles.centerPlayRing, small ? styles.centerPlayRingSm : null]}>
+                  <MaterialCommunityIcons name="play" size={small ? 22 : 34} color="rgba(255,255,255,0.96)" style={{ marginLeft: small ? 3 : 5 }} />
+                </View>
+              );
             }
-          }}
-        >
-          <View
-            style={[
-              styles.centerPlayBtn,
-              source.kind === 'audio' || source.audioOnly ? styles.centerPlayBtnSm : null,
-            ]}
-          >
-            <MaterialCommunityIcons name="play" size={26} color="#16181c" style={{ marginLeft: 4 }} />
-          </View>
-        </Pressable>
+            if (centerVariant === 'bare') {
+              return (
+                <MaterialCommunityIcons
+                  name="play"
+                  size={small ? 34 : 62}
+                  color="rgba(255,255,255,0.94)"
+                  style={[{ marginLeft: small ? 3 : 6 }, styles.centerPlayBareShadow]}
+                />
+              );
+            }
+            if (centerVariant === 'tint') {
+              return (
+                <View style={[styles.centerPlayTint, small ? styles.centerPlayTintSm : null, { backgroundColor: palette.tint }]}>
+                  <MaterialCommunityIcons name="play" size={small ? 18 : 24} color="#fff" style={{ marginLeft: 3 }} />
+                </View>
+              );
+            }
+            return (
+              <View style={[styles.centerPlayGlass, small ? styles.centerPlayGlassSm : null]}>
+                <MaterialCommunityIcons name="play" size={small ? 16 : 20} color="#fff" style={{ marginLeft: 2 }} />
+                <Text style={[styles.centerPlayGlassText, small ? styles.centerPlayGlassTextSm : null]}>{t('已暂停')}</Text>
+              </View>
+            );
+          })()}
+        </View>
       ) : null}
 
-      {/* 双击快进/回退提示 */}
+      {/* 长按快放提示（建议 3）：中央偏上，避免压住中央播放钮与底坞 */}
+      {boosting ? (
+        <View style={styles.boostHint} pointerEvents="none">
+          <MaterialCommunityIcons name="fast-forward" size={16} color="#fff" />
+          <Text style={styles.boostHintText}>{`${BOOST_RATE}x`}</Text>
+        </View>
+      ) : null}
+
+      {/* 直播暂停提示（建议 4）：直播暂停期间服务器时间照走，明确告诉用户「落后了多少」；
+          落后 ≥ LIVE_LAG_HINT_SEC 时给「回到直播」——点击即恢复，PlayerCore 会重建内核拉回实时。
+          卡片态不渲染（那里没有控制坞，长按/双击语义都不同）。 */}
+      {isLive && !cardMode && !error && state === 'paused' ? (
+        <View style={styles.livePauseWrap} pointerEvents="box-none">
+          <Text style={styles.livePauseText}>{t('已暂停 · 落后 {sec} 秒', { sec: livePausedSec })}</Text>
+          {livePausedSec >= LIVE_LAG_HINT_SEC ? (
+            <Pressable
+              style={[styles.livePauseBtn, { backgroundColor: palette.tint }]}
+              onPress={() => {
+                usePlayerStore.getState().setState('playing');
+                showControls();
+              }}
+            >
+              <MaterialCommunityIcons name="broadcast" size={13} color="#fff" />
+              <Text style={styles.livePauseBtnText}>{t('回到直播')}</Text>
+            </Pressable>
+          ) : null}
+        </View>
+      ) : null}
+
+      {/* ±10s 跳转反馈：由播放键两侧的圆圈箭头按钮触发（实时显示 seek 后的秒数） */}
       {seekFlash != null ? (
         <View style={styles.seekFlashWrap} pointerEvents="none">
           <MaterialCommunityIcons name={seekFlash > 0 ? 'fast-forward' : 'rewind'} size={22} color="#fff" />
@@ -550,10 +813,17 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
 
       {/* 底部控制坞：底部渐变压暗层 + 两行（进度行 / 控制行）。
           唤出层始终可点（控制条隐藏后点屏幕任意处唤出）；渐变/坞内容按 controlsVisible 显隐 */}
-      {/* 双击快进/回退 + 单击唤出层。inline 卡片态：点击直接进全屏（卡片不叠控制坞） */}
+      {/* 屏幕点按层：双击 = 暂停/播放，单击 = 控制条显隐（分流见 onVideoTap），
+          长按 = 2x 快放（录播，松手恢复，见 startBoost/endBoost）。
+          inline 卡片态：点击直接进全屏（卡片不叠控制坞） */}
       <Pressable
         style={StyleSheet.absoluteFill}
-        onPress={(e) => {
+        delayLongPress={350}
+        onLongPress={startBoost}
+        onPressOut={endBoost}
+        onPress={() => {
+          // 长按快放刚结束：这次 onPress 是长按的尾巴，吞掉（否则会顺带切控制条/计入双击）
+          if (suppressTapRef.current) { suppressTapRef.current = false; return; }
           if (inline && !fullscreen) {
             // 音频/纯音频源：无画面可全屏——点击即播放/暂停（音频条语义）
             if (source.kind === 'audio' || source.audioOnly) {
@@ -565,8 +835,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
             return;
           }
           if (inline) { showControls(); return; }
-          const x = e.nativeEvent.locationX ?? 0;
-          onVideoTap(x < screenW / 2 ? 'l' : 'r');
+          onVideoTap();
         }}
       />
       {!cardMode ? (
@@ -597,8 +866,19 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
           {!isLandscape ? progressRow : null}
           {/* 竖屏：直播弹幕输入条叠在控制行之上（横屏它占据控制行中段） */}
           {!isLandscape && barrageInput ? <View style={styles.dockBarrageRow}>{barrageInput}</View> : null}
-          {/* 控制行：播放/暂停（主按钮）+ 中间区 + 右侧功能 */}
+          {/* 控制行：录播「-10s」圆圈箭头 + 播放/暂停（主按钮）+ 录播「+10s」圆圈箭头 + 中间区 + 右侧功能 */}
           <View style={styles.ctrlRow}>
+            {/* 录播跳转键：原「双击屏幕左侧 -10s / 右侧 +10s」的替身，按用户要求（2026-09-30）
+                挪到播放键两侧。直播不渲染 —— 直播没有时间轴可跳，误按只会白闪一下。 */}
+            {!isLive ? (
+              <TouchableOpacity
+                style={[styles.seekBtn, isLandscape ? styles.seekBtnLandscape : null]}
+                onPress={() => seekBy(-SEEK_STEP_SEC)}
+                activeOpacity={0.75}
+              >
+                <MaterialCommunityIcons name="rewind-10" size={isLandscape ? 19 : 21} color="rgba(255,255,255,0.95)" />
+              </TouchableOpacity>
+            ) : null}
             <TouchableOpacity
               style={[styles.playBtn, isLandscape ? styles.playBtnLandscape : null]}
               onPress={togglePlay}
@@ -606,6 +886,15 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
             >
               <MaterialCommunityIcons name={playing ? 'pause' : 'play'} size={isLandscape ? 22 : 24} color="#16181c" style={!playing ? { marginLeft: 3 } : undefined} />
             </TouchableOpacity>
+            {!isLive ? (
+              <TouchableOpacity
+                style={[styles.seekBtn, isLandscape ? styles.seekBtnLandscape : null]}
+                onPress={() => seekBy(SEEK_STEP_SEC)}
+                activeOpacity={0.75}
+              >
+                <MaterialCommunityIcons name="fast-forward-10" size={isLandscape ? 19 : 21} color="rgba(255,255,255,0.95)" />
+              </TouchableOpacity>
+            ) : null}
             {isLandscape ? (
               <View style={styles.dockCenterLandscape}>
                 {barrageInput ? barrageInput : progressRow}
@@ -647,8 +936,13 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
 
       {/* 更多面板 */}
       <Modal visible={moreVisible} transparent animationType="slide" onRequestClose={() => setMoreVisible(false)}>
-        <View style={styles.modalShade}>
-          <View style={[styles.morePanel, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}>
+        {/* 暗幕区 = 点击关闭（用户 2026-10-02：点外部区域能关掉面板） */}
+        <Pressable style={styles.modalShade} onPress={() => setMoreVisible(false)}>
+          {/* 面板自身接管触摸起点：面板内空白处点击不会冒泡到暗幕（只有点在面板外才关闭） */}
+          <View
+            style={[styles.morePanel, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}
+            onStartShouldSetResponder={() => true}
+          >
             <View style={styles.moreHeader}>
               <Text style={[styles.moreTitle, { color: palette.label }]}>{t('播放器功能')}</Text>
               <TouchableOpacity onPress={() => setMoreVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -686,14 +980,76 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                   {mirrorMode === 'none' ? t('镜像') : mirrorMode === 'horizontal' ? t('水平镜像') : t('垂直镜像')}
                 </Text>
               </TouchableOpacity>
+              {/* 暂停钮样式（对比用临时项，见文件顶部 CENTER_PLAY_VARIANTS 注释）：
+                  点一下循环换一种，暂停画面即可对比；用户选定后把默认值改成那个、并删掉本项。 */}
+              <TouchableOpacity
+                style={styles.moreItem}
+                onPress={() => {
+                  const idx = CENTER_PLAY_VARIANTS.indexOf(centerVariant);
+                  const next = CENTER_PLAY_VARIANTS[(idx + 1) % CENTER_PLAY_VARIANTS.length];
+                  centerPlayVariant = next;
+                  setCenterVariant(next);
+                  setMoreVisible(false);
+                }}
+              >
+                <MaterialCommunityIcons name="gesture-tap" size={22} color={palette.labelSecondary} />
+                <Text style={[styles.moreLabel, { color: palette.labelSecondary }]}>
+                  {`${t('暂停钮样式')} · ${CENTER_PLAY_LABELS[centerVariant]}`}
+                </Text>
+              </TouchableOpacity>
+              {/* 稍后再看（用户 2026-09-30：加入入口从列表行书签挪到播放器功能面板）。
+                  只在当前内容带 source.ref（可事后重新解析地址）时出现 —— 见上方 watchLaterRef 注释。 */}
+              {watchLaterRef ? (
+                <TouchableOpacity
+                  style={styles.moreItem}
+                  onPress={() => {
+                    const st = usePlayerStore.getState();
+                    const added = useWatchLaterStore.getState().toggle({
+                      kind: watchLaterRef.kind,
+                      id: watchLaterRef.id,
+                      title: String(st.meta?.title || ''),
+                      cover: st.meta?.cover,
+                      // 成员 / 队伍 / 是否音频：稍后再看列表卡片要显示（页面在 meta 里传）
+                      owner: st.meta?.owner,
+                      team: st.meta?.team,
+                      // 成员数字 id：事后按 id 反查成员库补队伍（见 utils/memberMatch）
+                      ownerId: st.meta?.ownerId,
+                      audio: st.source?.kind === 'audio' || !!st.source?.audioOnly,
+                    });
+                    setMoreVisible(false);
+                    showToast(added ? t('已加入稍后再看') : t('已移出稍后再看'));
+                  }}
+                >
+                  <MaterialCommunityIcons
+                    name={inWatchLater ? 'bookmark' : 'bookmark-outline'}
+                    size={22}
+                    color={inWatchLater ? palette.tint : palette.labelSecondary}
+                  />
+                  <Text style={[styles.moreLabel, { color: inWatchLater ? palette.tint : palette.labelSecondary }]}>
+                    {inWatchLater ? t('已加入稍后再看') : t('稍后再看')}
+                  </Text>
+                </TouchableOpacity>
+              ) : null}
               {moreActions.map((action) => (
                 <TouchableOpacity
                   key={action.key}
                   style={styles.moreItem}
-                  onPress={() => { setMoreVisible(false); action.onPress(); }}
+                  onPress={() => {
+                    // 带选项的动作（如 B站画质）：关闭功能面板，从播放器右侧弹出独立小面板
+                    if (action.options?.length) {
+                      setOptionSheet({ title: action.label, options: action.options });
+                      setMoreVisible(false);
+                      return;
+                    }
+                    setMoreVisible(false);
+                    action.onPress?.();
+                  }}
                 >
                   <MaterialCommunityIcons name={action.icon as any} size={22} color={action.active ? palette.tint : palette.labelSecondary} />
                   <Text style={[styles.moreLabel, { color: action.active ? palette.tint : palette.labelSecondary }]}>{action.label}</Text>
+                  {action.options?.length ? (
+                    <MaterialCommunityIcons name="chevron-right" size={14} color={palette.labelTertiary} />
+                  ) : null}
                 </TouchableOpacity>
               ))}
               {features.kernelSwitch ? (
@@ -711,7 +1067,48 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
               ) : null}
             </View>
           </View>
-        </View>
+        </Pressable>
+      </Modal>
+
+      {/* 选项的右侧独立小面板（如 B站画质档位）：点功能面板里的「画质 ›」从右边弹出，
+          不内嵌在功能面板里；点面板外任意处关闭。全部颜色取 palette（统一主题）。 */}
+      <Modal visible={!!optionSheet} transparent animationType="fade" onRequestClose={() => setOptionSheet(null)}>
+        <Pressable style={styles.modalShade} onPress={() => setOptionSheet(null)}>
+          <View style={styles.optionSheetWrap} pointerEvents="box-none">
+            {optionSheet ? (
+              <View style={[styles.optionSheet, { backgroundColor: palette.surface }]}>
+                <View style={styles.optionSheetHeader}>
+                  <Text style={[styles.optionSheetTitle, { color: palette.label }]} numberOfLines={1}>{optionSheet.title}</Text>
+                  <TouchableOpacity onPress={() => setOptionSheet(null)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <MaterialCommunityIcons name="close" size={18} color={palette.labelSecondary} />
+                  </TouchableOpacity>
+                </View>
+                <ScrollView bounces={false}>
+                  {optionSheet.options.map((opt) => (
+                    <TouchableOpacity
+                      key={opt.key}
+                      style={[styles.moreOption, opt.disabled ? styles.moreOptionDisabled : null]}
+                      disabled={opt.disabled}
+                      onPress={() => { setOptionSheet(null); opt.onPress(); }}
+                    >
+                      <Text
+                        style={[styles.moreOptionText, { color: opt.active ? palette.tint : opt.disabled ? palette.labelTertiary : palette.label }]}
+                        numberOfLines={1}
+                      >
+                        {opt.label}
+                      </Text>
+                      {opt.active ? (
+                        <MaterialCommunityIcons name="check" size={16} color={palette.tint} />
+                      ) : opt.hint ? (
+                        <Text style={[styles.moreOptionHint, { color: palette.labelTertiary }]}>{opt.hint}</Text>
+                      ) : null}
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </View>
+            ) : null}
+          </View>
+        </Pressable>
       </Modal>
     </>
   );
@@ -745,11 +1142,32 @@ const styles = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(20,20,24,0.34)',
-    shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 5, shadowOffset: { width: 0, height: 1 },
   },
   /** 横屏：36×36（40 在横屏偏大，视觉上会盖住画面） */
   topBtnLandscape: { width: 36, height: 36, borderRadius: 18 },
   titleWrap: { flex: 1, marginHorizontal: 10, flexDirection: 'row', alignItems: 'center', minWidth: 0 },
+  /** 右上角成员胶囊（队伍徽章 + 名字）：半透明深底，画面再亮也看得清；不参与标题收缩 */
+  memberChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    flexShrink: 0,
+    maxWidth: 168,
+    paddingHorizontal: 9,
+    paddingVertical: 4,
+    borderRadius: 999,
+    backgroundColor: 'rgba(0,0,0,0.32)',
+    marginRight: 6,
+  },
+  memberName: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
+    flexShrink: 1,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
   titleText: {
     color: '#fff', fontSize: 14, fontWeight: '600', flexShrink: 1,
     textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4,
@@ -781,7 +1199,6 @@ const styles = StyleSheet.create({
   progressThumb: {
     position: 'absolute', top: 9.5, width: 11, height: 11, borderRadius: 6,
     marginLeft: -5.5, backgroundColor: '#fff',
-    shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 3, shadowOffset: { width: 0, height: 1 },
   },
   ctrlRow: { flexDirection: 'row', alignItems: 'center', marginTop: 0 },
   /**
@@ -789,11 +1206,21 @@ const styles = StyleSheet.create({
    * flex:1 让它吃掉播放钮与右侧功能组之间的全部宽度。
    */
   dockCenterLandscape: { flex: 1, marginHorizontal: 12, justifyContent: 'center' },
+  /**
+   * 录播 ±10s 圆圈箭头（播放键两侧）：与「主播放钮」同一套圆形语言，
+   * 但用半透明深底 + 白色图标，视觉上不与主按钮抢焦点。
+   */
+  seekBtn: {
+    width: 38, height: 38, borderRadius: 19, marginHorizontal: 7,
+    alignItems: 'center', justifyContent: 'center',
+    backgroundColor: 'rgba(20,20,24,0.34)',
+  },
+  /** 横屏：34×34（与 36 的顶栏钮同级，底栏整体更薄） */
+  seekBtnLandscape: { width: 34, height: 34, borderRadius: 17, marginHorizontal: 6 },
   playBtn: {
     width: 46, height: 46, borderRadius: 23,
     alignItems: 'center', justifyContent: 'center',
     backgroundColor: 'rgba(255,255,255,0.94)',
-    shadowColor: '#000', shadowOpacity: 0.22, shadowRadius: 7, shadowOffset: { width: 0, height: 2 },
   },
   /** 横屏：播放钮略小（与 36 的顶栏钮同级，底栏整体更薄） */
   playBtnLandscape: { width: 40, height: 40, borderRadius: 20 },
@@ -804,19 +1231,60 @@ const styles = StyleSheet.create({
     position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, zIndex: 15,
     alignItems: 'center', justifyContent: 'center',
   },
-  centerPlayBtn: {
-    width: 68, height: 68, borderRadius: 34,
-    backgroundColor: 'rgba(255,255,255,0.92)',
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 10, shadowOffset: { width: 0, height: 3 },
-    elevation: 6,
+  /** 暂停态中央提示 · 变体 glass（玻璃胶囊：半透明深底 + 三角 + 「已暂停」） */
+  centerPlayGlass: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 16, paddingVertical: 9, borderRadius: 999,
+    backgroundColor: 'rgba(20,20,24,0.55)',
+    borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,255,255,0.35)',
   },
-  centerPlayBtnSm: { width: 36, height: 36, borderRadius: 18, elevation: 0 },
+  centerPlayGlassSm: { paddingHorizontal: 12, paddingVertical: 6, gap: 4 },
+  centerPlayGlassText: { color: '#fff', fontSize: 13, fontWeight: '700' },
+  centerPlayGlassTextSm: { fontSize: 11 },
+  /** 变体 ring（细线圆环，无填充）—— 用户选定并放大过：环 76、三角 34（小形态 54/22） */
+  centerPlayRing: {
+    width: 76, height: 76, borderRadius: 38,
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: 'rgba(255,255,255,0.9)',
+    backgroundColor: 'rgba(0,0,0,0.18)',
+  },
+  centerPlayRingSm: { width: 54, height: 54, borderRadius: 27 },
+  /** 变体 bare（无底大三角，只带一层投影保证浅色画面上也看得见） */
+  centerPlayBareShadow: {
+    textShadowColor: 'rgba(0,0,0,0.55)', textShadowOffset: { width: 0, height: 2 }, textShadowRadius: 8,
+  },
+  /** 变体 tint（品牌色小圆钮） */
+  centerPlayTint: {
+    width: 52, height: 52, borderRadius: 26,
+    alignItems: 'center', justifyContent: 'center',
+    elevation: 4,
+  },
+  centerPlayTintSm: { width: 36, height: 36, borderRadius: 18, elevation: 0 },
   seekFlashWrap: {
     position: 'absolute', left: 0, right: 0, top: '38%', zIndex: 16,
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 6,
   },
   seekFlashText: { color: '#fff', fontSize: 15, fontWeight: '800', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4 },
+  /** 长按快放提示（中央偏上：不与中央播放钮、±10s 闪示、底坞抢位） */
+  boostHint: {
+    position: 'absolute', left: 0, right: 0, top: '30%', zIndex: 17,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 5,
+  },
+  boostHintText: { color: '#fff', fontSize: 14, fontWeight: '800', textShadowColor: 'rgba(0,0,0,0.5)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4 },
+  /** 直播暂停提示 + 「回到直播」按钮（放在中央播放钮下方，两行叠放） */
+  livePauseWrap: {
+    position: 'absolute', left: 0, right: 0, top: '62%', zIndex: 17,
+    alignItems: 'center', gap: 8,
+  },
+  livePauseText: {
+    color: 'rgba(255,255,255,0.92)', fontSize: 12, fontWeight: '700',
+    textShadowColor: 'rgba(0,0,0,0.6)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 4,
+  },
+  livePauseBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999,
+  },
+  livePauseBtnText: { color: '#fff', fontSize: 12, fontWeight: '800' },
   loadingWrap: {
     position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, zIndex: 20,
     alignItems: 'center', justifyContent: 'center', gap: 10,
@@ -852,6 +1320,18 @@ const styles = StyleSheet.create({
   moreGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12 },
   moreItem: { width: '25%', alignItems: 'center', paddingVertical: 12 },
   moreLabel: { fontSize: 11, marginTop: 5, textAlign: 'center' },
+  // 动作项的右侧独立小面板（如画质）：贴右垂直居中，底色由渲染处传 palette.surface
+  optionSheetWrap: { position: 'absolute', top: 0, bottom: 0, right: 0, justifyContent: 'center' },
+  optionSheet: {
+    width: 224, maxHeight: '72%', borderRadius: 16, paddingVertical: 8, marginRight: 12,
+    elevation: 12,
+  },
+  optionSheetHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingHorizontal: 14, paddingBottom: 6 },
+  optionSheetTitle: { fontSize: 13, fontWeight: '800', flexShrink: 1 },
+  moreOption: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingHorizontal: 14, paddingVertical: 11 },
+  moreOptionDisabled: { opacity: 0.45 },
+  moreOptionText: { fontSize: 13, fontWeight: '600', flexShrink: 1 },
+  moreOptionHint: { fontSize: 11, fontWeight: '600' },
 });
 
 export default PlayerChrome;

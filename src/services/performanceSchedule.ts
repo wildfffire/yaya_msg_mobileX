@@ -27,8 +27,20 @@ import { normalizeUrl } from '../utils/data';
  */
 
 export interface PerformanceShow {
-  /** 场次 ID（businessId）。⚠️ 不是 liveId，不能用于播放 */
+  /** 场次 ID（businessId，已按字符串保精度） */
   id: string;
+  /**
+   * 公演直播 liveId —— **与 businessId 是同一个值**（实测 2026-10-04：
+   * 「柏欣妤 生日会」businessId = liveId = 1313111009176391680）。
+   *
+   * 拿到它就能用应用内信号看这场公演：
+   *   `pocketApi.getOpenLiveOne(liveId)` → content.playStreams[].streamPath（rtmp，标清/高清）。
+   * 未开演的场次该 ID 暂时取不到流，开演（status=2）后即可播。
+   *
+   * ⚠️ 为保精度，本字段依赖 getSeinePerformanceList 的 `exactBigInts` 解析；
+   * 少了它 JSON 大整数会丢成 …9176391700，接口查不到任何东西。
+   */
+  liveId: string;
   title: string;
   /** 封面绝对地址，可能为空 */
   cover: string;
@@ -47,20 +59,25 @@ export interface PerformanceShow {
 }
 
 /** 排期缓存：排期变化很慢，10 分钟内直接复用，避免每次进页面都打接口。
- *  ⚠️ v2：v1 缓存里持久化了旧的（未校正的）队伍颜色，换 key 丢弃 —— 颜色一律用新 TEAM_COLORS 重算。 */
-const CACHE_KEY = 'yaya_performance_schedule_v2';
+ *  ⚠️ v2：v1 缓存里持久化了旧的（未校正的）队伍颜色，换 key 丢弃 —— 颜色一律用新 TEAM_COLORS 重算。
+ *  ⚠️ v3：v2 缓存里的 id 是 JSON 大整数丢精度后的值（…9176391700），拿去解析公演直播必失败；
+ *          换 key 丢弃，强制重拉一次拿到精确的 businessId/liveId。
+ *  ⚠️ v4：v3 缓存里持久化了按 yk1z/yaya_msg 校正之前的队伍色（J/C/K/CII/GII 是近似值），
+ *          换 key 丢弃，强制用新 TEAM_COLORS 重算。 */
+const CACHE_KEY = 'yaya_performance_schedule_v4';
 const CACHE_TTL = 10 * 60 * 1000;
 /** 缓存最多留 100 场（一页 50，足够覆盖「最近几场」的筛选需求） */
 const CACHE_MAX = 100;
 
-const FALLBACK_COLOR = '#ff6f91';
+/** 队伍信息缺失 / 查不到应援色时的占位色；UI 会把它替换成当前主题色（见 PerformanceStrip） */
+export const PERFORMANCE_FALLBACK_COLOR = '#ff6f91';
 
 /** 队徽文件名后缀 → 队伍缩写（键与 TEAM_COLORS 对齐） */
 const TEAM_CODE: Record<string, string> = {
   s2: 'SII', n2: 'NII', h2: 'HII', x: 'X',
   g: 'G', n3: 'NIII', z: 'Z',
   b: 'B', e: 'E', j: 'J',
-  c: 'C', k: 'K', cii: 'CII',
+  c: 'C', k: 'K', cii: 'CII', gii: 'GII',
 };
 
 /** 队徽文件名前缀 → 团体（接口里两种写法都出现过：`snh48_h2.png` 带 48、`ckg_c.png` 不带） */
@@ -95,12 +112,12 @@ interface TeamInfo {
 export function parseTeamLogo(logo: string): TeamInfo {
   const file = String(logo || '').split('/').pop() || '';
   const matched = file.match(/^([a-z]+[0-9]*)_([a-z0-9]+)\.(?:png|jpe?g|webp)$/i);
-  if (!matched) return { group: '', team: '', teamLabel: '', color: FALLBACK_COLOR };
+  if (!matched) return { group: '', team: '', teamLabel: '', color: PERFORMANCE_FALLBACK_COLOR };
   const group = GROUP_CODE[matched[1].toLowerCase()] || matched[1].toUpperCase();
   const team = TEAM_CODE[matched[2].toLowerCase()] || '';
   const teamLabel = team ? `${group} Team ${team}` : group;
-  const colorKey = team === 'CII' ? 'CII' : `TEAM ${team}`;
-  const color = (team && TEAM_COLORS[colorKey]) || FALLBACK_COLOR;
+  // 先按 `TEAM X` 查，再按别名 `X` 查（TEAM_COLORS 两套键都保留了）
+  const color = (team && (TEAM_COLORS[`TEAM ${team}`] || TEAM_COLORS[team])) || PERFORMANCE_FALLBACK_COLOR;
   return { group, team, teamLabel, color };
 }
 
@@ -115,8 +132,11 @@ function normalizePerformance(item: any): PerformanceShow | null {
   // → 队徽认不出来时用标题里的团名兜底，至少能显示是哪个团
   const titleGroup = (title.match(GROUP_IN_TITLE) || [])[1] || '';
   const group = team.group || titleGroup;
+  // Seine 的 businessId 就是公演 liveId（见接口注释）：留成字符串，禁止再走 Number()。
+  const businessId = String(item?.businessId || '').trim();
   return {
-    id: String(item?.businessId || `${startTime}-${title}`),
+    id: businessId || `${startTime}-${title}`,
+    liveId: businessId,
     title,
     cover: normalizeUrl(item?.cover),
     startTime,

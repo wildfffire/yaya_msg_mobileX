@@ -37,29 +37,8 @@ const DOWNLOAD_DIR = `${FileSystem.documentDirectory || ''}downloads/`;
 // 超过后按「创建时间最早优先」淘汰已完成的下载文件，避免无限增长占满存储。
 const MAX_CACHE_BYTES = 4 * 1024 * 1024 * 1024;
 
-function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  const bytes = new Uint8Array(buffer);
-  const chars: string[] = [];
-  for (let i = 0; i < bytes.byteLength; i++) {
-    chars.push(String.fromCharCode(bytes[i]));
-  }
-  return (global as any).btoa?.(chars.join('')) || base64Encode(bytes);
-}
-
-const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-function base64Encode(bytes: Uint8Array): string {
-  let result = '';
-  for (let i = 0; i < bytes.length; i += 3) {
-    const a = bytes[i];
-    const b = bytes[i + 1] || 0;
-    const c = bytes[i + 2] || 0;
-    result += BASE64_CHARS[a >> 2];
-    result += BASE64_CHARS[((a & 3) << 4) | (b >> 4)];
-    result += i + 1 < bytes.length ? BASE64_CHARS[((b & 15) << 2) | (c >> 6)] : '=';
-    result += i + 2 < bytes.length ? BASE64_CHARS[c & 63] : '=';
-  }
-  return result;
-}
+// 注：此处原有 arrayBufferToBase64 / base64Encode 一对函数，全仓无任何调用点（死代码），
+// 且其 `chars.join('')` 在大文件下会把整个文件拼成一个字符串，有 OOM 风险，已删除。
 
 function sanitizeName(name: string) {
   return String(name || 'download')

@@ -7,6 +7,7 @@
  */
 
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
+import { NATIVE_SEND_TIMEOUT_MS, withNativeTimeout } from './timeout';
 
 interface PocketImNative {
   appKey?: string;
@@ -38,12 +39,12 @@ export function pocketImAppKey(): string {
 
 export async function pocketImInit(): Promise<void> {
   if (!native) throw new Error('当前平台不支持圈组消息通道');
-  await native.init(pocketImAppKey());
+  await withNativeTimeout(native.init(pocketImAppKey()), '云信圈组初始化');
 }
 
 export async function pocketImLogin(accid: string, token: string): Promise<void> {
   if (!native) throw new Error('当前平台不支持圈组消息通道');
-  await native.login(accid, token);
+  await withNativeTimeout(native.login(accid, token), '云信圈组登录');
 }
 
 export function pocketImLogout(): void {
@@ -62,12 +63,16 @@ export async function pocketImSendChannelText(
   extJson: string
 ): Promise<void> {
   if (!native) throw new Error('当前平台不支持圈组消息通道');
-  await native.sendChannelText(serverId, channelId, text, extJson);
+  await withNativeTimeout(
+    native.sendChannelText(serverId, channelId, text, extJson),
+    '房间消息发送',
+    NATIVE_SEND_TIMEOUT_MS,
+  );
 }
 
 export async function pocketImObserveMessages(enable: boolean): Promise<void> {
   if (!native) return;
-  await native.observeMessages(enable);
+  await withNativeTimeout(native.observeMessages(enable), '房间消息订阅');
 }
 
 /** 圈组消息事件（原生 PocketIm:message 推送，元素为扁平化后的消息） */

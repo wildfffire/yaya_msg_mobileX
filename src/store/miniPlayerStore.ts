@@ -25,6 +25,22 @@ export interface MiniPlayerInfo {
     playCover?: string;
     /** 小窗→大窗续播位置（仅录播；MediaScreen 直接按此 seek） */
     playPosition?: number;
+    /**
+     * 成员名 / 队伍 / 成员数字 id。
+     *
+     * ⚠️ 必须跟着 backTo 走：小窗期间大窗（MediaScreen）已卸载，回大窗是**新的一次
+     * 路由直达**（走 `playUrl` 分支重新构造 PlayMedia），不带这三个字段 →
+     * 播放器右上角「队伍徽章 + 成员名」胶囊又变空（用户 2026-11-08）。
+     */
+    playOwner?: string;
+    playTeam?: string;
+    playOwnerId?: string;
+    /**
+     * 来源成员 id（房间内拉起的直播/回放才带）：
+     * 「返回全屏」时优先回**她的房间**而不是直播 tab ——
+     * 用户 2026-09-30 明确要求「从房间进的直播，退出也要留在房间里」。
+     */
+    roomMemberId?: string;
   };
 }
 

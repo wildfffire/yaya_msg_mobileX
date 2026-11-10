@@ -1,4 +1,12 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+
+/** 候选池合并：按 url 去重，新解析的同 url 条目覆盖旧条目（保持 URL 新鲜度） */
+function mergeCandidates(prev: any[], next: any[]): any[] {
+  const byUrl = new Map<string, any>();
+  for (const c of prev) if (c?.url) byUrl.set(String(c.url), c);
+  for (const c of next) if (c?.url) byUrl.set(String(c.url), c);
+  return [...byUrl.values()];
+}
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
@@ -6,6 +14,7 @@ import {
   Animated,
   AppState,
   Easing,
+  NativeModules,
   RefreshControl,
   StyleSheet,
   Text,
@@ -31,9 +40,11 @@ import bilibiliApi from '../api/bilibili';
 import { BilibiliDanmaku } from '../services/bilibiliDanmaku';
 import { DanmakuOverlay } from '../components/DanmakuOverlay';
 import DanmakuSettingsSheet from '../components/DanmakuSettingsSheet';
+import DanmakuWebViewBridge from '../components/DanmakuWebViewBridge';
 import { useDanmakuSettings } from '../store/danmakuSettings';
 import { DanmakuItem } from '../utils/danmaku';
 import { errorMessage, normalizeUrl } from '../utils/data';
+import { logWarn } from '../utils/runtimeLog';
 import { NetworkImage } from '../components/NetworkImage';
 import { setLiveImmersiveMode } from '../native/LivePlayer';
 import { usePalette } from '../theme';
@@ -75,15 +86,43 @@ export default function BilibiliLiveScreen() {
   const palette = usePalette();
   const { t } = useI18n();
   const [rooms, setRooms] = useState<BilibiliLiveRoom[]>([]);
+  /** 候选池：同一场次内**跨档累计**的线路（每次解析的流并入池子，按 url 去重、新的覆盖旧的） */
   const [candidates, setCandidates] = useState<any[]>([]);
   const [candidateIndex, setCandidateIndex] = useState(0);
-  const [qualities, setQualities] = useState<{ qn: number; label: string }[]>([]);
+  /** 档位标签字典（接口下发的 g_qn_desc 描述，仅用于显示） */
+  const [qualityMetas, setQualityMetas] = useState<{ qn: number; label: string }[]>([]);
   const [qualityQn, setQualityQn] = useState<number | null>(null);
   const [streamTitle, setStreamTitle] = useState('');
   const [activeRoom, setActiveRoom] = useState<BilibiliLiveRoom | null>(null);
   const [liveStatuses, setLiveStatuses] = useState<Record<string, boolean>>({});
   const [roomInfo, setRoomInfo] = useState<Record<string, { title: string; cover: string }>>({});
   const [loading, setLoading] = useState(false);
+  /**
+   * ★ 可切换档位 = **候选池里真实存在 URL 的 current_qn**（服务端实际下发的流）。
+   *
+   * 为什么不用 accept_qn / g_qn_desc 直接当菜单（2026-10-02 接口实测 + 真机日志）：
+   *   · g_qn_desc 是房间能力全表（含账号拿不到的档位，如未登录的原画）；
+   *   · accept_qn 也是**房间级**清单 —— 访客实测 accept=[10000,400,250]，但重新请求
+   *     qn=10000/400/250/150 服务端一律回 250（按会话权限钉档）→ 点菜单只会「保持原档」，
+   *     用户体感就是「切换不了画质」；
+   *   · 而**登录态的播放响应本身就含多档 URL**（_bluray / _2500 …），那才是真正能用的档位。
+   *   → 菜单只列池子里**有 URL 的档位**（未提供的分辨率不显示；入口始终可见，至少能看到
+   *     当前档）；切档优先在池子里**本地换流**（零网络、零权限风险），池子里没有的才重新
+   *     请求，服务端不给就保持原档并提示。
+   */
+  const qualities = useMemo(() => {
+    const labels = new Map<number, string>();
+    for (const q of qualityMetas) if (q.qn > 0 && !labels.has(q.qn)) labels.set(q.qn, q.label);
+    // 菜单只列**候选池里有 URL** 的档位（用户 2026-10-02：未提供的分辨率不显示），
+    // 再兜底带上当前档位（保证入口永远能看到当前分辨率）
+    const qns = new Set<number>();
+    for (const c of candidates) {
+      const qn = Number(c?.currentQn || 0);
+      if (qn > 0) qns.add(qn);
+    }
+    if (qualityQn) qns.add(qualityQn);
+    return [...qns].sort((a, b) => b - a).map((qn) => ({ qn, label: labels.get(qn) || `qn${qn}` }));
+  }, [candidates, qualityMetas, qualityQn]);
   const [status, setStatus] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [fetchError, setFetchError] = useState('');
@@ -114,6 +153,33 @@ export default function BilibiliLiveScreen() {
     setQualityHint(msg);
     if (qualityHintTimer.current) clearTimeout(qualityHintTimer.current);
     qualityHintTimer.current = setTimeout(() => setQualityHint(''), 5000);
+  }, []);
+  // 清晰度切换中档位（防并发重复解析）。入口：播放器右上「…」功能面板（extraActions，
+  // 由 PlayerChrome 用统一 palette 主题渲染，active 高亮走 palette.tint）。
+  // 档位列表 = 本次进房/每次切换时接口下发的**支持画质表**（g_qn_desc + 实际授予档），
+  // 表外档位一律不可选；切换失败回退原档位 —— 修「选了不支持的清晰度 → 解码闪退」。
+  const [qualitySwitchingQn, setQualitySwitchingQn] = useState<number | null>(null);
+  // ★ 设备解码能力探测（兜底保险）：用 react-native-video 的 VideoDecoderInfoModule
+  // 查本机 MediaCodecList 的 HEVC 解码支持。切换结果若是「纯 HEVC 流」而本机无解码器，
+  // 直接保持原档 —— 绝不把解不动的流喂给原生内核。
+  // 探测失败（模块缺失/异常）时置 null = 不设限，交给播放器内核错误回退兜底。
+  const [deviceHevc, setDeviceHevc] = useState<{ h1080: boolean; h4k: boolean } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const dec = (NativeModules as any).VideoDecoderInfoModule;
+        if (!dec?.isCodecSupported) return;
+        const [h1080, h4k] = await Promise.all([
+          dec.isCodecSupported('video/hevc', 1920, 1080),
+          dec.isCodecSupported('video/hevc', 3840, 2160),
+        ]);
+        if (alive) setDeviceHevc({ h1080: h1080 !== 'unsupported', h4k: h4k !== 'unsupported' });
+      } catch {
+        // 探测失败：不设限
+      }
+    })();
+    return () => { alive = false; };
   }, []);
   // 控制条沉浸显隐（B站式：点击画面切换，播放中 3 秒无操作自动隐藏）
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -160,14 +226,42 @@ export default function BilibiliLiveScreen() {
   // 公演/48 的 B站直播默认走网页内核：原生内核画面带官方 "LIVE" 红标（用户确认为播放器层问题，网页无标）。
   // 网页内核现已带防盗链 headers（mpegts.js/hls.js xhrSetup）可正常拉流；每次进直播间仅强制一次，
   // 仍可经 更多→切回原生播放器 手动换回。
-  const webForcedRef = useRef(false);
+  // HEVC-only 档（原画/真彩，2026-10-02）：网页内核 hls.js 不支持 HEVC-fMP4（真机实测黑屏）→
+  // 这类档位**直接走原生内核**（ExoPlayer/media3 支持 HEVC-fMP4，设备有硬解）。判定在 resolve 后写。
+  const hevcOnlyRef = useRef(false);
+  /**
+   * ★ 内核路由必须**每次换流都重新决策**，不能只在进房强制一次（2026-10-02 真机日志实证的根因）：
+   * PlayerScreen 的 open() 会把 useWebKernel 复位，而旧实现用一次性 webForcedRef 只在进房
+   * 强制网页内核 → **之后每次切档/重新解析都掉到原生内核**（日志：进房 kernel=web，切档后
+   * 全是 kernel=native）→ 切高切低都播不动（B站高档位流给原生 Exo 打不开/黑屏）。
+   * 这里按 streamUrl 变化（进房/切档/换线路各一次）重新路由：
+   *   - HEVC-only 档 → 原生内核；普通档（AVC 等）→ 网页内核（B站默认，带一次性原生兜底）。
+   * 父组件 effect 在子组件（PlayerScreen→PlayerCore）effect 之后执行 → 覆盖 open() 的复位。
+   */
   useEffect(() => {
-    if ((currentCandidate?.url || '') && !webForcedRef.current) {
-      webForcedRef.current = true;
-      usePlayerStore.getState().setForceWebOnce(true);
-      usePlayerStore.getState().setUseWebKernel(true);
+    if (!streamUrl) return;
+    const ps = usePlayerStore.getState();
+    if (hevcOnlyRef.current) {
+      ps.setUseWebKernel(false);
+      ps.setForceWebOnce(false);
+    } else {
+      ps.setUseWebKernel(true);
+      ps.setForceWebOnce(true);
     }
-  }, [currentCandidate]);
+  }, [streamUrl]);
+  // 进入直播间默认全屏：PlayerScreen 挂载时 store.open() 会把 fullscreen 重置为 false，
+  // 且发生在 startWatch 里 setFullscreen(true) 之后（渲染才挂载）→ 全屏被吃掉。
+  // 父组件 effect 在子组件 effect 之后执行，这里在「取到直播流」时重新置 true，稳定覆盖重置。
+  // 哨兵 roomId：同一次进房内的换线路/切画质不重复拉全屏（用户手动退出全屏后保持窗口化）；
+  // 退出播放器（activeRoom 置空）时重置哨兵 → 重进同一房间仍会默认全屏。
+  const fullscreenRoomRef = useRef('');
+  useEffect(() => {
+    if (!activeRoom || !streamUrl) { fullscreenRoomRef.current = ''; return; }
+    const rid = String(activeRoom.roomId);
+    if (fullscreenRoomRef.current === rid) return;
+    fullscreenRoomRef.current = rid;
+    usePlayerStore.getState().setFullscreen(true);
+  }, [activeRoom, streamUrl]);
   const qualityLabel = qualities.find((q) => q.qn === qualityQn)?.label || '';
 
   /**
@@ -213,6 +307,11 @@ export default function BilibiliLiveScreen() {
     dmFlushTimer.current = null;
     qualityHintTimer.current = null;
     hideControlsTimer.current = null;
+    // 卸载（非 closePlayer 路径，如直接返回/切 Tab）也要复位「强制网页内核」全局开关，
+    // 否则网页内核会漏到其它页面（见 closePlayer 里的说明）
+    const ps = usePlayerStore.getState();
+    ps.setUseWebKernel(false);
+    ps.setForceWebOnce(false);
     followSystem();
   }, []);
 
@@ -240,13 +339,23 @@ export default function BilibiliLiveScreen() {
     setDmTick(0);
     setShowDanmaku(false);
     setCandidates([]);
-    setQualities([]);
+    setQualityMetas([]);
     setQualityQn(null);
+    setQualitySwitchingQn(null);
     setActiveRoom(null);
     setPlayerError('');
     setBuffering(false);
     setFetchError('');
     usePlayerStore.getState().setFullscreen(false);
+    /**
+     * 退出 B 站页必须复位「强制网页内核」这两个**全局**开关（用户 2026-09-30：
+     * 「房间内的直播应该复用直播界面的播放器，不要用 B 站的那个播放器」）：
+     * 本页把 useWebKernel/forceWebOnce 写成了 true，而它们只在 playerStore.open() 里复位 ——
+     * 退出本页后如果下一次播放走了"同源早退"（不调 open），网页内核就会漏到房间/其它页面。
+     */
+    const ps = usePlayerStore.getState();
+    ps.setUseWebKernel(false);
+    ps.setForceWebOnce(false);
     setLiveImmersiveMode(false);
     followSystem();
     // 从主页公演栏直达进来的：退出播放器直接回主页（不再落到 B站列表二级菜单）
@@ -329,7 +438,8 @@ export default function BilibiliLiveScreen() {
 
   useEffect(() => {
     if (streamUrl || !rooms.length) return;
-    const id = setInterval(() => { checkStatuses(true); }, 30000);
+    // 后台不轮询：省电省流量（原先这些定时器在 App 切后台后仍全速跑）
+    const id = setInterval(() => { if (AppState.currentState === 'active') checkStatuses(true); }, 30000);
     return () => clearInterval(id);
   }, [rooms, streamUrl, checkStatuses]);
 
@@ -345,20 +455,27 @@ export default function BilibiliLiveScreen() {
   useEffect(() => {
     const roomId = route.params?.roomId;
     if (!roomId) return;
+    try { logWarn(`[bili] 直达进房 effect roomId=${roomId}`, 'bilibili.quality'); } catch {}
     startWatch({ roomId, name: route.params?.roomName || '', isLive: true });
     // 只在进入时触发一次
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const startWatch = async (room: BilibiliLiveRoom) => {
+    // 诊断（定位「每秒重解析」循环的调用方）：记录调用栈前 3 帧，设置→日志可导出
+    try {
+      const trace = String(new Error().stack || '').split('\n').slice(1, 4).join(' | ').replace(/\s+/g, ' ').slice(0, 200);
+      logWarn(`[bili] startWatch room=${room.roomId} trace=${trace}`, 'bilibili.quality');
+    } catch {}
     setLoading(true);
     setStatus(t('正在获取直播流：{name}', { name: room.name || room.roomId }));
     setPlayerError('');
     setUseWebPlayer(false);
     setCandidates([]);
     setCandidateIndex(0);
-    setQualities([]);
+    setQualityMetas([]);
     setQualityQn(null);
+    setQualitySwitchingQn(null);
     setActiveRoom(room);
     setFetchError('');
     danmakuRef.current?.disconnect();
@@ -372,12 +489,17 @@ export default function BilibiliLiveScreen() {
         throw new Error(t('没有解析到可播放的直播流'));
       }
       const list = info.streamCandidates?.length ? info.streamCandidates : [{ url: info.streamUrl }];
+      // HEVC-only 档（原画/真彩）：跳过网页内核（hls.js 无 HEVC-fMP4），直接原生。
+      // 只写 hevcOnlyRef —— 内核开关由 streamUrl 变化时的路由 effect 统一设置（唯一决策点）
+      hevcOnlyRef.current = list.length > 0 && list.every((c: any) => String(c.codecName || '').toLowerCase() === 'hevc');
       setStreamTitle(info.title || room.name || t('B站直播'));
       setCandidates(list);
-      // 默认最高可用画质（resolveLive 已按画质降序排列候选）
+      // 默认选中「实际拿到的最高画质」：接口的 g_qn_desc 会列出未登录拿不到的更高档位
+      // （如原画），选中态必须以返回流的 currentQn 为准，否则标签与实际画质不符
       const qs = info.qualities || [];
-      setQualities(qs);
-      setQualityQn(qs.length ? qs[0].qn : null);
+      setQualityMetas(qs);
+      const actualTop = list.reduce((m: number, c: any) => Math.max(m, Number(c.currentQn) || 0), 0);
+      setQualityQn(actualTop > 0 ? actualTop : (qs.length ? qs[0].qn : null));
       // 未登录 B站时接口最高只给 720P：一次性轻提示告知登录解锁原画/蓝光
       if (!qualityHintShown.current && !useSettingsStore.getState().settings.bilibiliCookie && qs.length && qs[0].qn < 400) {
         qualityHintShown.current = true;
@@ -387,6 +509,14 @@ export default function BilibiliLiveScreen() {
       const dm = new BilibiliDanmaku();
       danmakuRef.current = dm;
       dm.connect(String(info.realRoomId || room.roomId), {
+        // 诊断：连接状态与收包统计写入 App 内日志（设置 → 日志可导出），
+        // 便于真机排查"弹幕不显示"卡在哪一步（取地址 / 握手 / 认证 / 解包）
+        onStatus: (ok) => {
+          try {
+            if (ok) logWarn(`[bili-dm] 认证成功·已连接 room=${info.realRoomId || room.roomId}`, 'bilibili.danmaku');
+            else logWarn(`[bili-dm] 未连接（含重试耗尽）room=${info.realRoomId || room.roomId}`, 'bilibili.danmaku');
+          } catch {}
+        },
         onMessage: (text) => {
           dmBuffer.current.push(text);
           if (dmFlushTimer.current) return;
@@ -420,6 +550,8 @@ export default function BilibiliLiveScreen() {
     }
   };
 
+  // 弹幕连接自检 / 测试房间入口：诊断期工具，弹幕已定位修复 → 整体拆除（历史实现见 git）
+
   const switchToNextCandidate = useCallback((reason: string) => {
     // 完全静默换流：不弹任何提示，避免打断观看（用户明确不想要换流弹窗/提示）
     const canSwitch = candidateIndex + 1 < visibleCandidates.length;
@@ -436,12 +568,78 @@ export default function BilibiliLiveScreen() {
     setPlayerError(t('{reason}。所有线路都试过了，建议先确认该房间真的在播，或登录 B站账号后重试。', { reason }));
   }, [candidateIndex, visibleCandidates.length, t, useWebPlayer]);
 
-  /** 切换画质：按 qn 过滤线路并回到第一条，Video 随 key 变化重新加载 */
-  const pickQuality = (qn: number) => {
+  /**
+   * 切换画质（2026-10-02 实测定版）：
+   *
+   * ① **本地优先**：目标档在候选池里已有 URL（登录态响应本身就含多档流，如 _bluray/_2500）
+   *    → 直接改 qualityQn，播放器在同池子里换流。零网络、零权限风险、必生效。
+   * ② **请求兜底**：池子里没有该档才重新解析；服务端按会话权限钉档（访客实测请求任何 qn
+   *    都只回 250）拿不到目标档时，**不换流、不重启播放器**，只提示保持原档。
+   * ③ HEVC 兜底：目标档全是 HEVC 流而本机无解码器 → 保持原档（原生硬解会闪退）。
+   * 内核路由不在本函数里做：由 streamUrl 变化时的路由 effect 统一按 hevcOnlyRef 决策。
+   */
+  const pickQuality = async (qn: number) => {
+    if (!activeRoom || qualitySwitchingQn != null) return;
+    if (!qualities.some((q) => q.qn === qn)) return;
     if (qualityQn === qn) return;
-    setQualityQn(qn);
-    setCandidateIndex(0);
+    const label = qualities.find((q) => q.qn === qn)?.label || '';
+    const hevcOnlyOf = (list: any[]) => list.length > 0 && list.every((c: any) => String(c.codecName || '').toLowerCase() === 'hevc');
+    const devUnsupported = (list: any[]) => !!deviceHevc && !deviceHevc.h1080 && hevcOnlyOf(list);
+
+    // ★ ① 本地换流：池子里已有该档线路
+    const local = candidates.filter((c) => Number(c.currentQn) === qn);
+    if (local.length) {
+      try { logWarn(`[bili] switch-local qn=${qn} urls=${local.length}`, 'bilibili.quality'); } catch {}
+      if (devUnsupported(local)) {
+        setStatus(t('设备不支持该画质，已保持原档'));
+        setTimeout(() => setStatus(''), 3000);
+        return;
+      }
+      hevcOnlyRef.current = hevcOnlyOf(local);
+      setQualityQn(qn);
+      setCandidateIndex(0);
+      setPlayerError('');
+      setStatus('');
+      showControls();
+      return;
+    }
+
+    // ★ ② 请求兜底
+    setQualitySwitchingQn(qn);
     setPlayerError('');
+    setStatus(t('切换画质：{label}…', { label }));
+    try {
+      const info = await bilibiliApi.resolveLive(String(activeRoom.roomId), { qn });
+      if (info.qualities?.length) setQualityMetas(info.qualities);
+      const list = info.streamCandidates?.length ? info.streamCandidates : [{ url: info.streamUrl }];
+      const tiers = [...new Set(list.map((c: any) => Number(c.currentQn || 0)).filter((n) => n > 0))];
+      try { logWarn(`[bili] switch-req qn=${qn} got=[${tiers.join(',')}]`, 'bilibili.quality'); } catch {}
+      // 新拿到的档位并进候选池（之后来回切都不用再请求）
+      setCandidates((prev) => mergeCandidates(prev, list));
+      const tierList = list.filter((c: any) => Number(c.currentQn || 0) === qn);
+      if (!tierList.length) {
+        // 服务端没给目标档（按会话权限钉档）：原流不动，仅提示
+        setStatus(t('该画质当前不可用，已保持原档'));
+        setTimeout(() => setStatus(''), 3000);
+        return;
+      }
+      if (devUnsupported(tierList)) {
+        setStatus(t('设备不支持该画质，已保持原档'));
+        setTimeout(() => setStatus(''), 3000);
+        return;
+      }
+      hevcOnlyRef.current = hevcOnlyOf(tierList);
+      setQualityQn(qn);
+      setCandidateIndex(0);
+      setStatus('');
+      showControls();
+    } catch (error) {
+      // 失败：原流不动，仅提示
+      setStatus(t('切换画质失败：{msg}', { msg: errorMessage(error) }));
+      setTimeout(() => setStatus(''), 3000);
+    } finally {
+      setQualitySwitchingQn(null);
+    }
   };
 
   // 从主页公演栏直达：解析直播流期间只显示黑屏（用户要求 2026-09-26：去掉中间的
@@ -453,7 +651,7 @@ export default function BilibiliLiveScreen() {
   if (streamUrl) {
     /* 统一播放器（重写）：B站直播 → PlayerScreen
        - 候选线路：urls 传全部线路，失败自动切下一线路（PlayerCore 内置）
-       - 画质/弹幕设置/下一线路：extraActions（更多面板）
+       - 画质/弹幕设置/下一线路：extraActions（右上「…」播放器功能面板，统一 palette 主题）
        - B站弹幕：children 插槽挂 DanmakuOverlay（WebSocket 数据源保留在页面）
        - 音量补偿 volume 1.5（B站流响度低） */
     return (
@@ -472,14 +670,21 @@ export default function BilibiliLiveScreen() {
           features={{ kernelSwitch: true, danmaku: true }}
           extraActions={[
             { key: 'pip', icon: 'picture-in-picture-bottom-right-outline', label: t('小窗'), onPress: handleMiniPlayer },
-            ...(qualities.length > 1
-              ? qualities.map((q) => ({
-                  key: `qn-${q.qn}`,
+            ...(qualities.length > 0
+              ? [{
+                  // 单一「画质」入口：全部档位收进同一个下拉菜单，点击从播放器右侧弹出独立小面板（palette 主题）。
+                  // 入口**始终可见**（哪怕只有一档，也要能看到当前分辨率）；菜单只列可切换档位，
+                  // 未提供（服务端没下发）的分辨率不显示。
+                  key: 'quality',
                   icon: 'high-definition-box',
-                  label: q.label,
-                  active: qualityQn === q.qn,
-                  onPress: () => pickQuality(q.qn),
-                }))
+                  label: qualityLabel ? t('画质：{label}', { label: qualityLabel }) : t('画质'),
+                  options: qualities.map((q) => ({
+                    key: `qn-${q.qn}`,
+                    label: q.label,
+                    active: qualityQn === q.qn,
+                    onPress: () => pickQuality(q.qn),
+                  })),
+                }]
               : []),
             { key: 'dmsettings', icon: 'cog-outline', label: t('弹幕设置'), onPress: () => setShowDmSettings(true) },
             ...(safeIndex + 1 < visibleCandidates.length
@@ -487,7 +692,6 @@ export default function BilibiliLiveScreen() {
               : []),
           ]}
           onClose={closePlayer}
-          persistent
         >
           {/* B站直播弹幕：实时滚动（live 模式立即上屏） */}
           <DanmakuOverlay
@@ -509,6 +713,8 @@ export default function BilibiliLiveScreen() {
         ) : null}
 
         <DanmakuSettingsSheet visible={showDmSettings} onClose={() => setShowDmSettings(false)} />
+        {/* 弹幕的 WebView 传输通道（原生 WebSocket 被拒时启用），常驻挂载 */}
+        <DanmakuWebViewBridge />
       </View>
     );
   }
@@ -590,6 +796,8 @@ export default function BilibiliLiveScreen() {
         windowSize={7}
         removeClippedSubviews
       />
+      {/* 弹幕的 WebView 传输通道：常驻挂载（原生通道全部失败时的兜底） */}
+      <DanmakuWebViewBridge />
     </GlassSurface>
   );
 }
@@ -621,7 +829,7 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14, paddingVertical: 8, borderRadius: 18,
     backgroundColor: 'rgba(20,20,22,0.88)',
     borderWidth: StyleSheet.hairlineWidth, borderColor: 'rgba(255,143,168,0.35)',
-    shadowColor: '#000', shadowOpacity: 0.25, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 4,
+
     maxWidth: '86%',
   },
   qualityHintText: { color: '#ffd9e2', fontSize: 12, fontWeight: '600', flexShrink: 1 },

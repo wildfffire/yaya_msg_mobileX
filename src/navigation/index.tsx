@@ -1,18 +1,33 @@
 import React, { useCallback, useEffect, useMemo, useRef } from 'react';
-import { BlurTargetProvider, BlurTargetSurface } from '../components/BlurTarget';
-import { NavigationContainer, DefaultTheme, DarkTheme, useFocusEffect, useNavigation, useNavigationState } from '@react-navigation/native';
+import { BlurTargetProvider, BlurTargetSurface, useBlurTarget } from '../components/BlurTarget';
+import { logInfo } from '../utils/runtimeLog';
+import { BlurView } from 'expo-blur';
+import {
+  NavigationContainer,
+  DefaultTheme,
+  DarkTheme,
+  createNavigationContainerRef,
+  useFocusEffect,
+  useIsFocused,
+  useNavigation,
+  useNavigationState,
+} from '@react-navigation/native';
+import Reanimated, { Easing as ReEasing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { useRoomUnreadStore } from '../services/roomUnread';
+// 未读分侧后总值必须走统一求和（大 + 小两侧在同一张表里，直接遍历仍然是总数）
+import { roomUnreadTotal as sumRoomUnread } from '../utils/roomUnreadRules';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import type { BottomTabBarProps } from '@react-navigation/bottom-tabs';
 import { createStackNavigator } from '@react-navigation/stack';
-import { Animated, BackHandler, Easing, ImageBackground, Keyboard, StyleSheet, View } from 'react-native';
+import { Animated, BackHandler, Easing, ImageBackground, Keyboard, Platform, StyleSheet, View } from 'react-native';
 import { useSettingsStore, useUiStore, useUpdateStore } from '../store';
 import { setPipEnabled, listenPipToggle } from '../utils/pip';
 import { Palettes } from '../theme/colors';
 import { fixDataUriMime } from '../utils/dataUri';
 import { ensureMemberData } from '../services/memberData';
 import { RootStackParamList, TabParamList } from './types';
+import { resetChromeScroll } from './chromeScroll';
 import { AppTabBar, MCI } from '../components/AppTabBar';
 import { PageBackdrop } from '../components/PageBackdrop';
 import { MiniPlayer } from '../components/MiniPlayer';
@@ -28,8 +43,12 @@ import RechargeScreen from '../screens/RechargeScreen';
 import FlipScreen from '../screens/FlipScreen';
 import ProfileScreen from '../screens/ProfileScreen';
 import SettingsScreen from '../screens/SettingsScreen';
+import MyScreen from '../screens/MyScreen';
 import FetchScreen from '../screens/FetchScreen';
 import PhotosScreen from '../screens/PhotosScreen';
+import TripScreen from '../screens/TripScreen';
+// 现场互动（口袋云握手 netface）：活动场次 / 预约 / 资格兑换
+import NetfaceScreen from '../screens/NetfaceScreen';
 import RoomRadioScreen from '../screens/RoomRadioScreen';
 import OpenLiveScreen from '../screens/OpenLiveScreen';
 import OnMicScreen from '../screens/OnMicScreen';
@@ -44,6 +63,8 @@ import DatabaseScreen from '../screens/DatabaseScreen';
 import MeleeRankScreen from '../screens/MeleeRankScreen';
 import MemberDynamicScreen from '../screens/MemberDynamicScreen';
 import InvoiceScreen from '../screens/InvoiceScreen';
+import WatchLaterScreen from '../screens/watch/WatchLaterScreen';
+import HistoryScreen from '../screens/watch/HistoryScreen';
 import AppToast from '../components/AppToast';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { ui } from '../theme/ui';
@@ -53,11 +74,17 @@ import { useI18n } from '../i18n';
 const Stack = createStackNavigator<RootStackParamList>();
 const Tab = createBottomTabNavigator<TabParamList>();
 
+/**
+ * 全局导航 ref（用户 2026-11-09：深链 / 通知点击要能在**组件树之外**跳页面）。
+ * 只给「系统入口」用（Linking、通知栏点击），页面内部仍走 useNavigation。
+ */
+export const navigationRef = createNavigationContainerRef<RootStackParamList>();
+
 const TAB_LABELS: Record<string, { icon: string; label: string }> = {
   Home: { icon: 'home', label: '主页' },
   Media: { icon: 'video', label: '直播' },
   Rooms: { icon: 'account-group', label: '房间' },
-  Settings: { icon: 'cog', label: '设置' },
+  Settings: { icon: 'account-circle-outline', label: '我的' },
 };
 
 /**
@@ -77,17 +104,57 @@ function withPageMotion<T extends object>(
 ) {
   return function PageMotionScreen(props: T) {
     const setTabBarHidden = useUiStore((state) => state.setTabBarHidden);
+    const isFocused = useIsFocused();
+    /**
+     * 切页入场动画（用户要求 2026-09-28：四个主页面切换要有动画）。
+     *
+     * ⚠️ 历史教训（见函数上方旧注释）：曾用 RN Animated + native driver 做入场淡入，
+     * New Architecture 下动画不生效会把 opacity 永远卡在 0 → 整屏空白（只有 tab bar），
+     * 因此当时整体移除。这里改用 Reanimated 共享值：
+     *   - 失焦立即归零（场景本就被导航器隐藏，无视觉影响；下次获焦必定从 0 开始）；
+     *   - 获焦 0 → 1 淡入 + 轻微上移（240ms，与 tab 切换频次匹配的克制时长）；
+     *   - opacity 从 0.35 起步：即便极端时序下动画没跑，也只是「没动画」，不会白屏。
+     */
+    const enter = useSharedValue(isFocused ? 1 : 0);
+    useEffect(() => {
+      if (isFocused) {
+        enter.value = 0;
+        enter.value = withTiming(1, { duration: 240, easing: ReEasing.out(ReEasing.cubic) });
+      } else {
+        enter.value = 0;
+      }
+    }, [isFocused, enter]);
+    const enterStyle = useAnimatedStyle(() => ({
+      /**
+       * ⚠️ 这里**不再动画 opacity**（用户反馈 2026-09-28：切页多了会看到上一个页面的内容，
+       *   最离谱的一次是「切到直播页却看到房间列表、而且列表是空的」）。
+       *
+       * 根因：tab 场景是**透明的**（`sceneStyle: { backgroundColor: 'transparent' }`，
+       *   为的是让 PageBackdrop / 玻璃折射透出来），而原来的入场动画
+       *   `opacity: 0.35 + 0.65 * enter.value` 会让新场景在 240ms 内半透明 ——
+       *   这段时间里**下层那个 tab 的场景会直接透上来**（v7 的 tab 场景是叠放布局，
+       *   `animation: 'none'` 不会把旧场景立刻移走）。旧场景若正好是空列表，看到的就是"空房间列表"。
+       *
+       * 现在只动位移：**新场景从第一帧就是完全不透明的**，物理上盖住下层，不可能串台；
+       * 同时顺带消掉历史上那类「opacity 被卡在 0 → 整屏空白」的风险（不再有 opacity 动画）。
+       */
+      transform: [{ translateY: (1 - enter.value) * 6 }],
+    }));
     // dock 显隐只由「当前获得焦点的屏」决定：
     // 二级屏 true（隐藏），tab 屏 false（显示）。不做 cleanup，
     // 否则下一屏 focus 之后旧屏的 cleanup 会把状态又拨回去（竞态 → dock 时隐时现）。
     useFocusEffect(
       React.useCallback(() => {
         setTabBarHidden(hideTabBar);
+        // 顶栏/底栏的「滚动收起」是全局状态，必须跟着焦点复位（含上次偏移量清零）
+        resetChromeScroll();
       }, [hideTabBar, setTabBarHidden]),
     );
     return (
       <ErrorBoundary>
-        <Screen {...props} />
+        <Reanimated.View style={[{ flex: 1 }, enterStyle]}>
+          <Screen {...props} />
+        </Reanimated.View>
       </ErrorBoundary>
     );
   };
@@ -155,7 +222,7 @@ function withTabSwipe<T extends object>(Screen: React.ComponentType<T>) {
 const HomeTabScreen = withTabSwipe(withPageMotion(HomeScreen));
 const MediaTabScreen = withTabSwipe(withPageMotion(MediaScreen));
 const RoomsTabScreen = withTabSwipe(withPageMotion(FollowedRoomsScreen));
-const SettingsTabScreen = withTabSwipe(withPageMotion(SettingsScreen));
+const SettingsTabScreen = withTabSwipe(withPageMotion(MyScreen));
 const MessagesStackScreen = withPageMotion(MessagesScreen, ui.motion.stackDuration, 10, true);
 const LoginStackScreen = withPageMotion(LoginScreen, ui.motion.stackDuration, 10, true);
 const RechargeStackScreen = withPageMotion(RechargeScreen, ui.motion.stackDuration, 10, true);
@@ -163,6 +230,8 @@ const FetchStackScreen = withPageMotion(FetchScreen, ui.motion.stackDuration, 10
 const FlipStackScreen = withPageMotion(FlipScreen, ui.motion.stackDuration, 10, true);
 const ProfileStackScreen = withPageMotion(ProfileScreen, ui.motion.stackDuration, 10, true);
 const PhotosStackScreen = withPageMotion(PhotosScreen, ui.motion.stackDuration, 10, true);
+const TripStackScreen = withPageMotion(TripScreen, ui.motion.stackDuration, 10, true);
+const NetfaceStackScreen = withPageMotion(NetfaceScreen, ui.motion.stackDuration, 10, true);
 const RoomRadioStackScreen = withPageMotion(RoomRadioScreen, ui.motion.stackDuration, 10, true);
 const OpenLiveStackScreen = withPageMotion(OpenLiveScreen, ui.motion.stackDuration, 10, true);
 const PrivateMessagesStackScreen = withPageMotion(PrivateMessagesScreen, ui.motion.stackDuration, 10, true);
@@ -176,6 +245,16 @@ const DatabaseStackScreen = withPageMotion(DatabaseScreen, ui.motion.stackDurati
 const MeleeRankStackScreen = withPageMotion(MeleeRankScreen, ui.motion.stackDuration, 10, true);
 const MemberDynamicStackScreen = withPageMotion(MemberDynamicScreen, ui.motion.stackDuration, 10, true);
 const InvoiceStackScreen = withPageMotion(InvoiceScreen, ui.motion.stackDuration, 10, true);
+// 必须与其他页面一样在模块顶层预包装：withPageMotion 每次调用都返回「新函数」，
+// 若写在 <Stack.Screen component={...}> 里，React Navigation 每次比对都视作组件类型变化 →
+// 卸载重建页面，页面内状态（输入、滚动位置、选区）会莫名丢失。
+const OnMicStackScreen = withPageMotion(OnMicScreen, ui.motion.stackDuration, 10, true);
+const WatchLaterStackScreen = withPageMotion(WatchLaterScreen, ui.motion.stackDuration, 10, true);
+const HistoryStackScreen = withPageMotion(HistoryScreen, ui.motion.stackDuration, 10, true);
+const SettingsDetailStackScreen = withPageMotion(SettingsScreen, ui.motion.stackDuration, 10, true);
+
+/** 底栏滑出屏幕所需的下移距离（栏高 + 安全区 + 上下留白，多给一点无妨，反正已滑出视野） */
+const DOCK_TRAVEL = 160;
 
 function MainTabBar({
   state,
@@ -185,10 +264,26 @@ function MainTabBar({
 }: BottomTabBarProps & { hidden: boolean }) {
   const { t } = useI18n();
   const palette = usePalette();
-  // 房间 tab 未读总数：本地累计的各房间未读之和（房间列表有新消息时在 tab 右上角显示数量）
-  const roomUnreadTotal = useRoomUnreadStore((s) =>
-    Object.values(s.counts).reduce((acc, n) => acc + (Number(n) || 0), 0),
-  );
+  // 房间 tab 未读总数：本地累计的各房间**大 + 小两侧**未读之和
+  // （房间列表有新消息时在 tab 右上角显示数量；求和统一走 utils/roomUnreadRules，别再自己遍历）
+  const roomUnreadTotal = useRoomUnreadStore((s) => sumRoomUnread(s.counts));
+  /**
+   * 滚动收起（用户要求）：主页面向上滚动时底栏滑出屏幕，向下滚回时滑回。
+   * 与 `hidden` 的分工：`hidden` 是导航驱动的（进二级页/进房/播放），保持原来的「直接不渲染」；
+   * 这一个只由滚动方向驱动，做成滑出动画 —— 滚动是高频动作，硬切会很突兀。
+   */
+  const chromeHiddenByScroll = useUiStore((s) => s.chromeHiddenByScroll);
+  const slide = useSharedValue(chromeHiddenByScroll ? 1 : 0);
+  useEffect(() => {
+    slide.value = withTiming(chromeHiddenByScroll ? 1 : 0, {
+      duration: 220,
+      easing: ReEasing.out(ReEasing.cubic),
+    });
+  }, [chromeHiddenByScroll, slide]);
+  const slideStyle = useAnimatedStyle(() => ({
+    transform: [{ translateY: slide.value * DOCK_TRAVEL }],
+    opacity: 1 - slide.value,
+  }));
   if (hidden) return null;
 
   const items = state.routes.map((route, index) => {
@@ -216,14 +311,21 @@ function MainTabBar({
   const activeKey = state.routes[state.index]?.name || 'Home';
   // 自制玻璃底栏（LiquidGlassView 真折射），透光可调
   return (
-    <AppTabBar
-      items={items}
-      activeKey={activeKey}
-      onSelect={(key) => {
-        const target = items.find((it) => it.key === key);
-        target?.onPress();
-      }}
-    />
+    // absoluteFill 包一层只为拿住 transform；AppTabBar 自身仍是 bottom:0 的绝对定位，
+    // 所以落点与改动前一致。收起时 pointerEvents=none，避免用户点到已经滑出屏幕的底栏。
+    <Reanimated.View
+      style={[StyleSheet.absoluteFill, slideStyle]}
+      pointerEvents={chromeHiddenByScroll ? 'none' : 'box-none'}
+    >
+      <AppTabBar
+        items={items}
+        activeKey={activeKey}
+        onSelect={(key) => {
+          const target = items.find((it) => it.key === key);
+          target?.onPress();
+        }}
+      />
+    </Reanimated.View>
   );
 }
 
@@ -247,7 +349,7 @@ function MainTabs() {
       <Tab.Screen name="Home" component={HomeTabScreen} options={{ tabBarLabel: '主页' }} />
       <Tab.Screen name="Media" component={MediaTabScreen} options={{ tabBarLabel: '直播' }} />
       <Tab.Screen name="Rooms" component={RoomsTabScreen} options={{ tabBarLabel: '房间' }} />
-      <Tab.Screen name="Settings" component={SettingsTabScreen} options={{ tabBarLabel: '设置' }} />
+      <Tab.Screen name="Settings" component={SettingsTabScreen} options={{ tabBarLabel: '我的' }} />
     </Tab.Navigator>
   );
 }
@@ -342,6 +444,28 @@ function PipToggleBridge() {
   return null;
 }
 
+/**
+ * 背景模糊层：只模糊 BlurTargetSurface 里那张自定义背景图。
+ * 必须渲染在 BlurTargetSurface **外面**（内部放 BlurView 会 RenderNode 嵌套爆栈，见 BlurTarget 注释），
+ * 通过 ref（blurTarget）绑定目标；没有 target 时（老包/不支持）直接不渲染，避免白纱盖屏。
+ */
+function BackgroundBlur({ blur }: { blur: number }) {
+  const blurTarget = useBlurTarget();
+  if (!blurTarget) return null;
+  return (
+    <BlurView
+      pointerEvents="none"
+      intensity={Math.min(100, Math.max(10, Math.round(blur * 5)))}
+      tint="default"
+      blurTarget={blurTarget}
+      blurMethod="dimezisBlurViewSdk31Plus"
+      /* 降采样：整屏背景逐帧模糊代价很高，8 与玻璃层同一档（用户 2026-11-09） */
+      blurReductionFactor={Platform.OS === 'android' ? 8 : 4}
+      style={StyleSheet.absoluteFill}
+    />
+  );
+}
+
 export default function AppNavigator() {
   const theme = useResolvedTheme();
   const palette = usePalette();
@@ -357,10 +481,22 @@ export default function AppNavigator() {
   const navTheme = theme === 'dark' ? AppDarkTheme : AppTheme;
   // 导航层永远透明：液态玻璃的透光来源是根层 PageBackdrop/背景图，
   // card 不透明会把底衬完全盖住 → 玻璃无从谈起
-  const themed = { ...navTheme, colors: { ...navTheme.colors, background: 'transparent', card: 'transparent' } };
-  // 自定义背景暗化遮罩：浅色主题压一层白雾保证深色文字可读，深色主题压一层黑幕保证浅色文字可读。
-  // 取值克制（<=0.35），既保证可读性又不至于「看不清背景图」。
-  const bgScrim = theme === 'dark' ? 'rgba(0,0,0,0.34)' : 'rgba(255,255,255,0.34)';
+  // primary 跟随主题色（PiliPlus 风格种子色），静态 AppTheme 只提供明暗默认值
+  const themed = { ...navTheme, colors: { ...navTheme.colors, background: 'transparent', card: 'transparent', primary: palette.tint } };
+  /**
+   * 自定义背景的暗化遮罩强度 + 模糊（用户 2026-11-09：调了没反应）。
+   *
+   * ⚠️ 真正被用户看见的背景图在**这一层**（导航层，渲染在 App 那层之上），
+   * 以前 App.tsx 里算的 bg_dim/bg_blur 全被这层盖住 → 怎么调都没变化。
+   * 遮罩默认 34（= 旧版写死的 0.34），滑到 0/100 能明显看出差别。
+   */
+  const bgDimRaw = useSettingsStore((state) => state.settings.bg_dim);
+  const bgBlurRaw = useSettingsStore((state) => state.settings.bg_blur);
+  const bgDimAlpha = Math.max(0, Math.min(100, Number(bgDimRaw ?? 34))) / 100;
+  const bgBlur = Math.max(0, Math.min(20, Number(bgBlurRaw ?? 0)));
+  const bgScrim = theme === 'dark'
+    ? `rgba(11,11,15,${bgDimAlpha.toFixed(2)})`
+    : `rgba(245,245,247,${bgDimAlpha.toFixed(2)})`;
 
   // 启动即自动同步成员数据库（进入软件自动更新；失败静默忽略，不阻塞启动）
   useEffect(() => {
@@ -371,6 +507,11 @@ export default function AppNavigator() {
   useEffect(() => {
     useUpdateStore.getState().checkUpdate().catch(() => {});
   }, []);
+
+  /** 诊断：设置里调完遮罩/模糊后，logcat 应出现 `[bg] dim=… blur=…`（release 包也打） */
+  useEffect(() => {
+    logInfo(`[bg] dim=${Math.round(bgDimAlpha * 100)} blur=${bgBlur} hasBg=${hasBackground ? 1 : 0}`, 'app');
+  }, [bgDimAlpha, bgBlur, hasBackground]);
 
   return (
     <ErrorBoundary>
@@ -402,11 +543,18 @@ export default function AppNavigator() {
         )}
       </BlurTargetSurface>
       {/*
+        背景模糊：必须放在 BlurTargetSurface **外面**（内部放 BlurView 会 RenderNode 嵌套爆栈），
+        用 ref 指向那块 surface（blurTarget）→ 只模糊背景图这一层，不影响页面内容。
+      */}
+      {/* 房间页（screenBackdrop）时这块 surface 里是房间背景，不该套用 App 背景的模糊 */}
+      {hasBackground && !screenBackdrop?.uri && bgBlur > 0 ? <BackgroundBlur blur={bgBlur} /> : null}
+      {/*
         onStateChange：任何一次导航（含手势返回被 navigator 自己处理掉、不经过
         BackHandler 的情况）都兜底收起输入法 —— 否则键盘可能跟着旧页面留着，
         而靠键盘高度做布局的页面会卡在非 0 高度（背景被顶掉一条）。
       */}
       <NavigationContainer
+        ref={navigationRef}
         theme={themed}
         onStateChange={() => { if (Keyboard.isVisible()) Keyboard.dismiss(); }}
       >
@@ -416,6 +564,8 @@ export default function AppNavigator() {
             headerShown: false,
             animation: 'none',
             cardOverlayEnabled: false,
+            // ⚠️ 必须保持 true：卡片全是透明背景，false 时下层 Main 会保持渲染并
+            // 透到二级屏上 =「界面叠在一起」（2026-10-01 实测翻车，已回滚）。
             detachPreviousScreen: true,
             cardStyle: { backgroundColor: 'transparent' },
           }}
@@ -428,9 +578,11 @@ export default function AppNavigator() {
           <Stack.Screen name="FlipScreen" component={FlipStackScreen} />
           <Stack.Screen name="ProfileScreen" component={ProfileStackScreen} />
           <Stack.Screen name="PhotosScreen" component={PhotosStackScreen} />
+          <Stack.Screen name="TripScreen" component={TripStackScreen} />
+          <Stack.Screen name="NetfaceScreen" component={NetfaceStackScreen} />
           <Stack.Screen name="RoomRadioScreen" component={RoomRadioStackScreen} />
           <Stack.Screen name="OpenLiveScreen" component={OpenLiveStackScreen} />
-          <Stack.Screen name="OnMicScreen" component={withPageMotion(OnMicScreen, ui.motion.stackDuration, 10, true)} />
+          <Stack.Screen name="OnMicScreen" component={OnMicStackScreen} />
           <Stack.Screen name="PrivateMessagesScreen" component={PrivateMessagesStackScreen} />
           <Stack.Screen name="BilibiliLiveScreen" component={BilibiliLiveStackScreen} />
           <Stack.Screen name="VideoLibraryScreen" component={VideoLibraryStackScreen} />
@@ -442,6 +594,9 @@ export default function AppNavigator() {
           <Stack.Screen name="MeleeRankScreen" component={MeleeRankStackScreen} />
           <Stack.Screen name="MemberDynamicScreen" component={MemberDynamicStackScreen} />
           <Stack.Screen name="InvoiceScreen" component={InvoiceStackScreen} />
+          <Stack.Screen name="WatchLaterScreen" component={WatchLaterStackScreen} />
+          <Stack.Screen name="HistoryScreen" component={HistoryStackScreen} />
+          <Stack.Screen name="SettingsDetailScreen" component={SettingsDetailStackScreen} />
         </Stack.Navigator>
         <AppToast />
         {/* 应用内悬浮小窗播放器（全局挂载，导航上下文内可用） */}

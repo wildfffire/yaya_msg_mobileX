@@ -119,7 +119,12 @@ def jscFlavor = 'io.github.react-native-community:jsc-android:2026004.+'
 // 注意必须同时收紧 ndk.abiFilters —— AGP 会在"splits 与 abiFilters 不一致"时直接报错。
 def yayaAbiOverride = (findProperty('yaya.abis') ?: '').toString()
   .split(',').collect { it.trim() }.findAll { it }
-def yayaAbis = yayaAbiOverride ?: ['armeabi-v7a', 'arm64-v8a', 'x86_64']
+// ⚠️ 默认只出 arm64-v8a（用户 2026-09-29 明确要求，长期约定）。
+// 用户设备全部是 arm64：多打 v7a / x86_64 / universal 只是白等构建时间
+//（全量 4 包 + Compose dexing 约 15 分钟，单 ABI 命中缓存约 1-2 分钟）。
+// 需要模拟器（MuMu = x86_64）或 32 位老机型时显式覆盖：
+//   gradlew assembleRelease -Pyaya.abis=x86_64,arm64-v8a
+def yayaAbis = yayaAbiOverride ?: ['arm64-v8a']
 
 android {
     ndkVersion rootProject.ext.ndkVersion
@@ -138,19 +143,18 @@ android {
         // minSdk 26（Android 8）：兜底兼容 HarmonyOS 2/3/4 全系（基座 Android 8-10）及更老 Android 机型
         minSdkVersion Math.max(rootProject.ext.minSdkVersion as int, 26)
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2075023
-        versionName "2.7.5"
+        versionCode 3000034
+        versionName "3.0.0"
 
-        // 真机架构 + 模拟器架构。MuMu 等安卓模拟器为 x86_64，缺此 ABI 会导致 libhermes 等原生库
-        // 无法加载（UnsatisfiedLinkError），表现为「启动即闪退进不去」。为兼容模拟器测试必须保留。
-        ndk {
-            // ⚠️ 用 splits 指定 ABI 时 **不能再设 abiFilters**（AGP 直接报
-            // "Conflicting configuration ... cannot be present when splits abi filters are set"）。
-            // 所以快速模式（-Pyaya.abis=…）下交给 splits 决定；常规模式保留原 4 ABI 过滤。
-            if (!yayaAbiOverride) {
-                abiFilters 'armeabi-v7a', 'arm64-v8a', 'x86', 'x86_64'
-            }
-        }
+        // ⚠️ 这里**不要**设 ndk { abiFilters … }（2026-11-04 修正）：
+        // AGP 在 splits.abi.enable=true 时，只要 ndk.abiFilters 非空就直接抛
+        //   "Conflicting configuration : 'arm64-v8a' in ndk abiFilters cannot be present
+        //    when splits abi filters are set : arm64-v8a"
+        // 后果：`node scripts/build-apk.js` 因为总带 -Pyaya.abis，一直是好的；
+        //   但 **Android Studio / 插件里的 Gradle 同步（不带 -P）会在配置阶段失败**，
+        //   IDE 的 "Opening Java Projects / Gradle: Configure project" 就永远停在 54% 左右。
+        // ABI 过滤统一由下面 splits 的 include(yayaAbis) 负责（默认 arm64-v8a，
+        // 模拟器用 -Pyaya.abis=x86_64），两者只需留一处。
 
         buildConfigField "String", "REACT_NATIVE_RELEASE_LEVEL", "\"${findProperty('reactNativeReleaseLevel') ?: 'stable'}\""
     }
@@ -215,7 +219,8 @@ android {
             // （全 4 包 + Compose dexing 约 15 分钟；单 ABI 约 1-2 分钟）
             // 注意：AGP 的 include 只吃 varargs，不能直接传 List
             yayaAbis.each { abiName -> include(abiName) }
-            universalApk((findProperty('yaya.universal') ?: 'true').toString().toBoolean())
+            // 默认**不**打 universal 包（体积 150MB+、且要额外 dex 一遍，用户只要 arm64-v8a 单包）
+            universalApk((findProperty('yaya.universal') ?: 'false').toString().toBoolean())
         }
     }
 }

@@ -1,33 +1,21 @@
 /**
- * AppTabBar · iOS 26 Liquid Glass 底栏
+ * AppTabBar · 扁平化四键底栏（用户 2026-11-09 重绘）
  *
- * 行为对齐 iOS 26（WWDC25 session 284 / HIG）：
- *  - 底栏悬浮胶囊，材质走 GlassSurface（floatingTabBar 预设）
- *  - 选中指示器 = 一块**跟手滑动的玻璃胶囊**：按住底栏横向拖动时它跟着手指走，
- *    松手 spring 到最近的 tab 并切换（对应 Apple「按住拖过不同 tab，玻璃液化成软胶跟手迁移」）
- *  - 图标 spring 弹跳 + 按压反馈 + 安全留白
+ * 观感对齐 Piliplus / M3 导航栏：
+ *  - 实心胶囊条（palette.surface + hairline 描边），无玻璃、无阴影
+ *  - 选中指示器 = 一块**跟手滑动的实心胶囊**（tintContainer / 深色 tintSoft）：
+ *    按住底栏横向拖动时它跟着手指走，松手 spring 到最近的 tab 并切换
+ *  - 图标：选中瞬间「上抬 3dp + 放大 1.14」再并联 spring 回位；按压时整体淡出反馈
  *
  * 实现要点：
  *  - 手势用 PanResponder 且 `onStartShouldSetPanResponder: () => false`，
  *    只有横向位移 > 6px 才接管 → 点击仍然正常落到各 tab 的 Pressable 上
  *  - 指示器位移用 native driver 的 translateX（不触发 JS 帧）
- *
- * 后续（未做）：`LiquidGlassContainer` 的平滑 min 融合（拖到隔壁 tab 时拉出「液桥」）、
- * 滚动时底栏缩小/回弹 + 迷你播放器内联。
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import {
-  Animated,
-  PanResponder,
-  Platform,
-  Pressable,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import { Animated, PanResponder, Pressable, StyleSheet, Text, View } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { GlassSurface } from './GlassSurface';
-import { usePalette, motion } from '../theme';
+import { usePalette } from '../theme';
 import { typography } from '../theme/typography';
 import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
 import { useIsLandscape } from '../hooks/useIsLandscape';
@@ -62,18 +50,26 @@ function TabCell({
 }) {
   const palette = usePalette();
   const pop = useRef(new Animated.Value(1)).current;
+  /** 选中瞬间的「上跳」（Piliplus 风格：图标先抬 3dp 再弹回） */
+  const lift = useRef(new Animated.Value(0)).current;
 
   useEffect(() => {
     pop.stopAnimation();
+    lift.stopAnimation();
     if (active) {
-      pop.setValue(0.92);
-      const animation = Animated.spring(pop, { toValue: 1, tension: 240, friction: 26, useNativeDriver: true });
+      // 1.14 起跳 + 上抬 3dp，两条 spring 并联回位 → 轻盈的「弹一下」
+      pop.setValue(1.14);
+      lift.setValue(-3);
+      const animation = Animated.parallel([
+        Animated.spring(pop, { toValue: 1, tension: 240, friction: 18, useNativeDriver: true }),
+        Animated.spring(lift, { toValue: 0, tension: 260, friction: 16, useNativeDriver: true }),
+      ]);
       animation.start();
       return () => animation.stop();
-    } else {
-      pop.setValue(1);
     }
-  }, [active, pop]);
+    pop.setValue(1);
+    lift.setValue(0);
+  }, [active, pop, lift]);
 
   return (
     <Pressable
@@ -81,10 +77,12 @@ function TabCell({
       accessibilityState={{ selected: active }}
       hitSlop={6}
       onPress={onSelect}
-      style={({ pressed }) => [styles.cell, pressed && { transform: [{ scale: 0.97 }] }]}
+      style={({ pressed }) => [styles.cell, pressed && { opacity: 0.72 }]}
     >
-      <Animated.View style={[styles.cellIcon, { transform: [{ scale: pop }] }]}>
-        {item.icon({ color: active ? palette.tint : palette.labelSecondary, size: 23 })}
+      <Animated.View
+        style={[styles.cellIcon, { transform: [{ translateY: lift }, { scale: pop }] }]}
+      >
+        {item.icon({ color: active ? palette.tint : palette.labelSecondary, size: 22 })}
         {typeof item.badge === 'number' && item.badge > 0 ? (
           <View style={[styles.tabBadge, { backgroundColor: palette.danger }]}>
             <Text style={styles.tabBadgeText}>{item.badge > 99 ? '99+' : String(item.badge)}</Text>
@@ -222,54 +220,27 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
 
   return (
     <View pointerEvents="box-none" style={[styles.outer, outerPadding]}>
-      {/* 作者结构：tab 与选中指示器都作为玻璃的 children ——
-          children 会被排除在 backdrop 捕获之外，玻璃只折射底栏背后的内容，
-          不会再把 tab 自己折射一遍。PanResponder 挂在外层容器上。 */}
+      {/* 扁平化重绘（用户 2026-11-09）：实心底栏 + 实心胶囊指示器，不再有玻璃与投影。
+          选中胶囊仍是「跟手滑动 + 拖动液化」的那一块，只是材质从玻璃换成纯色。 */}
       <View {...pan.panHandlers}>
-        <GlassSurface role="bar" radius={28} style={styles.bar}>
-          {/* 选中态照抄 Kyant0 LiquidBottomTabs 第三层：
-              一块真玻璃（clear 变体），表面色浅色主题 = 黑 10%，
-              lens + chromaticAberration（色散）→ 我们的 iridescence 承担。
-              拖动放大保留；速度拉伸待加。 */}
+        <View
+          style={[
+            styles.bar,
+            { backgroundColor: palette.surface, borderColor: palette.hairline },
+          ]}
+        >
           <Animated.View
             pointerEvents="none"
             style={[
               styles.indicator,
               {
                 width: CELL_W,
-                // 选中胶囊 = 底面 + 柔和投影。
-                // ⚠️ 阴影必须是「灰色」：黑色投影压在浅色玻璃上会显脏（用户明确要求）。
-                // Android 端 RN 会把 shadowColor 映射到 outline shadow 颜色（API 28+），
-                // 所以两边都设成同一个灰。
-                backgroundColor: isDark ? 'rgba(30,30,36,0.86)' : 'rgba(242,242,246,0.80)',
-                ...Platform.select({
-                  ios: { shadowColor: '#9A9AA2', shadowOpacity: 0.42, shadowRadius: 7, shadowOffset: { width: 0, height: 2 } },
-                  android: { shadowColor: '#9A9AA2', elevation: 4 },
-                  default: null,
-                }),
+                // 选中态 = 主题色的容器色（浅色深一档 / 深色用柔和版），保证与纯色底栏分离
+                backgroundColor: isDark ? palette.tintSoft : palette.tintContainer,
                 transform: [{ translateX: indX }, { scaleX: dragStretch }, { scaleY: dragScale }],
               },
             ]}
-          >
-            <GlassSurface
-              role="selector"
-              radius={999}
-              asBackground
-              // 静止：低调浅灰（不是亮白，避免像一块贴纸）
-              // 拖动：更透但仍保留材质 —— 完全透明等于把玻璃删了，不是液态玻璃；
-              //       拖动要的是「玻璃流过」：白纱变薄 + AGSL 边缘折射/色散更明显。
-              tintColor={
-                hoverIndex !== null
-                  ? isDark
-                    ? 'rgba(255,255,255,0.04)'
-                    : 'rgba(255,255,255,0.20)'
-                  : isDark
-                    ? 'rgba(255,255,255,0.10)'
-                    : 'rgba(232,232,238,0.40)'
-              }
-              iridescence={0.6}
-            />
-          </Animated.View>
+          />
           {items.map((item, i) => (
             <TabCell
               key={item.key}
@@ -278,7 +249,7 @@ export function AppTabBar({ items, activeKey, onSelect }: AppTabBarProps) {
               onSelect={() => onSelect(item.key)}
             />
           ))}
-        </GlassSurface>
+        </View>
       </View>
     </View>
   );
@@ -295,37 +266,28 @@ const styles = StyleSheet.create({
   },
   bar: {
     flexDirection: 'row',
-    borderRadius: 28,
-    paddingVertical: 6,
+    borderRadius: 26,
+    paddingVertical: 5,
     paddingHorizontal: BAR_PAD,
-    minHeight: 64,
+    minHeight: 62,
+    borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
-    ...Platform.select({
-      ios: {
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 8 },
-        shadowOpacity: 0.10,
-        shadowRadius: 16,
-      },
-      android: { elevation: 8 },
-      default: null,
-    }),
   },
-  /** 选中指示器：绝对定位 + translateX/scale 驱动（native driver），普通染色胶囊 */
+  /** 选中指示器：绝对定位 + translateX/scale 驱动（native driver），实心胶囊 */
   indicator: {
     position: 'absolute',
-    top: 6,
-    bottom: 6,
+    top: 5,
+    bottom: 5,
     left: BAR_PAD,
-    borderRadius: 28,
+    borderRadius: 22,
   },
   cell: {
     width: CELL_W,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 4,
+    paddingVertical: 5,
     paddingHorizontal: 4,
-    borderRadius: 28,
+    borderRadius: 22,
   },
   cellIcon: { alignItems: 'center', justifyContent: 'center' },
   /** tab 右上角数字角标（房间未读总数等） */
@@ -350,5 +312,3 @@ export function MCI(name: string) {
     <MaterialCommunityIcons name={name} color={color} size={size} />
   );
 }
-
-export { motion };

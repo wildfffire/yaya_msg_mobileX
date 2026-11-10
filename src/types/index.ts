@@ -16,6 +16,24 @@ export interface Member {
   teamLogo?: string;
   /** 成员状态分类（官方源优先）：active 在团 / left 退团 / graduated 毕业 / paused 暂休 / unknown 未知 */
   state?: string;
+  /* ── 成员档案字段（用户 2026-11-09：资料卡补齐血型/星座/期数/入团时间/特长）──
+   * 官方 starInfo 有就合并进来，本地成员库没有时由 online 档案兜底；
+   * 全部可选（缺哪个就不显示哪一行，不用空字符串占位）。 */
+  birthday?: string;
+  birthplace?: string;
+  constellation?: string;
+  height?: string | number;
+  bloodType?: string;
+  hobbies?: string;
+  specialty?: string;
+  periodName?: string;
+  jtime?: string | number;
+  ptime?: string | number;
+  gtime?: string | number;
+  qtime?: string | number;
+  rank?: string | number;
+  wbName?: string;
+  wbUid?: string;
 }
 
 export interface RoomMessage {
@@ -320,6 +338,70 @@ export interface AppSettings {
   meet48Auth?: Meet48Auth | null;
   /** 画中画（系统小窗）：视频播放中切后台自动弹系统悬浮窗。默认关——不主动调用不弹 App 外小窗 */
   pip_auto: boolean;
+  /**
+   * 房间消息头像来源：
+   * - `custom`（默认）：偶像自己在客户端设置的头像（消息 ext.user.avatar），取不到才回退公式照
+   * - `official`：成员库里的系统公式照（source.48.cn），取不到才回退自选头像
+   */
+  room_avatar_source?: 'custom' | 'official';
+  /**
+   * 房间**外**（房间列表等）的成员头像来源，与房间内分开设置：
+   * - `official`（默认）：成员库公式照
+   * - `custom`：偶像自己给房间设置的图标（`seine/server/detail` 的 `chatServerInfo.serverIcon`），
+   *   与公式照、房间内消息头像（`ext.user.avatar`）是三套独立的图；取不到才回退公式照
+   */
+  room_list_avatar_source?: 'custom' | 'official';
+  /* ── 房间列表排序（用户 2026-11-09）───────────────────────────────────────
+   * 「新消息在上」默认开（与原行为一致）；关掉后组内按 room_list_sort 排。
+   * 置顶房间永远排最前，与这两个字段无关。
+   */
+  /** 有新消息的房间是否上浮 */
+  room_list_unread_first?: boolean;
+  /** 组内排序方式：自定义 / 按队伍 / 按字母 */
+  room_list_sort?: 'custom' | 'team' | 'alpha';
+  /** 自定义顺序（memberId 数组，越靠前越上） */
+  room_list_custom_order?: string[];
+  /**
+   * 主题色（PiliPlus 风格）：预设 id 见 ACCENT_PRESETS，'custom' 表示用 accentColor。
+   * 默认 'yaya' = 原有品牌粉，保证老用户升级后外观不变。
+   */
+  accentPreset?: string;
+  /** 自定义主题色 #RRGGBB；同时作为 Color Picker 的初值 */
+  accentColor?: string;
+  /** 调色板风格：由同一个种子色派生出不同浓度/伴随色 */
+  accentVariant?: 'material' | 'soft' | 'vivid' | 'mono';
+  /** 动态取色（Android 12+ 系统壁纸色）；开启后覆盖预设与自定义色 */
+  accentDynamic?: boolean;
+  /** 上次从系统取到的壁纸色（冷启动会重新取一次，壁纸换了能跟上） */
+  accentDynamicValue?: string;
+  /* ── 通知（用户 2026-11-09）───────────────────────────────────────────────
+   * 「软件外」= 系统通知栏；「软件内」= App 内的顶部横幅。两套开关独立，
+   * 因为用户可能只想在 App 内看到提醒，不想被系统通知打扰。
+   */
+  /** 软件外通知（系统通知栏）总开关 */
+  notify_system_enabled?: boolean;
+  /** 软件内通知（App 内横幅）总开关 */
+  notify_inapp_enabled?: boolean;
+  /** 私信消息通知 */
+  notify_pm_enabled?: boolean;
+  /** 房间消息通知 */
+  notify_room_enabled?: boolean;
+  /** 仅在 App 不在前台时发系统通知（前台只出 App 内横幅） */
+  notify_only_background?: boolean;
+  /** 免打扰：所有通知静音（含 App 内横幅） */
+  notify_dnd?: boolean;
+  /**
+   * 房间通知三态（对齐桌面版 followed-rooms 的通知按钮）：
+   * all = 全部房间开；none = 全部关；custom = 按 notify_room_map 逐房间
+   */
+  notify_room_mode?: 'all' | 'custom' | 'none';
+  /** 逐房间开关（memberId → 是否通知，仅 custom 模式生效） */
+  notify_room_map?: Record<string, boolean>;
+  /* ── 背景显示（用户 2026-11-09）───────────────────────────────────────── */
+  /** 自定义背景上压的遮罩强度 0-100（越大越暗/越不透明） */
+  bg_dim?: number;
+  /** 自定义背景模糊半径 0-20 */
+  bg_blur?: number;
   /** 弹幕/房间消息自定义昵称（留空用登录账号昵称） */
   /** 弹幕/房间消息自定义头像 URL（留空用登录账号头像） */
   /** 自定义等级（留空用登录账号） */

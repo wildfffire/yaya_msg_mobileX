@@ -7,9 +7,11 @@
  * 内存缓存 + 防抖落盘；容量上限 200 条按时间淘汰最旧，防止无限膨胀。
  */
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppState } from 'react-native';
 
 const KEY = 'yaya_room_replay_progress_v1';
 const MAX_ENTRIES = 200;
+const PERSIST_DEBOUNCE_MS = 800;
 
 export interface ReplayProgressEntry {
   /** 上次播放位置（秒） */
@@ -34,17 +36,36 @@ async function readAll(): Promise<Record<string, ReplayProgressEntry>> {
   return cache || {};
 }
 
-function persist(all: Record<string, ReplayProgressEntry>) {
-  if (persistTimer) return;
-  persistTimer = setTimeout(async () => {
+/**
+ * 立即落盘（取消防抖）。
+ * 原实现只有 800ms 防抖，**进程被杀或直接退出时最后一次进度会丢**——
+ * 而"看到一半退出、下次续播"恰恰是本模块存在的意义，所以这里必须能强制 flush。
+ */
+async function flushNow(): Promise<void> {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
     persistTimer = null;
-    try {
-      await AsyncStorage.setItem(KEY, JSON.stringify(all));
-    } catch {
-      // 落盘失败不影响本次播放
-    }
-  }, 800);
+  }
+  if (!cache) return;
+  try {
+    await AsyncStorage.setItem(KEY, JSON.stringify(cache));
+  } catch {
+    // 落盘失败不影响本次播放
+  }
 }
+
+function persist() {
+  if (persistTimer) return;
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    void flushNow();
+  }, PERSIST_DEBOUNCE_MS);
+}
+
+// App 退到后台/失活时立即落盘（用户按 Home、切应用、锁屏都走这里）
+AppState.addEventListener('change', (state) => {
+  if (state !== 'active') void flushNow();
+});
 
 export async function getReplayProgress(liveId: string): Promise<ReplayProgressEntry | null> {
   const all = await readAll();
@@ -62,5 +83,5 @@ export async function saveReplayProgress(liveId: string, position: number, durat
     keys.sort((a, b) => (all[a].at || 0) - (all[b].at || 0));
     for (const k of keys.slice(0, keys.length - MAX_ENTRIES)) delete all[k];
   }
-  persist(all);
+  persist();
 }

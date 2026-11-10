@@ -11,6 +11,10 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
   <!-- Android 13+ 通知权限：缺失时前台服务通知不显示（后台播放无通知栏控制/停止入口） -->
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+  <!-- Android 14+（targetSdk 36）：消息保活前台服务必须声明 specialUse 类型 -->
+  <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
+  <!-- 后台联网：请求把 App 加入电池优化白名单（设置→通知→允许后台运行） -->
+  <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
   <queries>
     <intent>
       <action android:name="android.intent.action.VIEW"/>
@@ -26,6 +30,11 @@
     <!-- 电台前台保活服务：纯音频模式下后台/锁屏续播 + 通知栏停止按钮 -->
     <service android:name=".RadioForegroundService" android:exported="false" android:stopWithTask="true" android:foregroundServiceType="mediaPlayback"/>
     <receiver android:name=".RadioMediaReceiver" android:exported="false"/>
+    <!-- 消息保活前台服务：无 FCM，后台进程被冻结后 5s 轮询停摆 → 软件外通知永远发不出去。
+         只提进程优先级、不联网；关掉「设置→通知→系统通知栏」即停止。 -->
+    <service android:name=".MessageKeepAliveService" android:exported="false" android:stopWithTask="false" android:foregroundServiceType="specialUse">
+      <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE" android:value="Keep the in-app message poller alive so new private/room messages can raise notifications while the app is in the background."/>
+    </service>
     <!-- 音乐：真实 ExoPlayer + 单一 framework MediaSession（OPPO 命令全通 + 每秒通知助推刷新） -->
     <service android:name=".YayaExoService" android:exported="false" android:foregroundServiceType="mediaPlayback"/>
     <!-- framework 会话的媒体键接收标记（让 ColorOS 把面板/媒体键路由给本会话） -->
@@ -44,6 +53,14 @@
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>
         <category android:name="android.intent.category.LAUNCHER"/>
+      </intent-filter>
+      <!-- 深链（用户 2026-11-09）：yayamsg://member/123 · room/123 · video/<liveId> · invoice
+           通知点击也走这个 intent（YayaNotifyModule 里用 ACTION_VIEW 构造） -->
+      <intent-filter android:autoVerify="false">
+        <action android:name="android.intent.action.VIEW"/>
+        <category android:name="android.intent.category.DEFAULT"/>
+        <category android:name="android.intent.category.BROWSABLE"/>
+        <data android:scheme="yayamsg"/>
       </intent-filter>
     </activity>
   </application>

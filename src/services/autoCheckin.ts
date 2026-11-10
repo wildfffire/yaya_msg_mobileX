@@ -1,6 +1,7 @@
 import pocketApi from '../api/pocket48';
 import { saveSettings } from './settings';
 import { useSettingsStore } from '../store';
+import { ALREADY_CHECKED_MESSAGE_RE, ALREADY_CHECKED_STATE_RE } from '../utils/json';
 
 function todayKey() {
   // 必须用本地时区日期而非 UTC（toISOString 在北京 00:00-08:00 会落到前一日，
@@ -26,7 +27,7 @@ function pickCurrentUserId(res: any, token: string) {
 
 function isAlreadyCheckedError(error: any) {
   const message = error?.message || error?.msg || String(error || '');
-  return /\u5df2\u7b7e\u5230|\u91cd\u590d\u7b7e\u5230|\u5df2\u7ecf\u7b7e\u5230|\u5df2\u9886\u53d6|\u660e\u5929\u518d\u6765/.test(message);
+  return ALREADY_CHECKED_MESSAGE_RE.test(message);
 }
 
 function isCheckedToday(res: any) {
@@ -46,7 +47,7 @@ function isCheckedToday(res: any) {
     content.hasChecked,
   ];
   if (flags.some((item) => item === true || item === 1 || item === '1')) return true;
-  return /\u5df2\u7b7e\u5230|\u5df2\u7ecf\u7b7e\u5230|\u4eca\u65e5\u5df2\u7b7e/.test(JSON.stringify(content));
+  return ALREADY_CHECKED_STATE_RE.test(JSON.stringify(content));
 }
 
 export async function runAutoCheckinIfNeeded() {

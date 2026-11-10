@@ -19,6 +19,18 @@ export const fontFamily = {
   rounded: roundedFamily,
 };
 
+/**
+ * 页面大标题（用户 2026-11-09 选定「iOS 26 大标题」）：
+ * 28/34 + 字重 900 + 字距 -0.8，比旧版 24/800 更厚重紧凑。
+ * 全站唯一消费点是 ScreenHeader —— 不要再在各页面自己写标题字号。
+ */
+export const screenTitle = {
+  fontSize: 28,
+  lineHeight: 34,
+  fontWeight: '900' as TextStyle['fontWeight'],
+  letterSpacing: -0.8,
+} as const;
+
 /** 字体梯度（字号 / 行高 / 字重 / 用途） */
 export const typography = {
   largeTitle: { fontSize: 34, lineHeight: 41, fontWeight: '700' as TextStyle['fontWeight'], letterSpacing: 0.37 },

@@ -1,7 +1,23 @@
-// iOS 26 调色板：双主题（light / dark）、品牌粉、玻璃专用 surface
+// iOS 26 调色板：双主题（light / dark）、玻璃专用 surface
 // 命名遵循 Apple HIG 的语义色模式：bg / surface / label / separator / tint / glass.*
+//
+// 2026-11-09：接入 PiliPlus 风格的「种子色 → 整套语义色」链路。
+// tint / tintSoft / onTint 不再是写死的品牌粉，而是由设置里的预设色 / 自定义 RGB / 系统动态取色
+// 经 themeColors.ts 派生；usePalette 订阅 settings，改动即时全 app 生效。
 
-/** 品牌 accent：保留口袋粉 #ff6f91 同时新增 iOS 26 强调色变体 */
+import { useMemo } from 'react';
+import { useSettingsStore } from '../store';
+import { useResolvedTheme } from '../hooks/useAppTheme';
+import {
+  DEFAULT_ACCENT_COLOR,
+  DEFAULT_ACCENT_PRESET,
+  deriveAccentColors,
+  normalizeVariant,
+  resolveAccentSeed,
+  type AccentVariant,
+} from './themeColors';
+
+/** 品牌 accent：保留原始常量作为兼容出口与默认种子色 */
 export const accent = {
   pink: '#ff6f91',
   pinkDark: '#ff8fa8',
@@ -56,38 +72,110 @@ export const semantic = {
   info: '#5AC8FA',
 } as const;
 
-const light = {
-  ...neutralLight,
-  ...accent,
-  ...semantic,
-  name: 'light' as const,
-  tint: accent.pink,
-  tintSoft: accent.pinkSoft,
-  /** tint 填充之上的前景色（按钮/胶囊白字） */
-  onTint: '#FFFFFF',
-} as const;
-
-const dark = {
-  ...neutralDark,
-  ...accent,
-  ...semantic,
-  name: 'dark' as const,
-  tint: accent.pinkOnDark,
-  tintSoft: 'rgba(255,143,168,0.20)',
-  onTint: '#FFFFFF',
-} as const;
-
-export type Palette = typeof light | typeof dark;
 export type PaletteName = 'light' | 'dark';
 
-export const Palettes = { light, dark } as const;
+/** 显式声明形状：动态色板字段从字面量类型放宽为 string，消费方用法不变 */
+export interface Palette {
+  name: PaletteName;
+  background: string;
+  surface: string;
+  surfaceElevated: string;
+  surfaceMuted: string;
+  surfaceGlass: string;
+  surfaceGlassStrong: string;
+  hairline: string;
+  separator: string;
+  label: string;
+  labelSecondary: string;
+  labelTertiary: string;
+  fill1: string;
+  fill2: string;
+  fill3: string;
+  innerStroke: string;
+  pink: string;
+  pinkDark: string;
+  pinkSoft: string;
+  pinkOnDark: string;
+  success: string;
+  warning: string;
+  danger: string;
+  info: string;
+  /** 当前明暗主题下由种子色派生的主色 */
+  tint: string;
+  tintSoft: string;
+  /** 自己消息气泡等中等浓度染色 */
+  tintMedium: string;
+  /** tint 填充之上的前景色（按钮/胶囊文字，亮色底自动转深字） */
+  onTint: string;
+  /** PiliPlus 色板里的 tertiary 分区 */
+  tintAlt: string;
+  /** PiliPlus 色板里的 primaryContainer 分区 */
+  tintContainer: string;
+  onTintContainer: string;
+  /** 未经变体调整的原始种子色 */
+  seed: string;
+}
 
-/** 通过 useAppTheme / useResolvedTheme 选其一返回 */
-import { useSettingsStore } from '../store';
-import { useResolvedTheme } from '../hooks/useAppTheme';
+/** 由「明暗 + 种子色 + 调色板风格」拼出完整色板（纯黑主题已按用户要求删除） */
+export function buildPalette(name: PaletteName, seedHex: string, variant: AccentVariant): Palette {
+  const dark = name === 'dark';
+  const a = deriveAccentColors(seedHex, variant, dark);
+  const darkTint = dark ? a.tint : deriveAccentColors(seedHex, variant, true).tint;
+  const neutral = dark ? neutralDark : neutralLight;
+  return {
+    ...neutral,
+    ...semantic,
+    name,
+    pink: a.seed,
+    pinkDark: darkTint,
+    pinkSoft: a.tintSoft,
+    pinkOnDark: darkTint,
+    tint: a.tint,
+    tintSoft: a.tintSoft,
+    tintMedium: a.tintMedium,
+    onTint: a.onTint,
+    tintAlt: a.tintAlt,
+    tintContainer: a.tintContainer,
+    onTintContainer: a.onTintContainer,
+    seed: a.seed,
+  };
+}
 
+/** 默认色板（与改造前一致：品牌粉 + material 风格） */
+export const Palettes: Record<PaletteName, Palette> = {
+  light: buildPalette('light', DEFAULT_ACCENT_COLOR, 'material'),
+  dark: buildPalette('dark', DEFAULT_ACCENT_COLOR, 'material'),
+};
+
+/** 组件外读取当前种子色（Web HTML 模板等非 hook 场景用；不做响应式） */
+export function getAccentSeed(): string {
+  const s = useSettingsStore.getState().settings;
+  return resolveAccentSeed({
+    presetId: s.accentPreset || DEFAULT_ACCENT_PRESET,
+    customHex: s.accentColor,
+    dynamicHex: s.accentDynamicValue,
+    dynamicEnabled: !!s.accentDynamic,
+  });
+}
+
+/** 当前实际色板：订阅设置里的预设色 / 自定义色 / 调色板风格 / 动态取色 */
 export function usePalette(): Palette {
-  return useResolvedTheme() === 'dark' ? dark : light;
+  const name = useResolvedTheme();
+  const presetId = useSettingsStore((s) => s.settings.accentPreset);
+  const customHex = useSettingsStore((s) => s.settings.accentColor);
+  const variant = useSettingsStore((s) => s.settings.accentVariant);
+  const dynamic = useSettingsStore((s) => s.settings.accentDynamic);
+  const dynamicHex = useSettingsStore((s) => s.settings.accentDynamicValue);
+
+  return useMemo(() => {
+    const seed = resolveAccentSeed({
+      presetId: presetId || DEFAULT_ACCENT_PRESET,
+      customHex,
+      dynamicHex,
+      dynamicEnabled: !!dynamic,
+    });
+    return buildPalette(name, seed, normalizeVariant(variant));
+  }, [name, presetId, customHex, variant, dynamic, dynamicHex]);
 }
 
 /**
@@ -102,14 +190,14 @@ export function usePageBackground(): string {
 
 /** 兼容旧 Colors 引用：返回扁平 token 对象（默认 light）—— 旧 screens 不爆炸 */
 export const Colors = {
-  ...light,
+  ...Palettes.light,
   // 兼容旧字段（其它模块残留引用）
-  bgDark: dark.background,
-  darkTextPrimary: dark.label,
-  darkTextSecondary: dark.labelSecondary,
-  darkTextTertiary: dark.labelTertiary,
-  btnSecondaryBg: light.fill3,
-  btnSecondaryBgDark: dark.fill3,
+  bgDark: Palettes.dark.background,
+  darkTextPrimary: Palettes.dark.label,
+  darkTextSecondary: Palettes.dark.labelSecondary,
+  darkTextTertiary: Palettes.dark.labelTertiary,
+  btnSecondaryBg: Palettes.light.fill3,
+  btnSecondaryBgDark: Palettes.dark.fill3,
 };
 
-export const DarkColors = dark;
+export const DarkColors = Palettes.dark;

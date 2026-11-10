@@ -10,6 +10,13 @@
  *  - PlayerScreen：组装入口
  */
 export { PlayerScreen } from './PlayerScreen';
+/**
+ * 统一播放会话层（用户 2026-10-02）：四场景（主直播 / 房间内 / 历史 / 稍后再看）
+ * 以后只调用 `MediaPlaybackHost` —— 解析、续播、弹幕、在线人数、小窗都在里面。
+ * 详细说明见 src/player/session/index.ts。
+ */
+export { MediaPlaybackHost } from './session';
+export type { MediaPlaybackHostProps, MediaPlaybackHostHandle, PlayMedia, ResolvedMedia } from './session';
 export { default as usePlayerStore } from './store/playerStore';
 export { PlayerCore } from './core/PlayerCore';
 export { PlayerChrome } from './chrome/PlayerChrome';

@@ -94,6 +94,24 @@ export interface BarrageItem {
   gift?: { giftId: number; giftName: string; giftNum: number; tpNum: number; toName: string; picPath: string };
 }
 
+/**
+ * 送礼公屏广播入参（直播间送礼成功后发一条 PRESENT_NORMAL 到聊天室）。
+ *
+ * ⚠️ 只调 HTTP `/gift/api/v1/gift/send` 不会产生公屏消息 —— 别的端（含主播）
+ * 看不到「我送的」礼物（用户反馈 2026-09-29，见 codec.buildLiveGiftExt 注释）。
+ */
+export interface LiveGiftBroadcast {
+  /** 收礼人（主播）口袋 userId */
+  toUserId: string | number;
+  /** 收礼人昵称 */
+  toName: string;
+  giftId: string | number;
+  giftName: string;
+  giftNum: number;
+  /** 礼物图（picPath），缺省时官方端不显示图但文案仍在 */
+  giftPic?: string;
+}
+
 /** 云信登录凭证（口袋48 HTTP im/api/v1/im/userinfo 下发） */
 export interface NimCredentials {
   accid: string;

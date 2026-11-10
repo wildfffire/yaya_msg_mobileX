@@ -1,5 +1,5 @@
-import React, { ReactNode, useEffect, useRef } from 'react';
-import { Modal, StyleSheet, View } from 'react-native';
+import React, { ReactNode, useEffect, useMemo, useRef } from 'react';
+import { Modal, PanResponder, StyleSheet, View } from 'react-native';
 import { usePlayerStore } from './store/playerStore';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import { useUiStore } from '../store';
@@ -8,12 +8,11 @@ import { PlayerChrome } from './chrome/PlayerChrome';
 import { FullscreenManager } from './chrome/FullscreenManager';
 import { PlayerScreenProps } from './types';
 import { logInfo } from '../utils/runtimeLog';
+import { useWatchHistoryStore } from '../services/watchHistory';
 
 interface Props extends PlayerScreenProps {
   /** 弹幕 overlay 等附加层插槽（由页面挂 DanmakuOverlay） */
   children?: ReactNode;
-  /** 页面是否常驻（false = 打开时挂载，关闭时卸载） */
-  persistent?: boolean;
   /** 内嵌模式：容器透明由外部定高，Chrome 无顶栏；点全屏 → Modal 全屏呈现 */
   inline?: boolean;
   /** 视频实际尺寸回调（气泡/列表按内容比例自适应容器） */
@@ -24,6 +23,28 @@ interface Props extends PlayerScreenProps {
   onRetry?: () => void;
   /** 直播弹幕输入条：渲染进播放器底部控制坞（随控制条自动隐藏/呼出） */
   barrageInput?: ReactNode;
+  /** 右上角成员名点击（进入成员房间）：不传 = 只展示不可点 */
+  memberAction?: () => void;
+  /**
+   * 水平手势转发（电台照片轮播用）：开始 / 拖动 / 松手 / 取消。
+   *
+   * 只有传了才挂手势识别 —— 录播进度条拖动同样是水平手势，
+   * 普通播放器绝不能挂（否则拖进度条会被当成翻页）。
+   * 手势落在播放器容器上（而不是照片层），因为照片层在 PlayerChrome 之下收不到触摸。
+   */
+  swipeHandlers?: {
+    onStart?: () => void;
+    onMove?: (dx: number) => void;
+    onEnd?: (dx: number, vx: number) => void;
+    onCancel?: () => void;
+  };
+}
+
+/** 水平滑动：超过这个位移才接管手势（点击/双击/长按都不受影响） */
+const SWIPE_CLAIM_DX = 16;
+/** 判定是否为「横向手势」：横向明显大于纵向 */
+function isHorizontalDrag(dx: number, dy: number) {
+  return Math.abs(dx) > SWIPE_CLAIM_DX && Math.abs(dx) > Math.abs(dy) * 1.4;
 }
 
 /**
@@ -40,7 +61,7 @@ interface Props extends PlayerScreenProps {
  *   onClose={() => ...}
  * />
  */
-export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], topLeftAction, onClose, children, persistent = false, inline = false, onVideoSize, resumeAt, onRetry, barrageInput }: Props) {
+export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], topLeftAction, onClose, children, inline = false, onVideoSize, resumeAt, onRetry, barrageInput, swipeHandlers, memberAction }: Props) {
   // 播放错误自动重解析（假死/URL 失效场景）：RTMP 流 URL 带 wsSecret 且多为单次有效，
   // 原生重连同 URL 只会再拿一帧；有 onRetry（页面重新解析新地址）时自动触发，同源最多 2 次。
   const dbgState = usePlayerStore((s) => s.state);
@@ -100,13 +121,53 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
     const mp = useMiniPlayerStore.getState();
     if (mp && mp.visible) mp.close();
     usePlayerStore.getState().open(source, meta, danmaku);
+    /**
+     * 观看历史（用户 2026-09-30）：所有大播放器都经这里打开 → 收口记录一次，
+     * 不需要每个入口页面各自埋点。只记来源（ref/liveId）与标题，
+     * **不记播放地址**（地址有时效，历史页点击时重新解析，见 services/watchHistory.ts）。
+     */
+    try {
+      useWatchHistoryStore.getState().record({
+        kind: source.kind,
+        ref: source.ref,
+        /**
+         * liveId 兜底（用户 2026-09-30：「同一个直播多次记录」）：
+         * `replay` / `openlive` 的 `ref.id` 就是 liveId —— 带上它，同一直播无论从哪个入口播
+         * 都会归到同一条记录（见 services/watchHistory.historyKey 的统一口径）。
+         */
+        liveId: source.liveId
+          || ((source.ref?.kind === 'replay' || source.ref?.kind === 'openlive') ? String(source.ref?.id || '') : '')
+          || '',
+        title: String(meta?.title || ''),
+        cover: meta?.cover,
+        // 成员 / 队伍 / 是否音频：历史列表卡片要显示（页面在 meta 里传，拿不到就留空）
+        owner: meta?.owner,
+        team: meta?.team,
+        // 成员数字 id：历史/稍后再看事后补成员名与队伍的**稳定依据**（见 utils/memberMatch）
+        ownerId: meta?.ownerId,
+        audio: source.kind === 'audio' || !!source.audioOnly,
+      });
+    } catch {}
     try { logInfo(`[player] PlayerScreen open kind=${source.kind} url=${String(source.url).slice(0, 90)}`, 'player.screen'); } catch {}
     return () => {
-      // 卸载时若全局播放器仍指向本页打开的源 → 关闭（persistent 页面关闭也应清干净，
-      // 否则陈旧 source/state 残留可能干扰二次进入播放（首次能进、之后卡首帧））
+      /**
+       * 卸载时若全局播放器仍指向本页打开的源 → 关闭（重新解析/换线路后也要清干净，
+       * 否则陈旧 source/state 残留可能干扰二次进入播放（首次能进、之后卡首帧））。
+       *
+       * ⚠️ 判定不能再用 `source.url === sourceUrl` 的严格相等（用户 2026-09-30：「直播退出后
+       * 所有界面都出现卡顿」）：直播换线路时 `nextCandidate()` 会把 store 里的 source.url
+       * 改成候选地址 → 判定失败 → **close() 永不执行** → 全局单例继续持有 source / meta /
+       * danmaku（LRC 可能数千条）以及播放器内核实例，退出后一直占着内存与解码器。
+       * 现在按「同一场次」判定：liveId / ref.id 相同（或 url 完全相同）即认为是本页打开的源。
+       * 仍然安全：不同场次（liveId 不同）的会话不会被这里关掉。
+       */
       const st = usePlayerStore.getState();
-      if (openedFor.current === sourceUrl && (!st.source || st.source.url === sourceUrl || !st.source.url)) {
-        if (st.source && st.source.url === sourceUrl) st.close();
+      const src: any = st.source;
+      if (openedFor.current === sourceUrl && src) {
+        const ownLive = String((source as any).liveId || (source as any).ref?.id || '');
+        const curLive = String(src.liveId || src.ref?.id || '');
+        const sameSession = (!!ownLive && !!curLive && ownLive === curLive) || src.url === sourceUrl;
+        if (sameSession) st.close();
       }
       openedFor.current = '';
     };
@@ -141,16 +202,63 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
   const storeUrl = usePlayerStore((s) => s.source?.url);
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  /**
+   * 跨页播放互斥：全局播放器同一时刻只播一路 —— 本页的源被**其它页面**的新播放器顶替时，
+   * 本页自动退出播放器。
+   *
+   * ⚠️ 判定必须直读 store 最新值 + 用「同一会话」判据（2026-10-02 真机日志修版）：
+   * 旧实现在闭包里比对渲染时的 storeUrl —— 本页**自己换源**（切画质/重新解析/换线路）那一帧，
+   * 旧 storeUrl ≠ 新 sourceUrl 会被**误判成「被顶替」→ 立即 onClose() 关掉播放器**
+   * （用户体感：切画质后播放器整个退出、「直播根本打不开」；反复重进还会叠成每秒重解析）。
+   * 现在直读 getState：同 url / 命中本会话候选列表 / 同 liveId 任一成立即视为同一会话，不关。
+   */
   useEffect(() => {
-    if (!sourceUrl || !storeUrl) return;
-    if (openedFor.current === sourceUrl && storeUrl !== sourceUrl && onCloseRef.current) {
-      openedFor.current = '';
-      onCloseRef.current();
-    }
-  }, [storeUrl, sourceUrl]);
+    if (!sourceUrl) return;
+    if (openedFor.current !== sourceUrl) return;
+    const st = usePlayerStore.getState();
+    const cur = String(st.source?.url || '');
+    if (!cur) return;
+    const ownLive = String((source as any).liveId || (source as any).ref?.id || '');
+    const curLive = String(st.source?.liveId || st.source?.ref?.id || '');
+    const sameSession =
+      cur === sourceUrl
+      || (st.candidateUrls || []).some((u) => u === sourceUrl)
+      || (!!ownLive && !!curLive && ownLive === curLive);
+    if (sameSession) return;
+    openedFor.current = '';
+    onCloseRef.current?.();
+  }, [storeUrl, sourceUrl, source]);
+
+  /**
+   * 水平手势识别（仅电台照片轮播：页面传了 swipeHandlers 才挂）。
+   *
+   * 关键：`onStartShouldSetPanResponder*` 恒 false —— 只有**明确水平移动**超过阈值
+   * 才在捕获阶段接管，所以单击/双击/长按/控制条按钮全都保持原行为；
+   * 接管后把位移与松手速度原样转发给照片翻页器（跟手 + 惯性判定都在 PhotoPager 内，
+   * 与房间图片查看器同一套规则）。
+   */
+  const swipeResponder = useMemo(
+    () => (swipeHandlers
+      ? PanResponder.create({
+        onStartShouldSetPanResponder: () => false,
+        onStartShouldSetPanResponderCapture: () => false,
+        onMoveShouldSetPanResponder: (_e, g) => isHorizontalDrag(g.dx, g.dy),
+        onMoveShouldSetPanResponderCapture: (_e, g) => isHorizontalDrag(g.dx, g.dy),
+        onPanResponderGrant: () => swipeHandlers.onStart?.(),
+        onPanResponderMove: (_e, g) => swipeHandlers.onMove?.(g.dx),
+        onPanResponderRelease: (_e, g) => swipeHandlers.onEnd?.(g.dx, Number(g.vx) || 0),
+        onPanResponderTerminate: () => swipeHandlers.onCancel?.(),
+        onPanResponderTerminationRequest: () => true,
+      })
+      : null),
+    [swipeHandlers],
+  );
 
   const content = (
-    <View style={[styles.container, inline && !fullscreen ? styles.inline : null]}>
+    <View
+      style={[styles.container, inline && !fullscreen ? styles.inline : null]}
+      {...(swipeResponder ? swipeResponder.panHandlers : {})}
+    >
       {/* 画面层：旋转/镜像 transform 仅作用于视频（弹幕/控制层不转） */}
       <View style={StyleSheet.absoluteFill}>
         <View style={[StyleSheet.absoluteFill, { transform: mediaTransform }]}>
@@ -158,7 +266,7 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
         </View>
       </View>
       {children}
-      <PlayerChrome features={features} extraActions={extraActions} topLeftAction={topLeftAction} onClose={onClose} inline={inline} onRetry={onRetry} barrageInput={barrageInput} />
+      <PlayerChrome features={features} extraActions={extraActions} topLeftAction={topLeftAction} onClose={onClose} inline={inline} onRetry={onRetry} barrageInput={barrageInput} memberAction={memberAction} />
       <FullscreenManager />
     </View>
   );

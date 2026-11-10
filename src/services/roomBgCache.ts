@@ -1,5 +1,6 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as FileSystem from 'expo-file-system/legacy';
+import { createInflight, trimRecordToMax } from '../utils/cache';
 
 // 房间背景图本地缓存：进房间时优先显示本地已缓存的图（瞬时、不联网、不重复解码），
 // 服务端背景 URL 变化时才重新下载。从根消除「背景从无到有硬跳变」并削掉轮询重渲染时的网络/解码开销。
@@ -69,9 +70,18 @@ export function getBgDisplayUri(url: string): string {
 
 // 后台确保缓存：命中且文件存在则什么都不做；否则下载落盘并更新映射。
 // 永远不阻塞 UI —— 调用方拿 getBgDisplayUri 先显示，本函数负责"补齐"本地副本。
-export async function ensureBgCached(url: string): Promise<void> {
-  if (!url) return;
+//
+// ⚠️ 按 URL 做在途去重：同一背景图被并发请求（进房 + 预热 + 轮询同时触发）时，
+//    旧实现会各自下载一遍、互相覆盖映射。共享同一个 Promise 即可。
+const bgInflight = createInflight();
+
+export function ensureBgCached(url: string): Promise<void> {
+  if (!url) return Promise.resolve();
   const abs = normalizeBg(url); // 相对路径统一绝对化后再按绝对地址缓存
+  return bgInflight.run(abs, () => downloadBgIfNeeded(abs));
+}
+
+async function downloadBgIfNeeded(abs: string): Promise<void> {
   const map = await loadMap();
   const entry = map[abs];
   if (entry) {
@@ -84,15 +94,11 @@ export async function ensureBgCached(url: string): Promise<void> {
     const localUri = `${BG_DIR}${hashUrl(abs)}.img`;
     await FileSystem.downloadAsync(abs, localUri);
     const next: BgMap = { ...map, [abs]: { localUri, url: abs } };
-    // 淘汰：超过上限时删除最旧条目（对象插入顺序 ≈ 写入顺序）
-    const keys = Object.keys(next);
-    if (keys.length > MAX_ENTRIES) {
-      const drop = keys.slice(0, keys.length - MAX_ENTRIES);
-      for (const k of drop) {
-        const uri = next[k]?.localUri;
-        if (uri) FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
-        delete next[k];
-      }
+    // 淘汰：超过上限时删除最旧条目及其落盘文件（统一走 utils/cache.ts 的裁剪原语）
+    const dropped = trimRecordToMax(next, MAX_ENTRIES);
+    for (const [, old] of dropped) {
+      const uri = old?.localUri;
+      if (uri) FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => undefined);
     }
     await saveMap(next);
   } catch {

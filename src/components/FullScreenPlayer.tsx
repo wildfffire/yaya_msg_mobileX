@@ -424,7 +424,6 @@ const styles = StyleSheet.create({
     width: 240, height: 240, borderRadius: 120,
     alignItems: 'center', justifyContent: 'center',
     borderWidth: 8, overflow: 'hidden',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 6 }, shadowOpacity: 0.25, shadowRadius: 16, elevation: 8,
   },
   lyricScroll: { flex: 1 },
   lyricToolRow: { flexDirection: 'row', justifyContent: 'center', gap: 12, paddingVertical: 6 },

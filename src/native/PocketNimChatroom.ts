@@ -11,6 +11,7 @@
  */
 
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
+import { NATIVE_SEND_TIMEOUT_MS, withNativeTimeout } from './timeout';
 
 interface PocketNimChatroomNative {
   connect(appKey: string, account: string, token: string, roomId: string): Promise<boolean>;
@@ -52,13 +53,13 @@ export async function chatroomConnect(
   roomId: string
 ): Promise<void> {
   if (!native) throw new Error('当前平台不支持原生聊天室通道');
-  await native.connect(appKey, account, token, roomId);
+  await withNativeTimeout(native.connect(appKey, account, token, roomId), '原生聊天室连接');
 }
 
 /** 返回 idClient；服务端回执经 onChatroomSendResult 事件回来（成功才 resolve 的话用 sendAndWait） */
 export async function chatroomSend(text: string, customJson: string): Promise<string> {
   if (!native) throw new Error('当前平台不支持原生聊天室通道');
-  return native.send(text, customJson);
+  return withNativeTimeout(native.send(text, customJson), '弹幕发送', NATIVE_SEND_TIMEOUT_MS);
 }
 
 export function chatroomDisconnect(): void {

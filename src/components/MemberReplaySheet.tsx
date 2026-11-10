@@ -89,7 +89,7 @@ function pickReplayUrl(raw: any): string {
   return m ? m[0].replace(/\\\//g, '/') : '';
 }
 
-function normalizeReplay(raw: any, index: number): MemberReplayItem | null {
+function normalizeReplay(raw: any, _index: number): MemberReplayItem | null {
   const liveId = pickText(raw, ID_KEYS);
   if (!liveId) return null;
   return {

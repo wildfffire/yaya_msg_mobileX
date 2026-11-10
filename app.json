@@ -2,9 +2,10 @@
   "expo": {
     "name": "牙牙消息 X",
     "slug": "yaya-msg-mobile",
-    "version": "2.7.5",
+    "version": "3.0.0",
     "orientation": "default",
     "icon": "./assets/icon.png",
+    "scheme": "yayamsg",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": false,
     "splash": {
@@ -19,7 +20,7 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.yk1z.yayamsg",
-      "versionCode": 2075023,
+      "versionCode": 3000034,
       "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",

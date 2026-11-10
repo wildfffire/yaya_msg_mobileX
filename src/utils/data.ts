@@ -1,8 +1,14 @@
 import { translate } from '../i18n';
+import { replaceEmojiText } from './emoji';
+import { flipCardDisplayText, isFlipCard } from './flipCard';
+import { getPath, pickText, normalizeUrl } from './pathPick';
 
-export function getPath(obj: any, path: string): any {
-  return path.split('.').reduce((acc, key) => acc?.[key], obj);
-}
+/**
+ * 三个纯取值函数已搬到 `./pathPick`（唯一实现），这里原样再导出 ——
+ * 目的：让**不依赖 react / i18n 的纯规则层**也能复用它们并进单测
+ * （`data.ts` 顶部 import i18n，被 scripts 编译后在纯 Node 里会直接崩）。
+ */
+export { getPath, pickText, normalizeUrl };
 
 export function firstArray(...values: any[]): any[] {
   for (const value of values) {
@@ -46,25 +52,6 @@ export function unwrapList(res: any, keys: string[] = []): any[] {
   return [];
 }
 
-export function pickText(obj: any, paths: string[], fallback = ''): string {
-  for (const path of paths) {
-    const value = getPath(obj, path);
-    if (value !== undefined && value !== null && String(value).trim() !== '') {
-      return String(value);
-    }
-  }
-  return fallback;
-}
-
-export function normalizeUrl(value: any): string {
-  if (!value) return '';
-  const raw = String(value).trim();
-  if (!raw) return '';
-  if (raw.startsWith('//')) return `https:${raw}`;
-  if (raw.startsWith('/')) return `https://source.48.cn${raw}`;
-  return raw;
-}
-
 /**
  * 从播放地址里抽 liveId（红播/VOD 地址把 liveId 直接写在路径里）。
  *
@@ -94,23 +81,15 @@ export function parseMaybeJson(value: any): any {
   }
 }
 
-const EMOJI_MAP: Record<string, string> = {
-  '[色]': '😍', '[爱心]': '❤️', '[亲亲]': '😚', '[生病]': '😷', '[大哭]': '😭', '[微笑]': '🙂', '[酷]': '😎', '[坏笑]': '😏',
-  '[惊恐]': '😱', '[愉快]': '😊', '[憨笑]': '😄', '[悠闲]': '😌', '[奋斗]': '💪', '[大笑]': '😆', '[疑问]': '❓', '[嘘]': '🤫',
-  '[晕]': '😵', '[衰]': '😞', '[骷髅]': '💀', '[敲打]': '🔨', '[再见]': '👋', '[擦汗]': '😓', '[抠鼻]': '👃', '[鼓掌]': '👏',
-  '[糗大了]': '😳', '[左哼哼]': '😤', '[右哼哼]': '😤', '[哈欠]': '🥱', '[鄙视]': '👎', '[委屈]': '🥺', '[快哭了]': '😿', '[阴险]': '😈',
-  '[吓]': '😨', '[可怜]': '🥺', '[菜刀]': '🔪', '[西瓜]': '🍉', '[啤酒]': '🍺', '[篮球]': '🏀', '[乒乓]': '🏓', '[咖啡]': '☕',
-  '[饭]': '🍚', '[猪头]': '🐷', '[玫瑰]': '🌹', '[凋谢]': '🥀', '[嘴唇]': '💋', '[心碎]': '💔', '[蛋糕]': '🎂', '[闪电]': '⚡',
-  '[炸弹]': '💣', '[刀]': '🔪', '[足球]': '⚽', '[瓢虫]': '🐞', '[便便]': '💩', '[月亮]': '🌙', '[太阳]': '☀️', '[礼物]': '🎁',
-  '[拥抱]': '🤗', '[强]': '👍', '[弱]': '👎', '[握手]': '🤝', '[胜利]': '✌️', '[抱拳]': '🙏', '[勾引]': '☝️', '[拳头]': '✊',
-  '[差劲]': '👎', '[爱你]': '🤟', '[NO]': '🙅', '[OK]': '👌', '[跳跳]': '💃', '[发抖]': '🥶', '[怄火]': '😡', '[转圈]': '💫',
-  '[磕头]': '🙇', '[回头]': '🔙', '[跳绳]': '🏃', '[挥手]': '🙋', '[激动]': '🤩', '[街舞]': '🕺', '[献吻]': '😽', '[左太极]': '☯️', '[右太极]': '☯️',
-};
-
-export function replaceEmojiText(text: string): string {
-  if (!text) return text;
-  return text.replace(/\[([^\]]+)\]/g, (match: string) => EMOJI_MAP[match] || match);
-}
+/**
+ * 表情短码 → emoji 的码表与替换函数已抽到 `utils/emoji.ts`。
+ *
+ * 为什么搬走：原表只有 90 条，实测弹幕里最高频的 `[流泪] [呲牙] [调皮]
+ * [偷笑] [流汗] [爱情]` 全都不在里面（=「表情显示成文字」的根因）；
+ * 且直播弹幕（云信 codec）与录播弹幕（utils/danmaku）都需要它，
+ * 放在 data.ts 里会让这两条链路引不到。这里原样再导出，既有调用方不受影响。
+ */
+export { EMOJI_MAP, replaceEmojiText } from './emoji';
 
 export function messagePayload(item: any): any {
   const raw = item?.bodys ?? item?.body ?? item?.msgContent ?? item?.content ?? item?.message;
@@ -122,7 +101,18 @@ export function messagePayload(item: any): any {
   return null;
 }
 
+/**
+ * 房间消息正文。
+ *
+ * 出口统一过一次表情替换：原先只有部分分支（纯文本 / 带 caption 的媒体消息）替换，
+ * 「回复 xxx」「送礼物」等拼装出来的文案漏了 —— 成员发 `[流泪]` 回复时仍是一串代码。
+ * 放在出口做一次，任何新增分支都不会再漏。
+ */
 export function messageText(item: any): string {
+  return replaceEmojiText(messageTextInner(item));
+}
+
+function messageTextInner(item: any): string {
   const body = messagePayload(item);
   const type = String(item?.msgType || body?.msgType || body?.messageType || body?.type || '').toUpperCase();
 
@@ -157,6 +147,18 @@ export function messageText(item: any): string {
       const t2 = r.text || r.bodys || r.body || r.msgContent || r.content;
       if (t2) return replaceEmojiText(String(t2));
     }
+  }
+
+  /**
+   * 翻牌（成员公开翻牌）：用户 2026-09-30 反馈「房间的翻牌消息显示不出来」。
+   *
+   * 以前没有这个分支 → 既没有回答也没落到文本分支时，末尾兜底会输出字面量 `[FLIPCARD]`；
+   * 即使命中 REPLY 分支，也只显示「回复 xxx」而看不到成员的**回答内容**（翻牌最该看的部分）。
+   * 放在 REPLY/GIFT 之前：翻牌优先展示回答，字段解析见 utils/flipCard.ts。
+   */
+  if (isFlipCard(item)) {
+    const flip = flipCardDisplayText(item);
+    if (flip) return flip;
   }
 
   const giftInfo = body?.giftInfo || body?.giftReplyInfo?.giftInfo || body?.bodys?.giftInfo;

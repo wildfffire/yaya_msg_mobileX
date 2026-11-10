@@ -185,7 +185,6 @@ export default function AudioProgramsScreen() {
               source={{ kind: 'audio', url: playUrls[urlIndex], headers: buildPocketHeaders() }}
               meta={{ title: playing?.title || t('正在播放') }}
               features={{ kernelSwitch: true, rate: true }}
-              persistent
             >
               {playUrls.length > 1 ? (
                 <TouchableOpacity

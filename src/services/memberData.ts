@@ -168,7 +168,7 @@ async function fetchYk1zDb(): Promise<Member[]> {
  * 合并规则：房间映射以 yk1z 库为权威（无条件覆盖官方缺失值），官方只补缺口——
  * 与 2.7.3 行为一致（大小房间正确、小房间 channelId 可查），同时档案/花名册动态化。
  */
-export async function fetchOfficialMembers(): Promise<Member[]> {
+export async function fetchOfficialMembers(): Promise<{ members: Member[]; dbOk: boolean; dbCount: number }> {
   // 并行拉取三源，任一失败不阻断整体（官方目录失败时退化为仅 yk1z 库）
   const [dbSettled, catalogSettled, mapSettled] = await Promise.allSettled([
     fetchYk1zDb(),
@@ -177,6 +177,15 @@ export async function fetchOfficialMembers(): Promise<Member[]> {
   ]);
 
   const dbMembers: Member[] = dbSettled.status === 'fulfilled' ? dbSettled.value : [];
+  /**
+   * `dbOk` = 房间映射权威源（yk1z 库）**真的拉到了**。
+   *
+   * ⚠️ 必须把它透出给 updateMemberData：官方目录（group_team_star）不含 channelId/yklzId，
+   * 只靠官方目录拼出来的成员库会把房间映射写坏（2026-11-01 真机事故：两源 15s 超时 →
+   * 退化官方目录 → 陈琳 channelId 被写成 41096185，进房全 500「频道不存在」）。
+   * 旧实现用 `Promise.allSettled` 把这个失败吞成空数组，上层完全无从得知。
+   */
+  const dbOk = dbSettled.status === 'fulfilled' && dbMembers.length > 0;
   if (dbSettled.status === 'rejected') {
     logWarn(`[memberData] yk1z 成员库拉取失败（房间映射缺失，大小房间可能不可用）：${dbSettled.reason?.message || String(dbSettled.reason)}`, 'memberData');
   } else {
@@ -243,6 +252,20 @@ export async function fetchOfficialMembers(): Promise<Member[]> {
       if (!m.wbName) m.wbName = off.wbName ? String(off.wbName) : m.wbName;
       if (!m.wbUid) m.wbUid = off.wbUid ? String(off.wbUid) : m.wbUid;
       if (!m.birthday) m.birthday = off.birthday ? String(off.birthday) : m.birthday;
+      /**
+       * 档案字段补齐（用户 2026-11-09：资料卡的血型/星座/身高/特长/期数/入团时间等
+       * 以前只有「在线档案」接口有，本地成员库(离线)读出来是空的）。
+       * 一律「库里没有才用官方补」，绝不覆盖本地已有值。
+       */
+      for (const field of [
+        'birthplace', 'constellation', 'height', 'bloodType', 'hobbies', 'specialty',
+        'periodName', 'jtime', 'ptime', 'gtime', 'qtime', 'rank', 'wbName', 'wbUid',
+      ]) {
+        const value = off?.[field];
+        if (!m[field] && value !== undefined && value !== null && String(value) !== '') {
+          m[field] = String(value);
+        }
+      }
       // 分类对齐 yk1z 库：不覆盖库的 isInGroup/status/team（官方 "IDFT" 标的几乎全是毕业成员，
       // 只有杨添淩 1 人库 isInGroup=true 是在团），state 保持库语义
       return m;
@@ -268,53 +291,16 @@ export async function fetchOfficialMembers(): Promise<Member[]> {
     logInfo(`[memberData] userServerMap 补齐 serverId：${patched} 位`, 'memberData');
   }
 
-  // 关注成员 latestMessage 反推 channelId（补最后缺口）
-  try {
-    const followedRes = await pocketApi.getFollowedIds();
-    const followedContent = followedRes?.content || followedRes?.data || {};
-    let idsArr: string[] = [];
-    for (const key of ['data', 'list', 'friends', 'ids']) {
-      if (Array.isArray(followedContent[key])) { idsArr = followedContent[key].map(String); break; }
-    }
-    if (!idsArr.length && Array.isArray(followedRes)) idsArr = followedRes.map(String);
-    logInfo(`[memberData] 关注成员 ${idsArr.length} 位，尝试用最新消息反推 channelId`, 'memberData');
-    if (idsArr.length) {
-      const serverIds = idsArr
-        .map((id: string) => {
-          const sid = userServerMap.get(id);
-          if (sid) return Number(sid);
-          const m = members.find((mm) => String(mm.id) === id);
-          return m?.serverId ? Number(m.serverId) : 0;
-        })
-        .filter((n: number) => n > 0);
-      const BATCH = 50;
-      const serverToChannel = new Map<string, string>();
-      for (let i = 0; i < serverIds.length; i += BATCH) {
-        const batch = Array.from(new Set(serverIds.slice(i, i + BATCH)));
-        if (!batch.length) continue;
-        const lastRes = await pocketApi.getLastMessages(batch);
-        const lastList = Array.isArray(lastRes?.content?.lastMsgList) ? lastRes.content.lastMsgList : [];
-        if (i === 0) logInfo(`[memberData] lastMessage 首批返回 ${lastList.length} 条`, 'memberData');
-        for (const msg of lastList) {
-          const sid = String(msg?.serverId || '');
-          const cid = String(msg?.channelId || '');
-          if (sid && cid && sid !== '0' && cid !== '0') serverToChannel.set(sid, cid);
-        }
-      }
-      if (serverToChannel.size) {
-        let patched = 0;
-        for (const m of members) {
-          if ((!m.channelId || m.channelId === '0') && m.serverId) {
-            const cid = serverToChannel.get(String(m.serverId));
-            if (cid) { m.channelId = cid; patched += 1; }
-          }
-        }
-        logInfo(`[memberData] lastMessage 反推 channelId：${patched} 位`, 'memberData');
-      }
-    }
-  } catch (e: any) {
-    logWarn(`[memberData] 关注 members/反推 channelId 失败（不阻断）：${e?.message || String(e)}`, 'memberData');
-  }
+  /**
+   * ⚠️ 这里**不再**用「关注成员 latestMessage 反推 channelId」（2026-11-01 删除）。
+   *
+   * 原因：`/team/classic/last/message/get` 是按 serverId 列表批量查的，一个 serverId 下
+   * 同时存在**大房间 channelId** 和**小房间 yklzId** 两个频道，而旧实现是
+   * `serverToChannel.set(serverId, channelId)` —— 一个 server 只留最后一条，必然互相覆盖错一半。
+   * 真机后果（2026-11-01）：陈琳被写成 `channelId=41096185`（权威库是 1279493），
+   * 进房时 all / homeowner 全返回 500「频道不存在」；部分成员小房间也被写串。
+   * 房间映射只认 yk1z 库（权威）与 roomMapCache 的 seine 解析，缺就让它缺，宁空不错。
+   */
 
   // 统计房间字段覆盖情况
   const withServer = members.filter((m) => m.serverId && m.serverId !== '0').length;
@@ -345,7 +331,7 @@ export async function fetchOfficialMembers(): Promise<Member[]> {
   } catch (e: any) {
     logWarn(`[memberData] 房间映射缓存预热失败：${e?.message || String(e)}`, 'memberData');
   }
-  return members;
+  return { members, dbOk, dbCount: dbMembers.length };
 }
 
 async function persist(members: Member[], source: MemberDataMeta['source']) {
@@ -364,19 +350,48 @@ async function persist(members: Member[], source: MemberDataMeta['source']) {
 /**
  * v2.7.4：成员库为双源合并——yk1z 数据库（权威房间映射）+ 官方接口（档案/花名册/serverId）。
  * 成功 → 写缓存 + 入 store；失败 → 抛错（保留旧缓存仅作展示）。
+ *
+ * v2.7.7（2026-11-01）：**房间映射权威源（yk1z 库）拉不到时不再走「官方目录兜底写缓存」**，
+ * 而是返回 `updated:false` 并保留本地数据。真机事故：两个库源 15s 超时 → 退化官方目录
+ * （channelId 覆盖个位数）→ 陈琳 channelId 被写成 41096185（权威库 1279493）→ 进房全 500；
+ * 而且写成功还刷新了 savedAt，6h TTL 内不再重试，一次网络抖动锁死半天。
  */
 export async function updateMemberData(): Promise<MemberUpdateResult> {
-  const members = await fetchOfficialMembers();
+  const { members, dbOk, dbCount } = await fetchOfficialMembers();
   if (!members.length) throw new Error('成员数据为空');
 
-  // ---- 防丢失护栏（历史教训：某次云端源退化/字段变少 → 直接覆盖缓存 → 大量成员房间映射丢失）----
-  // 1) 字段回填：新数据缺失的映射字段（channelId/yklzId/serverId）用本地旧值补，避免「新源字段更少」造成退化
-  // 2) 劣化拒绝：条数骤降或映射字段覆盖率大跌时拒绝写入，保留本地数据
-  // 3) 写入前备份旧缓存，便于回滚/诊断
+  // 旧缓存先读：既供护栏使用，也用于失败/劣化时如实报告「本地保留了 N 位」
   let prev: Member[] = [];
   try { prev = (await loadCachedMemberData()) ?? []; } catch { /* 忽略 */ }
+
+  /**
+   * ★ 库源失败 = 本次更新失败（用户 2026-11-01：「现在是否能正确报告更新失败」→ 必须能）。
+   *
+   * 判据只有一个：`dbOk`（yk1z 库真的返回了数据）。官方目录永远不算"更新成功"，
+   * 因为它不含房间映射——没有映射的成员库写进缓存就等于把房间号清空/写错。
+   * 这里不 persist、不刷新 savedAt、不 setMembers，让上次的正确缓存原样留着。
+   */
+  if (!dbOk) {
+    const message = '成员库源不可用（已保留本地数据）';
+    logWarn(`[memberData] ${message}：官方目录 ${members.length} 位仅供参考，不写入缓存、不刷新同步时间`, 'memberData');
+    return {
+      updated: false,
+      count: prev.length,
+      message,
+      source: 'none',
+      detail: `${message} ｜ 官方目录 ${members.length} 位（无房间映射）｜ 本地保留 ${prev.length} 位`,
+    };
+  }
+
+  // ---- 防丢失护栏（历史教训：某次云端源退化/字段变少 → 直接覆盖缓存 → 大量成员房间映射丢失）----
+  // 1) 劣化判定：**必须用回填前的覆盖率**（回填后再算永远不成立，护栏会变成空转）
+  // 2) 字段回填：新数据缺失的映射字段（channelId/yklzId/serverId）用本地旧值补
+  // 3) 写入前备份旧缓存，便于回滚/诊断
   if (prev.length) {
     const prevById = new Map(prev.map((m) => [String(m.id), m]));
+    // ⚠️ 覆盖率必须在回填之前统计（见上方注释：先回填再判定等于永不判劣化）
+    const rawC = countMapping(members);
+    const prevC = countMapping(prev);
     let filled = 0;
     for (const m of members) {
       const p = prevById.get(String(m.id));
@@ -388,13 +403,11 @@ export async function updateMemberData(): Promise<MemberUpdateResult> {
       if (!m.pinyin && p.pinyin) m.pinyin = p.pinyin;
       if (!m.team && p.team) m.team = p.team;
     }
-    const nowC = countMapping(members);
-    const prevC = countMapping(prev);
     const tooFew = members.length < prev.length * 0.6;
-    const mapLost = prevC.channel > 0 && nowC.channel < prevC.channel * 0.7;
+    const mapLost = prevC.channel > 0 && rawC.channel < prevC.channel * 0.7;
     if (filled) logInfo(`[memberData] 护栏：用本地旧值回填映射字段 ${filled} 处`, 'memberData');
     if (tooFew || mapLost) {
-      const detail = `云端 ${members.length} 位/大房间 ${nowC.channel}/小房间 ${nowC.yklz} ｜ 本地 ${prev.length} 位/大房间 ${prevC.channel}/小房间 ${prevC.yklz}（已拒绝覆盖）`;
+      const detail = `云端 ${members.length} 位/大房间 ${rawC.channel}/小房间 ${rawC.yklz}（回填前） ｜ 本地 ${prev.length} 位/大房间 ${prevC.channel}/小房间 ${prevC.yklz}（已拒绝覆盖）`;
       logWarn(`[memberData] 数据劣化，拒绝覆盖本地缓存：${detail}`, 'memberData');
       return {
         updated: false,
@@ -441,7 +454,7 @@ export async function updateMemberData(): Promise<MemberUpdateResult> {
     // 清理失败不影响主流程
   }
   useMemberStore.getState().setMembers(members);
-  const detail = `成员 ${members.length} · serverId ${withServer} · channelId ${withChannel} · yklzId ${withYklz}（yk1z 库+官方双源）`;
+  const detail = `成员 ${members.length} · serverId ${withServer} · channelId ${withChannel} · yklzId ${withYklz}（yk1z 库 ${dbCount} 位 + 官方目录）`;
   logInfo(`[memberData] 已载入成员库 ${members.length} 位（${detail}）`, 'memberData');
   return {
     updated: true,
@@ -456,7 +469,10 @@ export async function updateMemberData(): Promise<MemberUpdateResult> {
  * 应用启动时的成员数据库引导：
  *   1. 先同步展示本地缓存（避免空白）；
  *   2. 缓存未过期（TTL 6h）→ 跳过网络同步，冷启动秒开；
- *   3. 过期 → 双源拉取更新（失败静默保留缓存，但记日志）。
+ *   3. 过期 → 双源拉取更新（失败保留缓存并记 WARN，不会污染缓存）。
+ *
+ * ⚠️ TTL 只看 `savedAt`，而 `savedAt` 只会被**真正成功**的更新刷新
+ * （v2.7.7 起库源失败直接返回 updated:false，不再写缓存），所以"一次抖动锁死 6h"的老问题已消除。
  */
 export async function ensureMemberData(): Promise<void> {
   try {
@@ -482,7 +498,12 @@ export async function ensureMemberData(): Promise<void> {
     // 元数据读取失败则继续拉取
   }
   try {
-    await updateMemberData();
+    const res = await updateMemberData();
+    if (!res.updated) {
+      // 明确区分「同步完成」与「同步失败但保留了旧数据」：后者不算同步成功，
+      // 也不该让调用方以为拿到了新库（用户 2026-11-01 要求能正确报告失败）。
+      logWarn(`[memberData] 本次同步未写入成员库（保留缓存展示）：${res.message}｜${res.detail}`, 'memberData');
+    }
   } catch (e: any) {
     logWarn(`[memberData] 双源同步失败（保留缓存展示）：${e?.message || String(e)}`, 'memberData');
   }

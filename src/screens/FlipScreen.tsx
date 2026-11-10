@@ -25,9 +25,11 @@ import { LoginPrompt } from '../components/LoginPrompt';
 import { RootStackParamList } from '../navigation/types';
 import { useSettingsStore } from '../store';
 import pocketApi from '../api/pocket48';
+import { checkMaskWords } from '../services/maskWords';
 import { FadeInView } from '../components/Motion';
 import { Member } from '../types';
 import { errorMessage, normalizeUrl, pickText, unwrapList } from '../utils/data';
+import { replaceEmojiText } from '../utils/emoji';
 import { formatTimestamp , toMs } from '../utils/format';
 import { parseDurationSeconds } from '../utils/duration';
 import { usePalette, radii, radiiAlias } from '../theme';
@@ -137,7 +139,9 @@ function statusLabel(status: any): string {
 }
 
 function questionText(item: any): string {
-  return pickText(item, ['content', 'questionContent', 'question', 'questionText', 'text'], '');
+  // 出口统一替换表情短码（2026-11-02 自查：翻牌页此前是唯一没走 replaceEmojiText 的正文出口，
+  // 提问/回答里带 `[示爱]` 这类码时会原样显示成文字 —— 与房间/私信的修复同一类问题）。
+  return replaceEmojiText(pickText(item, ['content', 'questionContent', 'question', 'questionText', 'text'], ''));
 }
 
 function parseMedia(raw: string): { text: string; url: string; duration: number } {
@@ -167,7 +171,7 @@ function parseAnswer(item: any, voiceLabel = '语音回复', videoLabel = '视�
 }
 
 function answerMediaUrl(item: any): string { return parseAnswer(item).url; }
-function answerText(item: any): string { return parseAnswer(item).text; }
+function answerText(item: any): string { return replaceEmojiText(parseAnswer(item).text); }
 function answerMediaDuration(item: any): number { return parseAnswer(item).duration; }
 
 function priceFor(config: FlipPriceConfig | undefined, privacyType: PrivacyType): number {
@@ -298,6 +302,12 @@ export default function FlipScreen() {
     if (finalCost < minCost) {
       setStatus(t('鸡腿数不能低于官方底价 {min}', { min: minCost }));
       setCost(String(minCost));
+      return;
+    }
+    // 屏蔽词拦截：翻牌要扣鸡腿，命中词就地拦下，避免扣了钱却发不出去
+    const masked = await checkMaskWords(content.trim());
+    if (masked.length) {
+      setStatus(t('包含屏蔽词：{words}', { words: masked.join('、') }));
       return;
     }
 
@@ -684,7 +694,6 @@ export default function FlipScreen() {
                         }}
                         meta={{ title: t('翻牌答案') }}
                         features={{ kernelSwitch: true, rate: true }}
-                        persistent
                       />
                     </View>
                   ) : null}

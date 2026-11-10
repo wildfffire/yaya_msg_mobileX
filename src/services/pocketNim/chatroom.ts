@@ -12,7 +12,7 @@
  *                  → createChatRoomTextMessage + setRemoteExtension(map) + setContent(text)
  */
 
-import { buildLiveBarrageExt, parseChatroomMessage } from './codec';
+import { buildLiveBarrageExt, buildLiveGiftExt, parseChatroomMessage, readExt } from './codec';
 import {
   isPocketNimChatroomAvailable,
   chatroomConnect,
@@ -23,7 +23,8 @@ import {
 } from '../../native/PocketNimChatroom';
 import { credentialsToProfile, loadNimSdk, NimCredentials, NIM_CHATROOM_ADDRESSES, NIM_APP_KEY } from './runtime';
 import { loadSelfProfile } from './credentials';
-import { BarrageItem, NimModule } from './types';
+import { logInfo } from '../../utils/runtimeLog';
+import { BarrageItem, LiveGiftBroadcast, NimModule, NimSelfProfile } from './types';
 
 export type ChatroomStatus = 'connecting' | 'connected' | 'reconnecting' | 'closed' | 'error';
 
@@ -58,10 +59,10 @@ async function resolveChatroomAddresses(): Promise<string[]> {
           json = JSON.parse(text);
         } catch {
           // eslint-disable-next-line no-console
-          console.log('[nim] LBS raw =', text.slice(0, 300));
+          nimLog('[nim] LBS raw =', text.slice(0, 300));
         }
         // eslint-disable-next-line no-console
-        console.log('[nim] LBS keys =', Object.keys(json || {}).join(','));
+        nimLog('[nim] LBS keys =', Object.keys(json || {}).join(','));
         const list: string[] = Array.isArray(json?.link)
           ? json.link.filter((x: any) => typeof x === 'string' && x.includes(':'))
           : [];
@@ -70,7 +71,7 @@ async function resolveChatroomAddresses(): Promise<string[]> {
         const rest = list.filter((x) => !x.startsWith('chatwl') && !x.startsWith('weblink'));
         const merged = (chat.length || web.length ? [...chat, ...web, ...rest] : FALLBACK_LBS).slice(0, 5);
         // eslint-disable-next-line no-console
-        console.log('[nim] LBS chatroom addresses =', merged.join(' , ') || '(empty)');
+        nimLog('[nim] LBS chatroom addresses =', merged.join(' , ') || '(empty)');
         if (merged.length) {
           lbsAddresses = merged;
           return merged;
@@ -84,8 +85,47 @@ async function resolveChatroomAddresses(): Promise<string[]> {
   return lbsInflight;
 }
 
-/** 云信 SDK 内部日志开关（排障时临时改 true；日志经 console → logcat ReactNativeJS） */
-const NIM_DEBUG = true;
+/**
+ * 云信 SDK 内部日志开关（排障时临时改 true；日志经 console → logcat ReactNativeJS）。
+ *
+ * ⚠️ 必须跟随 __DEV__，不要写死 true：
+ * 本项目 `src/utils/runtimeLog.ts` 接管了全局 console.log，**每一条日志都会被
+ * 字符串化、进缓冲、并定期写入 AsyncStorage**。而 chatroom 的 onmsgs 是热路径
+ * （每条弹幕都走），NIM_DEBUG 常开等于「每收到一条弹幕就触发一次写盘」——
+ * 这是 release 包上一项确定的性能与耗电浪费。
+ */
+const NIM_DEBUG = __DEV__;
+
+/**
+ * 诊断日志：**仅开发版输出**。
+ * release 包下完全静默 —— 否则每条日志都会经 runtimeLog 的 console 劫持
+ * 被字符串化 + 进缓冲 + 定期写盘（见上方 NIM_DEBUG 注释）。
+ */
+function nimLog(...args: unknown[]): void {
+  if (!__DEV__) return;
+  // eslint-disable-next-line no-console
+  console.log(...args);
+}
+
+/**
+ * 富文本弹幕样本留档（节流 60s 一条、截断 300 字），走 runtimeLog —— release 包也生效，
+ * 可在「设置 · 运行日志」导出、logcat 也能看到（tag `danmaku.rich`）。
+ *
+ * 为什么需要它：官方 H5 / 其他端发出的弹幕正文是 HTML（`<div><span style=…>`,
+ * `<img src="/backstage/…">`），我们目前只能把 `<img>` 折成 `[表情]` 占位
+ * （RN 新架构渲染不了 Text 内联图片，也没有官方「表情图 → emoji」码表）。
+ * 这类弹幕是**爆发式**出现的（2026-10-03 在直播间蹲守 20 分钟 0 条），
+ * 真机日志是唯一稳定的样本来源；攒够样本即可在 utils/richtext.ts 补码表。
+ */
+let richSampleAt = 0;
+function logRichSample(msg: any): void {
+  const raw = String(readExt(msg)?.text || msg?.text || '');
+  if (raw.indexOf('<') < 0) return;
+  const now = Date.now();
+  if (now - richSampleAt < 60_000) return;
+  richSampleAt = now;
+  logInfo(`[rich] ${raw.slice(0, 300)}`, 'danmaku.rich');
+}
 
 export interface LiveChatroomOptions {
   /** 聊天室 id（live 详情 content.roomId） */
@@ -129,9 +169,20 @@ export async function webImLoginProbe(credentials: NimCredentials): Promise<{ ok
   return new Promise((resolve) => {
     let settled = false;
     let inst: any = null;
+    /**
+     * 超时定时器句柄。
+     * 原实现直接 `setTimeout(...)` 不保存句柄 → 即使 SDK 秒连成功，
+     * 这个 12s 定时器仍会挂满整段时间（持有闭包与 inst 引用）。
+     * 现在在 finish 里清理。
+     */
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const finish = (ok: boolean, detail: string) => {
       if (settled) return;
       settled = true;
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
       try { inst && inst.destroy && inst.destroy(); } catch { /* 忽略 */ }
       resolve({ ok, detail });
     };
@@ -147,7 +198,7 @@ export async function webImLoginProbe(credentials: NimCredentials): Promise<{ ok
         onerror: (err: any) => finish(false, String(err?.message || err?.code || err || 'error')),
         ondisconnect: (err: any) => finish(false, `disconnect:${String(err?.message || err?.code || '')}`),
       });
-      setTimeout(() => finish(false, 'timeout'), 12000);
+      timer = setTimeout(() => finish(false, 'timeout'), 12000);
     } catch (e: any) {
       finish(false, String(e?.message || e));
     }
@@ -248,20 +299,21 @@ export class LiveChatroom {
           idClient: message.uuid,
           custom: message.ext,
         };
+        logRichSample(shaped);
         const item = parseChatroomMessage(shaped);
         if (item) this.options.onMessages([item]);
       })
     );
     try {
       // eslint-disable-next-line no-console
-      console.log('[nim] native chatroom connect roomId =', roomId, 'account =', credentials.accid);
+      nimLog('[nim] native chatroom connect roomId =', roomId, 'account =', credentials.accid);
       await chatroomConnect(NIM_APP_KEY, credentials.accid, credentials.token, roomId);
       // eslint-disable-next-line no-console
-      console.log('[nim] native chatroom CONNECTED');
+      nimLog('[nim] native chatroom CONNECTED');
     } catch (error: any) {
       const detail = String(error?.message || error);
       // eslint-disable-next-line no-console
-      console.log('[nim] native chatroom FAILED:', detail);
+      nimLog('[nim] native chatroom FAILED:', detail);
       this.setStatus('error', friendlyAuthError(detail));
     }
   }
@@ -282,10 +334,10 @@ export class LiveChatroom {
       if (attempt === 2) {
         // 先完成一次 IM 登录（官方「非独立模式」同款前置：聊天室鉴权依赖 IM 会话）
         // eslint-disable-next-line no-console
-        console.log('[nim] web IM login probe...');
+        nimLog('[nim] web IM login probe...');
         const probeResult = await webImLoginProbe(credentials);
         // eslint-disable-next-line no-console
-        console.log('[nim] web IM login probe result =', probeResult.ok, probeResult.detail);
+        nimLog('[nim] web IM login probe result =', probeResult.ok, probeResult.detail);
         if (!probeResult.ok) {
           this.fallback(`IM登录失败:${probeResult.detail}`);
           return;
@@ -295,7 +347,7 @@ export class LiveChatroom {
         ? { isAnonymous: true, chatroomNick: anonNick, chatroomAvatar: '' }
         : { account: credentials.accid, token: credentials.token };
       // eslint-disable-next-line no-console
-      console.log('[nim] chatroom connect attempt =', attempt, 'anonymous =', anonymous, 'roomId =', roomId);
+      nimLog('[nim] chatroom connect attempt =', attempt, 'anonymous =', anonymous, 'roomId =', roomId);
       this.instance = SDK.Chatroom.getInstance({
         appKey: NIM_APP_KEY,
         chatroomId: roomId,
@@ -309,7 +361,7 @@ export class LiveChatroom {
         dbLog: false,
         onconnect: () => {
           // eslint-disable-next-line no-console
-          console.log('[nim] chatroom CONNECTED attempt =', attempt, 'anonymous =', anonymous);
+          nimLog('[nim] chatroom CONNECTED attempt =', attempt, 'anonymous =', anonymous);
           this.clearTimer();
           this.anonymous = anonymous;
           this.setStatus('connected');
@@ -318,6 +370,7 @@ export class LiveChatroom {
           if (this.disposed || !Array.isArray(msgs)) return;
           const items: BarrageItem[] = [];
           for (const msg of msgs) {
+            logRichSample(msg);
             const item = parseChatroomMessage(msg);
             if (item) items.push(item);
           }
@@ -326,7 +379,7 @@ export class LiveChatroom {
         onerror: (err: any) => {
           const detail = err && (err.message || err.code) ? String(err.message || err.code) : '聊天室连接错误';
           // eslint-disable-next-line no-console
-          console.log('[nim] chatroom ERROR attempt =', attempt, detail);
+          nimLog('[nim] chatroom ERROR attempt =', attempt, detail);
           this.fallback(detail);
         },
         ondisconnect: (err: any) => {
@@ -345,12 +398,12 @@ export class LiveChatroom {
       this.connectTimer = setTimeout(() => {
         if (this.disposed || this.status === 'connected') return;
         // eslint-disable-next-line no-console
-        console.log('[nim] chatroom attempt', attempt, 'timeout, no connect');
+        nimLog('[nim] chatroom attempt', attempt, 'timeout, no connect');
         this.fallback('连接超时');
       }, 8000);
     } catch (error: any) {
       // eslint-disable-next-line no-console
-      console.log('[nim] chatroom connect THREW attempt =', attempt, String(error?.message || error));
+      nimLog('[nim] chatroom connect THREW attempt =', attempt, String(error?.message || error));
       this.fallback(String(error?.message || error));
     }
   }
@@ -362,7 +415,7 @@ export class LiveChatroom {
     if (this.attempt < 2) {
       const next = this.attempt + 1;
       // eslint-disable-next-line no-console
-      console.log('[nim] chatroom fallback -> attempt', next, 'reason =', reason);
+      nimLog('[nim] chatroom fallback -> attempt', next, 'reason =', reason);
       await this.open(next);
       return;
     }
@@ -390,33 +443,23 @@ export class LiveChatroom {
    * 官方对普通用户用 BARRAGE_NORMAL，成员本人 BARRAGE_MEMBER，超管 BARRAGE_SUPERMAN；
    * 牙牙账号通常是普通粉丝，因此默认 BARRAGE_NORMAL。
    */
-  async send(text: string, messageType?: string): Promise<void> {
+  /** 本连接对应的自身资料（发送身份：昵称/头像缺失时别人看到的就是无名无像） */
+  private async selfProfile(): Promise<NimSelfProfile> {
+    return (await loadSelfProfile()) || credentialsToProfile(this.options.credentials);
+  }
+
+  /**
+   * 发送一条带自定义 remoteExtension 的聊天室消息。
+   * 原生 commonlink 与 JS Web SDK 两条通道共用这一处（弹幕、送礼公屏都走它）。
+   */
+  private async sendExt(text: string, ext: Record<string, any>): Promise<void> {
     const content = String(text || '').trim();
-    if (!content) return;
     if (this.useNative) {
-      // 发送身份用完整资料（昵称/头像缺失时别人看到的就是无名无像）
-      const self = (await loadSelfProfile()) || credentialsToProfile(this.options.credentials);
-      const ext = buildLiveBarrageExt({
-        roomId: this.options.roomId,
-        sourceId: this.options.liveId || this.options.roomId,
-        text: content,
-        self,
-        module: this.options.module || NimModule.LIVE,
-      });
-      await chatroomSend(content, JSON.stringify(ext));
+      await chatroomSend(content || ' ', JSON.stringify(ext));
       return;
     }
     if (!this.instance) return Promise.reject(new Error('弹幕通道尚未连接'));
     if (this.anonymous) return Promise.reject(new Error('当前为匿名只读通道，无法发送弹幕'));
-
-    const ext = buildLiveBarrageExt({
-      roomId: this.options.roomId,
-      sourceId: this.options.liveId || this.options.roomId,
-      text: content,
-      self: credentialsToProfile(this.options.credentials),
-      module: this.options.module || NimModule.LIVE,
-      ...(messageType ? { messageType } : {}),
-    });
 
     return new Promise((resolve, reject) => {
       let settled = false;
@@ -441,6 +484,39 @@ export class LiveChatroom {
       }
       done(new Error('弹幕发送参数不被当前云信 SDK 接受'));
     });
+  }
+
+  async send(text: string, messageType?: string): Promise<void> {
+    const content = String(text || '').trim();
+    if (!content) return;
+    const ext = buildLiveBarrageExt({
+      roomId: this.options.roomId,
+      sourceId: this.options.liveId || this.options.roomId,
+      text: content,
+      self: await this.selfProfile(),
+      module: this.options.module || NimModule.LIVE,
+      ...(messageType ? { messageType } : {}),
+    });
+    return this.sendExt(content, ext);
+  }
+
+  /**
+   * 送礼物公屏广播。
+   *
+   * ⚠️ 用户反馈（2026-09-29）：「我送礼物，主播看不到我送的」。根因是送礼**只有
+   * HTTP `/gift/api/v1/gift/send`（扣款+入账）**，而礼物公屏消息是客户端自己发到
+   * 聊天室的 —— 别人送的能看到，正是因为官方客户端发了这条 PRESENT_NORMAL。
+   * 这里与弹幕走完全同一条通道、同一份自身资料（昵称/头像/等级/角色）。
+   */
+  async sendGift(gift: LiveGiftBroadcast): Promise<void> {
+    const ext = buildLiveGiftExt({
+      roomId: this.options.roomId,
+      sourceId: this.options.liveId || this.options.roomId,
+      self: await this.selfProfile(),
+      module: this.options.module || NimModule.LIVE,
+      ...gift,
+    });
+    return this.sendExt(String(ext.text || ''), ext);
   }
 
   dispose(): void {

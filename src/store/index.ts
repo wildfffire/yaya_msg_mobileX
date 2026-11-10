@@ -64,6 +64,17 @@ interface UiState {
   lockTabSwipe: () => void;
   unlockTabSwipe: () => void;
   setTabBarHidden: (hidden: boolean) => void;
+  /**
+   * 「滚动收起」状态：四个主页面**向上滚动**时，顶栏与底栏一起收起，向下滚回时再出现。
+   *
+   * 为什么必须与 tabBarHidden 分开：
+   *   - `tabBarHidden` 由**导航**驱动（进二级页 / 进房间 / 开始播放时隐藏），生命周期跟着页面焦点；
+   *   - 这一个只由**滚动方向**驱动，且离开页面必须复位。
+   *   底栏最终可见性 = 两者取「或」。混进同一个布尔会互相覆盖：滚动向下滚回时
+   *   会把「进房才该隐藏」的状态一起清掉。
+   */
+  chromeHiddenByScroll: boolean;
+  setChromeHiddenByScroll: (hidden: boolean) => void;
   showToast: (message: string) => void;
   hideToast: () => void;
   setScreenBackdrop: (v: { uri: string; scrim: string } | null) => void;
@@ -84,6 +95,10 @@ export const useUiStore = create<UiState>((set) => ({
     return { tabSwipeLockCount: next, tabSwipeLocked: next > 0 };
   }),
   setTabBarHidden: (hidden) => set({ tabBarHidden: hidden }),
+  // 相同值直接返回原 state（不触发订阅者重渲染）——滚动事件很密集，这里必须去抖
+  chromeHiddenByScroll: false,
+  setChromeHiddenByScroll: (hidden) =>
+    set((s) => (s.chromeHiddenByScroll === hidden ? s : { chromeHiddenByScroll: hidden })),
   showToast: (message) => set({ toastMessage: message }),
   hideToast: () => set({ toastMessage: '' }),
   setScreenBackdrop: (v) => set({ screenBackdrop: v }),
@@ -130,9 +145,9 @@ AsyncStorage.getItem(ANNOUNCEMENT_SEEN_KEY)
 
 // --- 版本更新检测 ---
 
-const GITHUB_RELEASES_URL = 'https://api.github.com/repos/Xenia0922/yaya_msg_mobile/releases/latest';
+const GITHUB_RELEASES_URL = 'https://api.github.com/repos/wildfffire/yaya_msg_mobile/releases/latest';
 // 降级源：GitHub release 页面 HTML（无 API 匿名限流；共享出口 IP 触发 403 时自动切换）
-const GITHUB_RELEASES_PAGE = 'https://github.com/Xenia0922/yaya_msg_mobile/releases/latest';
+const GITHUB_RELEASES_PAGE = 'https://github.com/wildfffire/yaya_msg_mobile/releases/latest';
 // 更新跳转链接：统一指向用户自建下载页（夸克网盘 + GitHub 双渠道，可随时改页内链接无需发版）
 const UPDATE_DOWNLOAD_PAGE = 'https://010push.a23xyz.xyz/app/';
 const UPDATE_TIMEOUT = 8000;

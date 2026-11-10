@@ -1,8 +1,11 @@
 import { useMemberStore, useSettingsStore } from '../store';
 import { generatePa, generatePaAsync, getWasmError, initWasm } from '../auth';
-import { requestJson, xhrPost, fetchWithTimeout } from '../utils/network';
+import { requestJson, xhrPost, fetchWithTimeout, raceWithWatchdog } from '../utils/network';
 import { unwrapList, normalizeUrl } from '../utils/data';
+import { parseLooseJson, ALREADY_CHECKED_MESSAGE_RE } from '../utils/json';
+import { parseMaskWordsText } from '../utils/maskWords';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { AppState } from 'react-native';
 
 // E2 记录：移动端 API 方法数少于桌面端 v2.11 通道（100+）——未移植的桌面通道：
 // 选举计分（score-*）、花漾（pageantry-*）、QR 登录（login-*-qr）、部分 Area48 话题接口；
@@ -30,24 +33,46 @@ function createDeviceId(): string {
 const DEVICE_ID_KEY = 'yaya_device_id_v1';
 let DEVICE_ID = createDeviceId();
 let deviceIdLoaded = false;
-AsyncStorage.getItem(DEVICE_ID_KEY)
-  .then((saved) => {
-    if (saved) DEVICE_ID = saved;
-    deviceIdLoaded = true;
-  })
-  .catch(() => { deviceIdLoaded = true; });
 
-/** 等待持久化 DEVICE_ID 就绪（最多 ~800ms，超时用内存临时 id 兜底，不阻塞请求） */
-async function ensureDeviceId(): Promise<string> {
-  if (deviceIdLoaded) return DEVICE_ID;
-  const deadline = Date.now() + 800;
-  while (!deviceIdLoaded && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 40));
-  }
-  if (deviceIdLoaded) return DEVICE_ID;
-  // 持久化未回（异常环境）：本次进程使用临时 id，并尝试补写
-  AsyncStorage.setItem(DEVICE_ID_KEY, DEVICE_ID).catch(() => {});
-  return DEVICE_ID;
+/**
+ * 设备指纹「一次性初始化」Promise（模块级单例）。
+ *
+ * 旧实现是 `while (!deviceIdLoaded) await sleep(40)` 忙等，最多阻塞 800ms ——
+ * 而 createSignedHeaders 每次签名都要走一遍，冷启动十几个请求会串行叠加成几秒。
+ *
+ * 另外旧实现有个隐藏 bug：**正常路径从不写回 AsyncStorage**（setItem 只存在于
+ * 800ms 超时兜底分支里，而该分支基本不会触发）→ 首次运行生成的 id 从未落盘，
+ * 每次冷启动都重新随机，正是注释里说要避免的「被服务端风控判定为异常设备」。
+ */
+let deviceIdReady: Promise<string> | null = null;
+
+function initDeviceId(): Promise<string> {
+  if (deviceIdReady) return deviceIdReady;
+  deviceIdReady = (async () => {
+    try {
+      const saved = await AsyncStorage.getItem(DEVICE_ID_KEY);
+      if (saved) {
+        DEVICE_ID = saved;
+      } else {
+        // 首次运行：把本次生成的 id 落盘，保证后续启动复用同一设备指纹
+        await AsyncStorage.setItem(DEVICE_ID_KEY, DEVICE_ID);
+      }
+    } catch {
+      /* 读写失败：沿用内存临时 id，不阻塞请求 */
+    }
+    deviceIdLoaded = true;
+    return DEVICE_ID;
+  })();
+  return deviceIdReady;
+}
+
+// 模块加载即开始读盘：早期请求直接 await 这个已在途的 Promise，无需各自等待
+initDeviceId();
+
+/** 等待持久化 DEVICE_ID 就绪（所有调用方复用同一个 Promise，不再忙等） */
+function ensureDeviceId(): Promise<string> {
+  if (deviceIdLoaded) return Promise.resolve(DEVICE_ID);
+  return initDeviceId();
 }
 
 // --- App Info / Headers factories ---
@@ -316,9 +341,35 @@ function assertPocketOk(data: any, fallback = 'pocket api request failed') {
   throw new Error(status !== undefined ? `${detail} (${status})` : detail);
 }
 
+/**
+ * 后台签名（2026-11-10 真机实证）：App 退后台后 WebView 的 JS 被系统暂停，
+ * `generatePaViaWebView()` 发过去永远收不到回包（日志：`签名超时（后台心跳兜底）`），
+ * 后台轮询因此一条请求都发不出去。WASM 的 pa 函数无参数 → 签名只与时间/随机有关，
+ * 不与请求体绑定，所以后台复用「最近一次前台成功生成的签名」（5 分钟内）即可，
+ * 前台仍每次现签，行为完全不变；没有缓存时才走原链路并由看门狗兜底。
+ */
+let lastPa = '';
+let lastPaAt = 0;
+let lastPaCacheLogAt = 0;
+const PA_CACHE_TTL_MS = 5 * 60_000;
+
 async function createSignedHeaders(token?: string, modern = false, patch: HeadersMap = {}) {
-  await initWasm();
-  const pa = await generatePaAsync();
+  const cached = lastPa && Date.now() - lastPaAt < PA_CACHE_TTL_MS ? lastPa : '';
+  const useCache = AppState.currentState !== 'active' && !!cached;
+  let pa: string | null = null;
+  if (useCache) {
+    pa = cached;
+    if (Date.now() - lastPaCacheLogAt > 60_000) {
+      lastPaCacheLogAt = Date.now();
+      console.debug('[notify] [bg] 后台复用最近一次签名（WebView JS 在后台被暂停）');
+    }
+  } else {
+    await initWasm();
+    // 签名的超时同样依赖 JS setTimeout，后台会被 RN 暂停 → 用原生心跳看门狗兜底，
+    // 否则一次挂起的签名会把整条后台轮询链路永久卡死。
+    pa = await raceWithWatchdog(generatePaAsync(), '签名');
+    if (pa) { lastPa = pa; lastPaAt = Date.now(); }
+  }
   if (!pa) {
     const reason = getWasmError();
     throw new Error(reason ? `签名模块未就绪：${reason}` : '签名模块未就绪，无法请求口袋接口');
@@ -339,13 +390,13 @@ async function rawPost(url: string, data: any, options: { token?: string; modern
 }
 
 function parsePocketJson(text: string): any {
-  if (!text) return null;
-  const fixed = text.replace(/:\s*([0-9]{15,})/g, ':"$1"');
-  try {
-    return JSON.parse(fixed);
-  } catch {
-    return { status: 500, success: false, message: fixed.replace(/\s+/g, ' ').slice(0, 180) };
+  // 复用统一的宽松解析（超大整数补引号逻辑原在 3 处各写一份）；
+  // 解析失败时 parseLooseJson 原样返回字符串，这里保持本模块既有的"包成错误对象"语义。
+  const parsed = parseLooseJson(text);
+  if (typeof parsed === 'string') {
+    return { status: 500, success: false, message: parsed.replace(/\s+/g, ' ').slice(0, 180) };
   }
+  return parsed;
 }
 
 async function signedHeaders(token?: string, modern = false, patch: HeadersMap = {}) {
@@ -605,7 +656,7 @@ export const pocketApi = {
     });
     if (responseOk(res)) return res;
     const message = responseMessage(res, '签到失败');
-    if (/\u5df2\u7b7e\u5230|\u91cd\u590d\u7b7e\u5230|\u5df2\u7ecf\u7b7e\u5230|\u5df2\u9886\u53d6|\u660e\u5929\u518d\u6765/.test(message)) {
+    if (ALREADY_CHECKED_MESSAGE_RE.test(message)) {
       return { success: true, status: res?.status ?? res?.code ?? 200, message, content: res?.content || null, alreadyChecked: true };
     }
     throw new Error(res?.status !== undefined || res?.code !== undefined ? `${message} (${res?.status ?? res?.code})` : message);
@@ -803,6 +854,27 @@ export const pocketApi = {
   },
 
   async getRoomInfo(channelId: string) {    return pocketPost(`${BASE}/im/api/v1/im/team/room/info`, { channelId: String(channelId) }, { tokenRequired: false, fallback: '获取房间信息失败' });
+  },
+
+  /**
+   * 房间精华消息 = 偶像/房主在官方客户端置顶的消息（不是用户自己置顶）。
+   * 对齐桌面端 yk1z/yaya_msg 的 fetchRoomEssenceMessages / `fetch-room-essence-messages` 通道：
+   *   POST /im/api/v1/team/essence/message/list
+   *   返回 content.essenceMessageList，元素与普通房间消息同构（bodys/msgType/extInfo/msgTime …）。
+   * 与 getRoomMessages 一样准备数字/字符串/新版头三种尝试，接口对参数类型挑剔时自动兜底。
+   */
+  async getRoomEssenceMessages(channelId: string | number, serverId: string | number, nextTime = 0, limit = 50) {
+    const cid = String(channelId || '');
+    if (!cid) throw new Error('missing channelId');
+    let sid = String(serverId || '');
+    if (!sid || sid === '0') sid = await resolveServerId(cid);
+    if (!sid || sid === '0') throw new Error('missing serverId');
+    const url = `${BASE}/im/api/v1/team/essence/message/list`;
+    return tryPocketPost([
+      { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, label: 'essence num' },
+      { url, payload: { channelId: cid, serverId: sid, nextTime, limit }, label: 'essence str' },
+      { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, modern: true, label: 'essence modern' },
+    ], 'get room essence messages failed');
   },
 
   /** 解析房间信息（大/小房间通用）：
@@ -1511,7 +1583,14 @@ if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
     }, { fallback: '获取主页动态失败', headers: createPocketAndroidHeaders() });
   },
 
-  /** Seine 公演列表（ckg48 域名，iOS Seine 头） */
+  /**
+   * Seine 公演列表（ckg48 域名，iOS Seine 头）。
+   *
+   * ⚠️ `exactBigInts: true` 必须保留：`businessId` 是 17 位整数，**它同时就是公演直播
+   * 的 liveId**（实测 2026-10-04：「柏欣妤 生日会」businessId/liveId = 1313111009176391680）。
+   * 默认解析会让 JSON.parse 把它变成不精确的 1313111009176391700 —— 拿着这个 ID 去
+   * getOpenLiveOne 永远查不到，公演直播就只剩「跳 B 站」一条路。
+   */
   async getSeinePerformanceList(groupId = 0, next = 0) {
     return requestJson<any>('https://snhapi-v1.ckg48.cn/home/api/seine/home/interaction/list', {
       method: 'POST',
@@ -1522,6 +1601,7 @@ if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
       },
       headers: createSeineIosHeaders(),
       timeout: 15000,
+      exactBigInts: true,
     }).then((res: any) => assertPocketOk(res, '获取公演列表失败'));
   },
 
@@ -1594,7 +1674,14 @@ if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
     }, { fallback: '发布动态失败', headers: createArea48Headers() });
   },
 
-  /** 屏蔽词列表（发言前过滤） */
+  /**
+   * 屏蔽词列表（发言前过滤）。
+   *
+   * ⚠️ 两段式：配置接口只给词表**文件地址**（url / ordinaryUrl / starUrl），
+   * 词表本体在 `source.48.cn` 上的纯文本（一行一词，可能带 BOM）。
+   * 这里直接把第二段也取完，对外返回 `content.words`（词数组）与 `count`，
+   * 供 services/maskWords 缓存——否则调用方拿到的 `content` 里根本没有词。
+   */
   async getPocketMaskWords(clientTime = 0) {
     try {
       const res = await requestJson<any>(`${BASE}/home/api/check/maskword?clientTime=${Number(clientTime) || 0}`, {
@@ -1602,8 +1689,19 @@ if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
         headers: createArea48Headers(),
         timeout: 10000,
       });
-      if (res?.status === 200 || res?.success) return { success: true, content: res.content || {} };
-      return { success: false, content: {} };
+      if (!(res?.status === 200 || res?.success)) return { success: false, content: {} };
+      const content = res?.content || {};
+      const url = String(content.url || content.ordinaryUrl || content.starUrl || '').trim();
+      if (!url) return { success: true, content: { ...content, words: [], count: 0 } };
+      let words: string[] = [];
+      try {
+        const text = await requestJson<any>(url, { method: 'GET', timeout: 10000 });
+        words = parseMaskWordsText(typeof text === 'string' ? text : '');
+      } catch {
+        // 词表文件拉取失败：返回空词表，调用方走兜底地址或旧缓存（不抛错）
+        words = [];
+      }
+      return { success: true, content: { ...content, url, words, count: words.length } };
     } catch {
       return { success: false, content: {} };
     }
@@ -1695,6 +1793,51 @@ if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
     }
 
     return { success: false, msg: '未找到参与成员' };
+  },
+
+  /* ── 现场互动（口袋「云握手」netface）───────────────────────────────────────
+   * 对齐桌面端 yk1z/yaya_msg `src/common/netface-api.mjs`（base = /netface/api/v1/）：
+   *   · 全部 POST + 签名头（token / pa / appInfo），与官方客户端一致；
+   *   · `user/act/key`（兑换码）额外把 appInfo 塞进 body（桌面端同款），否则服务端判设备不符；
+   *   · **id 一律传字符串**：eventId / ticketId 都是长数字，先转 Number 再序列化会丢精度
+   *     （与 Seine 排期 liveId 那个坑同源，见 utils/network 的 parseJsonExact）。
+   * 场次 status：1=可预约、2=排队中、3/4=等待进入、5=超时未入场（见 utils/netfaceRules）。
+   */
+  async getNetfaceTickets() {
+    return pocketPost(`${BASE}/netface/api/v1/user/tp/ticket_info`, {}, { fallback: '获取现场互动活动失败' });
+  },
+  async getNetfaceInfo(ticketId: string) {
+    return pocketPost(`${BASE}/netface/api/v1/user/reservation/info`, { ticketId: String(ticketId || '0') }, { fallback: '获取现场互动场次失败' });
+  },
+  async getNetfaceBalance(ticketId: string) {
+    return pocketPost(`${BASE}/netface/api/v1/user/tp/balance`, { ticketId: String(ticketId || '0') }, { fallback: '获取握手资格失败' });
+  },
+  async getNetfaceWait(eventIds: string[]) {
+    return pocketPost(`${BASE}/netface/api/v1/user/batch/balancetime`, {
+      eventIds: (eventIds || []).map((id) => String(id)).filter(Boolean),
+    }, { fallback: '获取排队信息失败' });
+  },
+  async reserveNetface(eventId: string, tpNum = 1) {
+    return pocketPost(`${BASE}/netface/api/v1/user/reservation`, {
+      eventId: String(eventId || ''),
+      tpNum: Math.max(1, Math.min(999, Math.trunc(Number(tpNum) || 1))),
+    }, { fallback: '预约失败' });
+  },
+  async cancelNetface(eventId: string) {
+    return pocketPost(`${BASE}/netface/api/v1/user/reservation/cancel`, { eventId: String(eventId || '') }, { fallback: '取消预约失败' });
+  },
+  async activateNetfaceKey(ticketId: string, tpKey: string) {
+    return pocketPost(`${BASE}/netface/api/v1/user/act/key`, {
+      ticketId: String(ticketId || '0'),
+      tpKey: String(tpKey || '').trim(),
+      appInfo: JSON.stringify(appInfo()),
+    }, { fallback: '兑换握手资格失败' });
+  },
+  async getNetfaceHistory(ticketId: string, next = 0) {
+    return pocketPost(`${BASE}/netface/api/v1/user/act/log`, {
+      ticketId: String(ticketId || '0'),
+      next: Math.max(0, Math.trunc(Number(next) || 0)),
+    }, { fallback: '获取兑换记录失败' });
   },
 };
 

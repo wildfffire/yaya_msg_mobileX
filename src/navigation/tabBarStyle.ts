@@ -21,11 +21,7 @@ export function mainTabBarStyle(hasBackground: boolean, isDark = false) {
     borderWidth: 1,
     borderTopWidth: 1,
     borderColor: hasBackground ? imageBorder : plainBorder,
-    elevation: 0,
-    shadowColor: '#000',
-    shadowOpacity: 0.12,
-    shadowRadius: 18,
-    shadowOffset: { width: 0, height: 8 },
+    // 扁平化（用户 2026-11-09）：去掉投影，只留纯色底 + 细描边
     alignSelf: 'stretch' as const,
   };
 }

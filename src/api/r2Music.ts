@@ -59,17 +59,13 @@ export function parseR2Duration(durationText: string): number {
 }
 
 async function fetchR2MusicRaw(): Promise<R2MusicTrack[]> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 20000);
-  try {
-    const resp = await fetchWithTimeout(R2_MUSIC_URL, { signal: controller.signal }, 20000);
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    const json: any = await resp.json();
-    if (!json || !Array.isArray(json.tracks)) throw new Error('r2-music 响应缺少 tracks');
-    return json.tracks as R2MusicTrack[];
-  } finally {
-    clearTimeout(timer);
-  }
+  // fetchWithTimeout 内部已用 AbortController 实现 20s 超时（并支持外部 signal 联动），
+  // 原先这里又自己建了一个 controller + setTimeout(20000)，属于重复的两套超时，已删除。
+  const resp = await fetchWithTimeout(R2_MUSIC_URL, {}, 20000);
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const json: any = await resp.json();
+  if (!json || !Array.isArray(json.tracks)) throw new Error('r2-music 响应缺少 tracks');
+  return json.tracks as R2MusicTrack[];
 }
 
 /** 归一化为与官方源一致的曲目结构（musicId / title / artist / album / groupLabel / mp3 / coverUrl） */

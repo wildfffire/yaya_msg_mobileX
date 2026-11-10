@@ -7,6 +7,7 @@ import {
   RefreshControl,
   StyleSheet,
   Text,
+  useWindowDimensions,
   View,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
@@ -21,6 +22,7 @@ import { errorMessage, normalizeUrl } from '../utils/data';
 import { Member } from '../types';
 import { extractRankList, extractWeeks, WeekItem } from '../utils/meleeParse';
 import { usePalette, radiiAlias } from '../theme';
+import { isLandscapeSize } from '../utils/orientation';
 import { EmptyState, ErrorState } from '../components/StateViews';
 import { Skeleton } from '../components/Skeleton';
 import { GlassSurface } from '../components/GlassSurface';
@@ -53,6 +55,16 @@ export default function MeleeRankScreen() {
   const navigation = useNavigation<any>();
   const palette = usePalette();
   const { t } = useI18n();
+  const { width: winW, height: winH } = useWindowDimensions();
+  /**
+   * 横屏判定（手机/平板横屏都算）。
+   *
+   * 横屏时竖向可用高度只有竖屏的一半左右，本页的头（大标题 + 模式行 + 周次胶囊）都是固定高度，
+   * 一旦加起来超过屏高，**可收缩**的子元素（RN 的 ScrollView/FlatList 默认 flexShrink: 1）就会被压缩 ——
+   * 周次胶囊曾被压到 ~11dp，日期文字上下被裁（用户 2026-10-02：「上面的日期被遮挡了」）。
+   * 因此横屏走紧凑布局：领奖台缩小 + 周次行不允许收缩（见 styles.weekList / Podium compact）。
+   */
+  const isLandscape = isLandscapeSize(winW, winH);
   const [mode, setMode] = useState<ViewMode>('week');
   const [member, setMember] = useState<Member | null>(null);
   const [weeks, setWeeks] = useState<WeekItem[]>([]);
@@ -227,6 +239,8 @@ export default function MeleeRankScreen() {
     <View style={styles.container}>
       <ScreenHeader title={t('鸡腿榜')} onBack={() => navigation.goBack()} />
 
+      {/* 模式胶囊等宽居中（Pill 的 fill）：此前「周榜」被 alignSelf:stretch 拉成小半屏，
+          而玻璃态「成员贡献」只有内容宽度，一大一小很畸形；现在两者同宽、整体居中 */}
       <View style={styles.modeRow}>
         {MODES.map((m) => (
           <View key={m.key} style={styles.modeWrap}>
@@ -234,7 +248,7 @@ export default function MeleeRankScreen() {
               label={t(m.label)}
               selected={mode === m.key}
               onPress={() => switchMode(m.key)}
-              style={styles.modePill}
+              fill
             />
           </View>
         ))}
@@ -267,6 +281,7 @@ export default function MeleeRankScreen() {
           <PerfFlatList
             data={personRanks}
             keyExtractor={(item: any, index: number) => String(item.userId || item.id || item.uid || item.resId || `p${index}`)}
+            style={styles.listBox}
             contentContainerStyle={styles.list}
             initialNumToRender={12}
             maxToRenderPerBatch={12}
@@ -294,6 +309,7 @@ export default function MeleeRankScreen() {
         <PerfFlatList
           data={ranks}
           keyExtractor={(item: any, index: number) => String(item.userId || item.rankNum || item.resId || item.id || `r${index}`)}
+          style={styles.listBox}
           contentContainerStyle={styles.list}
           initialNumToRender={12}
           maxToRenderPerBatch={12}
@@ -309,7 +325,7 @@ export default function MeleeRankScreen() {
               colors={[palette.tint]}
             />
           }
-          ListHeaderComponent={ranks.length >= 3 ? <Podium ranks={ranks.slice(0, 3)} /> : null}
+          ListHeaderComponent={ranks.length >= 3 ? <Podium ranks={ranks.slice(0, 3)} compact={isLandscape} /> : null}
           ListEmptyComponent={
             <EmptyState icon="trophy-outline" title={t('暂无排名数据')} />
           }
@@ -323,20 +339,23 @@ export default function MeleeRankScreen() {
 /**
  * 前三名领奖台（结构升级）：第 1 名居中放大 + tint 强调，第 2/3 名两侧；
  * 让用户一眼看到头部格局，而不是从第一行往下数。
+ *
+ * `compact`（横屏）：整块按比例缩小 —— 横屏竖向空间只有一半，领奖台原尺寸会吃掉大半屏，
+ * 把榜单列表挤到只剩一两行（用户 2026-10-02：请优化横屏布局）。
  */
-const Podium = React.memo(function Podium({ ranks }: { ranks: any[] }) {
+const Podium = React.memo(function Podium({ ranks, compact }: { ranks: any[]; compact?: boolean }) {
   const palette = usePalette();
   const { t } = useI18n();
   const medal = (i: number) => (i === 0 ? 'trophy' : i === 1 ? 'medal-outline' : 'medal-outline');
   const order = [ranks[1], ranks[0], ranks[2]]; // 2nd | 1st | 3rd
   // 柱高按「名次」索引（0=第1名），此前写成 order 顺序 [76,96,64] 却用 realIndex 取值，
-  // 导致第 2 名柱子比第 1 名还高（领奖台排版错乱）
-  const heights = [96, 76, 64];
+  // 导致第 2 名柱子比第 1 名还高（领奖台排版错乱）。横屏整套等比收窄。
+  const heights = compact ? [62, 48, 38] : [96, 76, 64];
   const tones = [palette.fill2, palette.tintSoft, palette.fill2];
   return (
     <FadeInView delay={60} duration={320} style={{ marginBottom: 12 }}>
-      <GlassSurface radius={22} role="card" style={[styles.podiumCard, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
-        <Text style={[styles.podiumTitle, { color: palette.label }]}>{t('领奖台')}</Text>
+      <GlassSurface radius={22} role="card" style={[styles.podiumCard, compact ? styles.podiumCardCompact : null, { backgroundColor: 'transparent', borderColor: palette.hairline }]}>
+        <Text style={[styles.podiumTitle, compact ? styles.podiumTitleCompact : null, { color: palette.label }]}>{t('领奖台')}</Text>
         <View style={styles.podiumRow}>
           {order.map((item: any, idx: number) => {
             const realIndex = idx === 0 ? 1 : idx === 1 ? 0 : 2;
@@ -347,14 +366,14 @@ const Podium = React.memo(function Podium({ ranks }: { ranks: any[] }) {
             const isFirst = realIndex === 0;
             return (
               <View key={realIndex} style={[styles.podiumCell, { flex: isFirst ? 1.15 : 1 }]}>
-                <View style={[styles.podiumAvatarWrap, { backgroundColor: tones[realIndex] }]}>
+                <View style={[styles.podiumAvatarWrap, compact ? styles.podiumAvatarWrapCompact : null, { backgroundColor: tones[realIndex] }]}>
                   {avatar ? (
-                    <Image source={{ uri: avatar }} style={styles.podiumAvatar} />
+                    <Image source={{ uri: avatar }} style={[styles.podiumAvatar, compact ? styles.podiumAvatarCompact : null]} />
                   ) : (
-                    <MaterialCommunityIcons name="account" size={26} color={palette.labelTertiary} />
+                    <MaterialCommunityIcons name="account" size={compact ? 22 : 26} color={palette.labelTertiary} />
                   )}
                 </View>
-                <MaterialCommunityIcons name={medal(realIndex) as any} size={18} color={isFirst ? palette.warning : palette.labelTertiary} style={{ marginTop: 6 }} />
+                <MaterialCommunityIcons name={medal(realIndex) as any} size={compact ? 15 : 18} color={isFirst ? palette.warning : palette.labelTertiary} style={{ marginTop: compact ? 4 : 6 }} />
                 <Text style={[styles.podiumName, { color: palette.label, fontWeight: isFirst ? '800' : '600' }]} numberOfLines={1}>{name}</Text>
                 <View style={[styles.podiumBar, { height: heights[realIndex], backgroundColor: isFirst ? palette.tint : palette.fill3 }]}>
                   <Text style={[styles.podiumMelee, { color: isFirst ? palette.onTint : palette.labelTertiary }]} numberOfLines={1}>
@@ -496,12 +515,24 @@ const PersonCard = React.memo(function PersonCard({ item, index }: { item: any; 
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  modeRow: { flexDirection: 'row', paddingHorizontal: 16, marginBottom: 8, gap: 6 },
-  modeWrap: { flex: 1 },
-  modePill: { alignSelf: 'stretch', alignItems: 'center', justifyContent: 'center' },
-  weekList: { maxHeight: 46, marginBottom: 4 },
+  /**
+   * 模式行：两个胶囊**等宽并居中**（Pill 的 fill）。
+   * `maxWidth: 220` 是关键 —— 横屏 1024dp 宽时若不给上限，flex: 1 会把每个胶囊拉到 ~500dp，
+   * 一行只有两个短标签却占满整屏宽，很畸形（用户 2026-10-02 要求优化布局）。
+   */
+  modeRow: { flexDirection: 'row', paddingHorizontal: 16, marginBottom: 8, gap: 8, justifyContent: 'center' },
+  modeWrap: { flex: 1, maxWidth: 220 },
+  /**
+   * 周次胶囊行：**flexShrink: 0 必须保留**（这是「上面的日期被遮挡」的修复点）。
+   * RN 的 ScrollView/FlatList 默认 `flexShrink: 1`，横屏竖向空间不足时会被压缩 ——
+   * 真机实测被压到约 11dp（正常 32dp），胶囊里的日期文字上下被裁。
+   * 固定不收缩后，压力全部落到下方可滚动的榜单列表上（那才是应该让位的一方）。
+   */
+  weekList: { maxHeight: 46, marginBottom: 4, flexShrink: 0 },
   weekListContent: { paddingHorizontal: 16, alignItems: 'center', gap: 6 },
   weekChip: { marginRight: 0 },
+  /** 榜单列表：吃掉头部剩下的全部高度（配合列表容器固定高度，头部各块才不会被挤压） */
+  listBox: { flex: 1 },
   list: { padding: 14, paddingBottom: 40 },
   podiumCard: {
     borderRadius: radiiAlias.card,
@@ -509,7 +540,10 @@ const styles = StyleSheet.create({
     marginBottom: 4,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  /** 横屏：领奖台整体收紧，把高度让给榜单列表 */
+  podiumCardCompact: { padding: 10, paddingBottom: 6 },
   podiumTitle: { fontSize: 13, fontWeight: '700', marginBottom: 10 },
+  podiumTitleCompact: { marginBottom: 6 },
   podiumRow: { flexDirection: 'row', alignItems: 'flex-end', gap: 6 },
   podiumCell: { alignItems: 'center', minWidth: 0 },
   podiumAvatarWrap: {
@@ -517,6 +551,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center', overflow: 'hidden',
   },
   podiumAvatar: { width: 64, height: 64, borderRadius: 36 },
+  podiumAvatarWrapCompact: { width: 52, height: 52, borderRadius: 30 },
+  podiumAvatarCompact: { width: 52, height: 52, borderRadius: 30 },
   podiumName: { fontSize: 12, marginTop: 4, width: '100%', textAlign: 'center' },
   podiumBar: {
     marginTop: 6,

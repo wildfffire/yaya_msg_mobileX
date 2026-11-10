@@ -76,14 +76,20 @@ export default function RuntimeLogViewer({ visible, onClose }: { visible: boolea
 
   const refresh = () => setEntries(getLogEntries());
 
+  /**
+   * ⚠️ 导出必须用**完整日志**（不加筛选）：本功能是排障用的，
+   * 之前传的是 `filtered`，用户若把筛选停在「警告」就会导出缺了 info 的日志
+   * ——实际已发生过一次（排查弹幕时拿到的日志里没有任何 info 行，白跑一轮）。
+   * 界面上的筛选只影响列表显示，不影响导出。
+   */
   const onCopy = () => {
-    const text = exportLogText(filtered);
+    const text = exportLogText(entries);
     Clipboard.setString(text);
-    showToast(t('已复制 {count} 条日志', { count: filtered.length }));
+    showToast(t('已复制 {count} 条日志', { count: entries.length }));
   };
 
   const onShare = () => {
-    const text = exportLogText(filtered);
+    const text = exportLogText(entries);
     Share.share({ title: t('牙牙消息运行日志'), message: text }).catch(() => showToast(t('分享失败')));
   };
 

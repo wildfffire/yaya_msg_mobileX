@@ -16,6 +16,32 @@ import {
   NimMsgType,
   NimSelfProfile,
 } from './types';
+import { replaceEmojiText } from '../../utils/emoji';
+import { textFromJsonPayload } from '../../utils/json';
+import { stripRichText } from '../../utils/richtext';
+
+/**
+ * 弹幕正文归一化：先解「整条是 JSON」的异常情况，再剥掉官方 H5 / 其他端发出的
+ * HTML 富文本标签，最后把 `[流泪]` 这类口袋48 文本表情短码换成 emoji。
+ *
+ * 三步的顺序不能换：
+ *   ① JSON 拆包要在最前（拆出来的 text 字段本身就是给用户看的内容）；
+ *   ② 剥标签必须在短码替换之前 —— 否则标签内容会被当成普通文本一起送上屏
+ *      （2026-10-03 林舒晴直播间实测：弹幕列表与飘屏都在飘 `<div><span style=…>`）；
+ *      图片表情（`<img src="/backstage/…">`）剥成 `[表情]` 占位，消息不整条消失。
+ *
+ * ⚠️ 这一步**必须**做在解析层而不是渲染层：直播弹幕有三个消费方
+ * （弹幕列表 LiveBarrageBoard / 画面飘屏 DanmakuOverlay / 弹幕列表抽屉），
+ * 只有在这里统一处理，三处才不会各漏一处。
+ *
+ * 原始富文本样本由 `chatroom.ts` 的 `[rich]` 日志留档（这里刻意不引 runtimeLog：
+ * 本文件的编译产物会被 `scripts/richtext.test.mjs` 在 Node 里直接 import，
+ * 引 RN 依赖会让单测起不来）。
+ */
+function normalizeBarrageText(raw: string): string {
+  if (!raw) return '';
+  return replaceEmojiText(stripRichText(textFromJsonPayload(String(raw))));
+}
 
 /** 官方手机端 config 段（DialogConfig：build 固定 181022，其余为设备信息，服务端只做统计） */
 function buildConfig() {
@@ -125,7 +151,7 @@ export function parseChatroomMessage(msg: any): BarrageItem | null {
   const roleId = toNumber(user.roleId);
   const level = toNumber(user.level);
 
-  let text = firstString(ext.text, msg.text);
+  let text = normalizeBarrageText(firstString(ext.text, msg.text));
   let gift: BarrageItem['gift'];
 
   if (kind === 'gift') {
@@ -225,6 +251,69 @@ export function buildLiveBarrageExt(options: BuildLiveBarrageOptions): Record<st
   return ext;
 }
 
+export interface BuildLiveGiftOptions {
+  /** 聊天室 id（= getLiveOne 返回的 content.roomId） */
+  roomId: string | number;
+  /** 直播 id（官方 sourceId） */
+  sourceId: string | number;
+  self: NimSelfProfile;
+  /** 'live' 成员直播 / 'public' 公开直播 */
+  module?: string;
+  /** 收礼人（主播）口袋 userId */
+  toUserId: string | number;
+  /** 收礼人昵称（公屏文案与 giftInfo.acceptUser 都用它） */
+  toName: string;
+  giftId: string | number;
+  giftName: string;
+  giftNum: number;
+  /** 礼物图（官方端按 picPath 取图；缺省不显示图但文案仍在） */
+  giftPic?: string;
+  /** 礼物总价值（鸡腿），未知传 0 */
+  tpNum?: number;
+}
+
+/**
+ * 构造「送礼公屏」remoteExtension（ChatMsgBuilder 的 PRESENT_NORMAL 分支）。
+ *
+ * ⚠️ 为什么必须有它（用户反馈 2026-09-29：「我送礼物，主播看不到」）：
+ *   之前的送礼**只调了 HTTP `/gift/api/v1/gift/send`**（扣款 + 入账），
+ *   而礼物公屏消息**是客户端自己往云信聊天室发的** —— 别人送的在直播间能看到，
+ *   正是因为他们（官方客户端）发了这条 PRESENT_NORMAL。我们没发 → 主播和所有
+ *   观众都看不到「我送的」礼物，只有我自己账单里少了鸡腿。
+ *
+ * 结构与我们自己的解析器 `parseChatroomMessage` 对齐（发出去的和收回来的同构，
+ * 官方端也按同一套字段渲染）：giftInfo.acceptUser 用 userName/nickName，
+ * 图片字段 picPath，数量 giftNum。
+ */
+export function buildLiveGiftExt(options: BuildLiveGiftOptions): Record<string, any> {
+  const giftNum = Number(options.giftNum) || 1;
+  const toName = String(options.toName || '');
+  const text = `${options.self.nickName || ''} 送给 ${toName} ${giftNum}个${options.giftName}`.trim();
+  const ext = buildLiveBarrageExt({
+    roomId: options.roomId,
+    sourceId: options.sourceId,
+    text,
+    self: options.self,
+    module: options.module,
+    messageType: NimMsgType.PRESENT,
+  });
+  const pic = options.giftPic || '';
+  ext.giftInfo = {
+    giftId: Number(options.giftId) || 0,
+    giftName: options.giftName,
+    giftNum,
+    tpNum: Number(options.tpNum) || 0,
+    picPath: pic,
+    icon: pic,
+    acceptUser: {
+      userId: Number(options.toUserId) || 0,
+      userName: toName,
+      nickName: toName,
+    },
+  };
+  return ext;
+}
+
 export interface BuildSessionTextOptions {
   /** 会话房间 id（官方 getRoomInfo().realRoomId） */
   roomId: string | number;
@@ -263,121 +352,6 @@ export function buildSessionTextExt(options: BuildSessionTextOptions): Record<st
  * MD5（官方 MessageMD5Util.Md5 的等价实现）。仅用于消息防伪标记，非安全用途。
  * 说明：RN 无 node:crypto，这里用标准 RFC1321 实现，避免新增依赖。
  */
-export function md5Hex(input: string): string {
-  const add = (a: number, b: number): number => {
-    const low = (a & 0xffff) + (b & 0xffff);
-    return (((a >>> 16) + (b >>> 16) + (low >>> 16)) << 16) | (low & 0xffff);
-  };
-  const rol = (n: number, c: number): number => (n << c) | (n >>> (32 - c));
-  const cmn = (q: number, a: number, b: number, x: number, s: number, t: number): number =>
-    add(rol(add(add(a, q), add(x, t)), s), b);
-  const ff = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number =>
-    cmn((b & c) | (~b & d), a, b, x, s, t);
-  const gg = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number =>
-    cmn((b & d) | (c & ~d), a, b, x, s, t);
-  const hh = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number =>
-    cmn(b ^ c ^ d, a, b, x, s, t);
-  const ii = (a: number, b: number, c: number, d: number, x: number, s: number, t: number): number =>
-    cmn(c ^ (b | ~d), a, b, x, s, t);
-
-  const str = unescape(encodeURIComponent(input));
-  const len = str.length;
-  const total = (((len + 8) >> 6) + 1) * 16;
-  const x: number[] = new Array(total).fill(0);
-  for (let i = 0; i < len; i += 1) {
-    x[i >> 2] |= (str.charCodeAt(i) & 0xff) << ((i % 4) * 8);
-  }
-  x[len >> 2] |= 0x80 << ((len % 4) * 8);
-  x[total - 2] = len * 8;
-  x[total - 1] = Math.floor((len * 8) / 0x100000000);
-
-  let a = 1732584193;
-  let b = -271733879;
-  let c = -1732584194;
-  let d = 271733878;
-
-  for (let i = 0; i < total; i += 16) {
-    const oa = a;
-    const ob = b;
-    const oc = c;
-    const od = d;
-    a = ff(a, b, c, d, x[i], 7, -680876936);
-    d = ff(d, a, b, c, x[i + 1], 12, -389564586);
-    c = ff(c, d, a, b, x[i + 2], 17, 606105819);
-    b = ff(b, c, d, a, x[i + 3], 22, -1044525330);
-    a = ff(a, b, c, d, x[i + 4], 7, -176418897);
-    d = ff(d, a, b, c, x[i + 5], 12, 1200080426);
-    c = ff(c, d, a, b, x[i + 6], 17, -1473231341);
-    b = ff(b, c, d, a, x[i + 7], 22, -45705983);
-    a = ff(a, b, c, d, x[i + 8], 7, 1770035416);
-    d = ff(d, a, b, c, x[i + 9], 12, -1958414417);
-    c = ff(c, d, a, b, x[i + 10], 17, -42063);
-    b = ff(b, c, d, a, x[i + 11], 22, -1990404162);
-    a = ff(a, b, c, d, x[i + 12], 7, 1804603682);
-    d = ff(d, a, b, c, x[i + 13], 12, -40341101);
-    c = ff(c, d, a, b, x[i + 14], 17, -1502002290);
-    b = ff(b, c, d, a, x[i + 15], 22, 1236535329);
-    a = gg(a, b, c, d, x[i + 1], 5, -165796510);
-    d = gg(d, a, b, c, x[i + 6], 9, -1069501632);
-    c = gg(c, d, a, b, x[i + 11], 14, 643717713);
-    b = gg(b, c, d, a, x[i], 20, -373897302);
-    a = gg(a, b, c, d, x[i + 5], 5, -701558691);
-    d = gg(d, a, b, c, x[i + 10], 9, 38016083);
-    c = gg(c, d, a, b, x[i + 15], 14, -660478335);
-    b = gg(b, c, d, a, x[i + 4], 20, -405537848);
-    a = gg(a, b, c, d, x[i + 9], 5, 568446438);
-    d = gg(d, a, b, c, x[i + 14], 9, -1019803690);
-    c = gg(c, d, a, b, x[i + 3], 14, -187363961);
-    b = gg(b, c, d, a, x[i + 8], 20, 1163531501);
-    a = gg(a, b, c, d, x[i + 13], 5, -1444681467);
-    d = gg(d, a, b, c, x[i + 2], 9, -51403784);
-    c = gg(c, d, a, b, x[i + 7], 14, 1735328473);
-    b = gg(b, c, d, a, x[i + 12], 20, -1926607734);
-    a = hh(a, b, c, d, x[i + 5], 4, -378558);
-    d = hh(d, a, b, c, x[i + 8], 11, -2022574463);
-    c = hh(c, d, a, b, x[i + 11], 16, 1839030562);
-    b = hh(b, c, d, a, x[i + 14], 23, -35309556);
-    a = hh(a, b, c, d, x[i + 1], 4, -1530992060);
-    d = hh(d, a, b, c, x[i + 4], 11, 1272893353);
-    c = hh(c, d, a, b, x[i + 7], 16, -155497632);
-    b = hh(b, c, d, a, x[i + 10], 23, -1094730640);
-    a = hh(a, b, c, d, x[i + 13], 4, 681279174);
-    d = hh(d, a, b, c, x[i], 11, -358537222);
-    c = hh(c, d, a, b, x[i + 3], 16, -722521979);
-    b = hh(b, c, d, a, x[i + 6], 23, 76029189);
-    a = hh(a, b, c, d, x[i + 9], 4, -640364487);
-    d = hh(d, a, b, c, x[i + 12], 11, -421815835);
-    c = hh(c, d, a, b, x[i + 15], 16, 530742520);
-    b = hh(b, c, d, a, x[i + 2], 23, -995338651);
-    a = ii(a, b, c, d, x[i], 6, -198630844);
-    d = ii(d, a, b, c, x[i + 7], 10, 1126891415);
-    c = ii(c, d, a, b, x[i + 14], 15, -1416354905);
-    b = ii(b, c, d, a, x[i + 5], 21, -57434055);
-    a = ii(a, b, c, d, x[i + 12], 6, 1700485571);
-    d = ii(d, a, b, c, x[i + 3], 10, -1894986606);
-    c = ii(c, d, a, b, x[i + 10], 15, -1051523);
-    b = ii(b, c, d, a, x[i + 1], 21, -2054922799);
-    a = ii(a, b, c, d, x[i + 8], 6, 1873313359);
-    d = ii(d, a, b, c, x[i + 15], 10, -30611744);
-    c = ii(c, d, a, b, x[i + 6], 15, -1560198380);
-    b = ii(b, c, d, a, x[i + 13], 21, 1309151649);
-    a = ii(a, b, c, d, x[i + 4], 6, -145523070);
-    d = ii(d, a, b, c, x[i + 11], 10, -1120210379);
-    c = ii(c, d, a, b, x[i + 2], 15, 718787259);
-    b = ii(b, c, d, a, x[i + 9], 21, -343485551);
-
-    a = add(a, oa);
-    b = add(b, ob);
-    c = add(c, oc);
-    d = add(d, od);
-  }
-
-  const hex = (num: number): string => {
-    let out = '';
-    for (let i = 0; i < 4; i += 1) {
-      out += `0${((num >>> (i * 8)) & 0xff).toString(16)}`.slice(-2);
-    }
-    return out;
-  };
-  return `${hex(a)}${hex(b)}${hex(c)}${hex(d)}`;
-}
+/** MD5 已抽到 src/utils/md5.ts（B站 WBI 签名也要用）；此处 import + 原样导出，既有调用方不受影响 */
+import { md5Hex } from '../../utils/md5';
+export { md5Hex };

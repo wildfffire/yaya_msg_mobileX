@@ -232,7 +232,16 @@ export default function RoomRadioScreen() {
       cover: m.avatar,
       isLive: true,
       audioOnly: true,
-      backTo: { mode: 'live', playUrl: url, playTitle: title, playCover: m.avatar },
+      // 成员名/队伍/成员 id：胶囊点开回大窗时右上角成员胶囊要用（用户 2026-11-08）
+      backTo: {
+        mode: 'live',
+        playUrl: url,
+        playTitle: title,
+        playCover: m.avatar,
+        playOwner: m.ownerName || '',
+        playTeam: m.team || '',
+        playOwnerId: m.id || '',
+      },
     });
     stopRadio();
     navigation.goBack();

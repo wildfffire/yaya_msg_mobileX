@@ -7,7 +7,7 @@
  *  - MotionIcon：图标挂载 spring 浮现（0.92→1，轻微过冲）
  * 只动 transform/opacity（native driver 可动画属性）。
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Animated,
   AppState,
@@ -47,13 +47,36 @@ export function FadeInView({
   pointerEvents,
 }: FadeInViewProps) {
   const value = useRef(new Animated.Value(0)).current;
+  /**
+   * ⚠️ delay / duration 只取**首帧**的值（用户 2026-09-30 报「房间列表闪烁、莫名遮罩、房间全没了」）。
+   *
+   * 以前依赖数组是 [delay, duration, value]，而列表行的 delay 常由 index 推导
+   *（如 RoomListRow 的 `80 + index * 30`）：一旦列表重排（未读上浮 / 搜索 / 置顶变化），
+   * index 变 → delay 变 → effect 重跑 → `setValue(0)` → 整行淡入重播。
+   * 30s 轮询刷新数据就会触发一轮全列表重播 → 视觉上就是「闪烁 + 像蒙了层遮罩 + 房间不见了」，
+   * 叠加 removeClippedSubviews 的回收重挂载后更明显。
+   *
+   * 语义修正：进场动画属于「挂载时播一次」，之后的任何重渲染/重排都不该重播。
+   */
+  const firstDelay = useRef(delay).current;
+  const firstDuration = useRef(duration).current;
+  /**
+   * ★ 落定后切静态样式（用户 2026-10-01「设置页下面的内容都消失了」）：
+   * native driver 的动画值挂在 **native 视图节点**上，而 root stack 开着
+   * detachPreviousScreen —— push 二级屏时本屏被 detach，**动画节点连同 opacity 一起丢**，
+   * pop 回来 re-attach 后 opacity 归 0 → 常驻内容（设置页的各个 Section 等）
+   * 只剩框架、内容隐形，且三重保险早已执行过、救不回来。
+   * 现在：动画落定（含全部兜底路径）后置 settled=true，样式切换成**静态 opacity:1**
+   * —— detach/attach 不再影响可见性。组件类型不变（仍是 Animated.View），子树不 remount。
+   */
+  const [settled, setSettled] = useState(false);
 
   useEffect(() => {
     value.setValue(0);
     const animation = Animated.timing(value, {
       toValue: 1,
-      duration,
-      delay,
+      duration: firstDuration,
+      delay: firstDelay,
       easing: EASE_OUT,
       useNativeDriver: true,
     });
@@ -70,29 +93,38 @@ export function FadeInView({
      */
     animation.start(({ finished }) => {
       if (!finished) value.setValue(1);
+      setSettled(true);
     });
-    const guard = setTimeout(() => value.setValue(1), delay + duration + 150);
+    const guard = setTimeout(() => {
+      value.setValue(1);
+      setSettled(true);
+    }, firstDelay + firstDuration + 150);
     const appStateSub = AppState.addEventListener('change', (s) => {
-      if (s === 'active') value.setValue(1);
+      if (s === 'active') {
+        value.setValue(1);
+        setSettled(true);
+      }
     });
     return () => {
       animation.stop();
       clearTimeout(guard);
       appStateSub.remove();
     };
-  }, [delay, duration, value]);
+  }, [firstDelay, firstDuration, value]);
 
   return (
     <Animated.View
       pointerEvents={pointerEvents}
       style={[
         style,
-        {
-          opacity: value,
-          transform: [{
-            translateY: value.interpolate({ inputRange: [0, 1], outputRange: [distance, 0] }),
-          }],
-        },
+        settled
+          ? { opacity: 1 }
+          : {
+              opacity: value,
+              transform: [{
+                translateY: value.interpolate({ inputRange: [0, 1], outputRange: [distance, 0] }),
+              }],
+            },
       ]}
     >
       {children}

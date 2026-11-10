@@ -4,8 +4,10 @@
  * 公演记录页与首页「公演直播」区块**共用**（用户要求两处同源同行为）：
  *   - 数据由调用方传（fetchUpcomingPerformances：即将 + 进行中的剧场公演，时间正序）
  *   - 60s 心跳：到点把时间徽标从「13:15」自动翻成「直播中」
- *   - 点击：未开演 → toast「还未开演」；已开演 → 进该团 B站直播间
- *     （团名 → roomId 用 externalApi 的 B站配置，内部有 5 分钟缓存）
+ *   - 点击：未开演 → toast「还未开演」；已开演 → **B站优先**：该团 B站官方直播间正在播就进 B站，
+ *     没在播才回退**应用内信号**（口袋公演直播 getOpenLiveOne → rtmp）
+ *     （团名 → roomId 用 externalApi 的 B站配置，内部有 5 分钟缓存；
+ *      开播状态用 services/biliLiveStatus 判定，带 TTL 缓存避开 B站风控）
  *
  * 样式可定制：`style` 控制外层（首页用负 margin 抵消 sectionOuter 内边距实现贴边横滑），
  * `contentContainerStyle` 控制滚动内容（首页补 paddingLeft），`cardWidth` 控制卡片宽。
@@ -20,10 +22,13 @@ import { useNavigation } from '@react-navigation/native';
 import { useI18n } from '../i18n';
 import { usePalette } from '../theme';
 import { useUiStore } from '../store';
+import { useAppStatePoll } from '../hooks/useAppStatePoll';
 import { externalApi } from '../api/external';
+import { isGroupBiliLive, prefetchGroupBiliLive } from '../services/biliLiveStatus';
 import {
   describeShowTime,
   formatShowWhen,
+  PERFORMANCE_FALLBACK_COLOR,
   type PerformanceShow,
 } from '../services/performanceSchedule';
 
@@ -34,8 +39,17 @@ function isShowStarted(show: PerformanceShow): boolean {
 
 interface Props {
   shows: PerformanceShow[];
-  /** 不传则用默认行为（未开演 toast / 已开演进该团 B站直播间） */
+  /** 不传则用默认行为（未开演 toast / 已开演：B站优先，没播才走应用内信号） */
   onPressShow?: (show: PerformanceShow) => void;
+  /**
+   * 接管「该团 B站没开播时」的应用内信号播放（口袋公演直播）。
+   *
+   * 返回 `false` = 没接住（拿不到 liveId），组件会提示「未找到该团的直播间」；
+   * 返回其它值（含 undefined）= 已接管，组件不再做任何跳转。
+   *
+   * 典型用法：公演记录页就地起播（本页有播放器），首页不传 → 跳直播页播。
+   */
+  onPlayLive?: (show: PerformanceShow) => boolean | void;
   /** 标题行文案，默认「即将开演」 */
   title?: string;
   /** 是否渲染标题行（首页嵌在「公演直播」区块里时不需要，传 false） */
@@ -51,6 +65,7 @@ interface Props {
 export default function PerformanceStrip({
   shows,
   onPressShow,
+  onPlayLive,
   title,
   showHead = true,
   showCount = false,
@@ -79,6 +94,8 @@ export default function PerformanceStrip({
           if (name && room.roomId) map[name] = String(room.roomId);
         }
         setBiliGroupRooms(map);
+        // 预热各团 B站开播状态：点击时零等待（失败静默，点击时还会再查一次）
+        prefetchGroupBiliLive(Object.values(map));
       })
       .catch(() => {});
     return () => { alive = false; };
@@ -89,24 +106,50 @@ export default function PerformanceStrip({
    * 从「13:15」自动变成「直播中」，点了还以为没反应（要等下一次排期刷新才重渲染）。
    */
   const [, setClockTick] = useState(0);
-  useEffect(() => {
-    const timer = setInterval(() => setClockTick((n) => n + 1), 60000);
-    return () => clearInterval(timer);
-  }, []);
+  // 60s 心跳：仅用于"到点翻转徽标"，切后台无意义 → 用 AppState 感知的轮询（后台暂停、回前台补齐）
+  useAppStatePoll(() => setClockTick((n) => n + 1), 60000);
 
-  /** 点公演卡：已开演 → 进该团 B站直播间；未开演 → 提示一下 */
-  const openShowLive = useCallback((show: PerformanceShow) => {
+  /**
+   * 点公演卡（用户 2026-10-04 定口径：**B站优先，没有才走应用内信号**）：
+   *   未开演 → 提示「还未开演」
+   *   已开演 → ① 该团 B站官方直播间**正在开播** → 进 B站（官方同播，线路更稳）
+   *            ② B站没在播 → 应用内信号（口袋公演直播）：父级传了 onPlayLive 就交给父级
+   *               （公演记录页就地起播），没传则跳直播页播放
+   *            ③ 两边都没有 → 提示「未找到该团的直播间」
+   */
+  const openShowLive = useCallback(async (show: PerformanceShow) => {
     if (!isShowStarted(show)) {
       showToast(t('还未开演'));
       return;
     }
-    const roomId = biliGroupRooms[String(show.group || '').trim().toUpperCase()];
-    if (!roomId) {
-      showToast(t('未找到该团的直播间'));
+    const group = String(show.group || '').trim().toUpperCase();
+    const roomId = biliGroupRooms[group];
+    // ① B站优先：room_init 的 live_status===1 才算在播（结果带 TTL 缓存，未命中时最多等一次请求）
+    if (roomId && (await isGroupBiliLive(roomId))) {
+      navigation.navigate('BilibiliLiveScreen', { roomId, roomName: show.group || t('B站直播') });
       return;
     }
-    navigation.navigate('BilibiliLiveScreen', { roomId, roomName: show.group || t('B站直播') });
-  }, [biliGroupRooms, navigation, showToast, t]);
+    // ② 应用内信号：Seine 的 openLiveInfo.status=2 = 口袋侧公演正在直播（getOpenLiveOne 能给 rtmp）。
+    // liveId 就是排期的 businessId（精度由 exactBigInts 保住）。
+    if (Number(show.status) === 2 && show.liveId) {
+      if (onPlayLive) {
+        if (onPlayLive(show) !== false) return;
+      } else {
+        navigation.navigate('Media', {
+          mode: 'live',
+          playLiveId: show.liveId,
+          playTitle: show.title,
+          playCover: show.cover,
+          playNonce: Date.now(),
+          // 从首页看公演直播：退出播放要回首页（用户 2026-10-04）
+          playFrom: 'Home',
+        });
+        return;
+      }
+    }
+    // ③ B站没播、口袋侧也没流
+    showToast(t('未找到该团的直播间'));
+  }, [biliGroupRooms, navigation, onPlayLive, showToast, t]);
 
   if (!shows.length) return null;
 
@@ -130,6 +173,18 @@ export default function PerformanceStrip({
       >
         {shows.map((show) => {
           const ended = (Number(show.status) || 0) === 4;
+          /**
+           * 公演时间胶囊配色（用户 2026-11-09）：
+           * · 有队伍 → 队伍应援色（保持原样）
+           * · 没有队伍显示（parseTeamLogo 兜底、show.color 是写死粉）→ 改用当前主题色，
+           *   文字色由 textOnColor 按底色亮度自动挑黑/白，换主题色时跟着变
+           * · 已结束 → 中性灰
+           */
+          const whenBg = ended
+            ? palette.labelTertiary
+            : (!show.teamLabel || show.color === PERFORMANCE_FALLBACK_COLOR ? palette.tint : show.color);
+          const whenFg = textOnColor(String(whenBg));
+          const teamColor = show.color === PERFORMANCE_FALLBACK_COLOR ? palette.tint : show.color;
           return (
           /* 已结束 → 只提示；已开演 → 进该团 B站直播间；未开演 → 提示还未开演 */
           <ScalePressable
@@ -154,9 +209,9 @@ export default function PerformanceStrip({
                   <MaterialCommunityIcons name="theater" size={22} color={palette.tint} />
                 </View>
               )}
-              <View style={[styles.perfWhenBadge, { backgroundColor: ended ? palette.labelTertiary : show.color }]}>
+              <View style={[styles.perfWhenBadge, { backgroundColor: whenBg }]}>
                 <Text
-                  style={[styles.perfWhenText, { color: textOnColor(ended ? String(palette.labelTertiary) : show.color) }]}
+                  style={[styles.perfWhenText, { color: whenFg }]}
                   numberOfLines={1}
                 >
                   {ended
@@ -170,7 +225,7 @@ export default function PerformanceStrip({
             <Text style={[styles.perfTitle, { color: palette.label }]} numberOfLines={2}>{show.title}</Text>
             {show.teamLabel ? (
               <View style={styles.perfTeamRow}>
-                <View style={[styles.perfTeamBar, { backgroundColor: show.color }]} />
+                <View style={[styles.perfTeamBar, { backgroundColor: teamColor }]} />
                 <Text style={[styles.perfTeam, { color: palette.labelSecondary }]} numberOfLines={1}>{show.teamLabel}</Text>
               </View>
             ) : null}
@@ -192,7 +247,8 @@ const styles = StyleSheet.create({
   perfCover: { width: '100%', height: 88 },
   perfCoverFallback: { alignItems: 'center', justifyContent: 'center' },
   perfWhenBadge: { position: 'absolute', left: 6, top: 6, paddingHorizontal: 7, paddingVertical: 3, borderRadius: 999 },
-  perfWhenText: { color: '#ffffff', fontSize: 11, fontWeight: '800' },
+  // 文字色由内联 whenFg 决定（textOnColor 按底色亮度自动黑/白），此处不再写死白
+  perfWhenText: { fontSize: 11, fontWeight: '800' },
   perfTitle: { fontSize: 13, fontWeight: '700', lineHeight: 18, marginTop: 8 },
   perfTeamRow: { flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 6 },
   perfTeamBar: { width: 3, height: 11, borderRadius: 2 },

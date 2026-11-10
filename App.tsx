@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState } from 'react';
-import { View, Text, ActivityIndicator, ImageBackground, Modal, Image, TouchableOpacity, Linking, StyleSheet, Animated, Easing, AppState } from 'react-native';
+import { View, Text, ActivityIndicator, Modal, Image, TouchableOpacity, Linking, StyleSheet, Animated, Easing, AppState } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import AppNavigator from './src/navigation';
-import { loadSettings } from './src/services/settings';
+import { loadSettings, saveSettings } from './src/services/settings';
+import { fetchSystemAccentColor } from './src/utils/systemAccent';
 import { useResolvedTheme } from './src/hooks/useAppTheme';
 import { useSettingsStore, useMemberStore, useAnnouncementStore, useUpdateStore } from './src/store';
 import { loadMembers } from './src/utils/members';
@@ -22,12 +23,17 @@ import {
   isNativeExoActive,
   isNativeExoDisabled,
 } from './src/native/RadioExo';
-import { ensureNotificationPermission } from './src/utils/notifications';
+import { ensureNotificationPermission, ensureNotificationPermissionOnce, notifyWanted, syncMessageKeepAliveForSettings } from './src/utils/notifications';
 import { useMusicPlayerStore, flushMusicPlayerStorage, PlayMode } from './src/store/musicPlayerStore';
 import { MusicEngine } from './src/services/musicPlayer';
 import { FadeInView } from './src/components/Motion';
 import { runAutoCheckinIfNeeded } from './src/services/autoCheckin';
 import { NOTICE_URL } from './src/constants';
+// 深链（yayamsg://）+ 消息通知轮询（用户 2026-11-09）
+import { initDeepLink } from './src/services/deepLink';
+import { startMessagePollers } from './src/services/messagePollers';
+import { initGiftPrices } from './src/services/giftPrices';
+import { InAppNoticeBanner } from './src/components/InAppNoticeBanner';
 import { initRuntimeLog, logCrash, logInfo } from './src/utils/runtimeLog';
 import { fetchCoverToFile, normalizeCoverUrl } from './src/utils/coverToFile';
 import { usePalette } from './src/theme/colors';
@@ -532,6 +538,7 @@ export default function App() {
   const palette = usePalette();
   const customBackgroundFile = useSettingsStore((state) => state.settings.customBackgroundFile);
   const customBackgroundUpdatedAt = useSettingsStore((state) => state.settings.customBackgroundUpdatedAt);
+  // 背景图的遮罩/模糊由导航层应用（见 navigation/index.tsx），App 只负责铺底色
   const [backgroundLoadError, setBackgroundLoadError] = useState('');
   const splashBg = palette.background;
 
@@ -583,6 +590,15 @@ export default function App() {
       try {
         const settings = await loadSettings();
         useSettingsStore.getState().setSettings(settings);
+        // PiliPlus「动态取色」：冷启动重新取一次系统壁纸色（换壁纸后能跟上）。
+        // 取不到就保留上次的值，绝不让主题色变空 / 变黑。
+        if (settings.accentDynamic) {
+          fetchSystemAccentColor().then((hex) => {
+            if (!hex || hex === settings.accentDynamicValue) return;
+            useSettingsStore.getState().setSettings({ accentDynamicValue: hex });
+            saveSettings({ accentDynamicValue: hex }).catch(() => {});
+          }).catch(() => {});
+        }
       } catch (error: any) {
         if (mounted) setMessage(`设置加载失败：${error?.message || String(error)}`);
       }
@@ -636,6 +652,50 @@ export default function App() {
     };
   }, [ready]);
 
+  /**
+   * 深链 + 消息轮询：App 生命周期内常驻（用户 2026-11-09）。
+   * 轮询内部每次都会读设置（开关关掉即不发请求），所以这里不需要随设置重建。
+   */
+  useEffect(() => {
+    const offLink = initDeepLink();
+    const stopPollers = startMessagePollers();
+    // 礼物价格快照：读本地 + 节流同步（无远端地址时零请求）
+    initGiftPrices();
+    /**
+     * 软件外通知的两个前提（2026-11-10 真机实证）：
+     *   ① 系统通知真的可用：Android 13+ 申请 POST_NOTIFICATIONS；12 及以下系统**不会**弹权限框，
+     *      改为 App 内主动引导去系统设置（旧版只在设置页放了一行提示，用户从没被问过）；
+     *   ② 消息保活前台服务：没有它，App 一退后台进程就被冻结，5s 轮询停摆（logcat 实测
+     *      后台 20~35s 零 JS 日志），新消息根本没拉回来，权限再全也发不出通知。
+     * 延后 2.5s，别和开屏/首屏渲染抢时间。
+     */
+    const permTimer = setTimeout(() => {
+      const st = useSettingsStore.getState().settings;
+      const wanted = notifyWanted(st);
+      // 用户关了通知（含免打扰/私信房间全关）：不弹引导，且后台保活一律不起
+      void ensureNotificationPermissionOnce({ allowPrompt: wanted });
+      void syncMessageKeepAliveForSettings(st);
+    }, 2500);
+    /**
+     * 前后台统一切换（用户 2026-11-10：通知栏不要常驻「消息接收中」）：
+     * 退后台才启动保活前台服务（Android 要求前台服务必须带一条通知），回前台立即停。
+     * 回前台顺带复查通知权限（用户可能刚从系统设置回来）。
+     */
+    const appStateSub = AppState.addEventListener('change', (state) => {
+      const st = useSettingsStore.getState().settings;
+      if (state === 'active') {
+        void ensureNotificationPermissionOnce({ allowPrompt: notifyWanted(st) });
+      }
+      void syncMessageKeepAliveForSettings(st);
+    });
+    return () => {
+      offLink();
+      stopPollers();
+      clearTimeout(permTimer);
+      appStateSub.remove();
+    };
+  }, []);
+
   const backgroundUri = customBackgroundFile?.trim();
   const backgroundSource = backgroundUri
     ? { uri: backgroundUri.match(/^[a-z][a-z0-9+.-]*:/i) ? backgroundUri : `file://${backgroundUri}` }
@@ -652,6 +712,8 @@ export default function App() {
       <SafeAreaBridge>
         <AppNavigator />
       </SafeAreaBridge>
+      {/* 软件内通知横幅（用户 2026-11-09）：前台收到新消息时的顶部提示，点按走深链 */}
+      <InAppNoticeBanner />
       {/* v2.6: Global announcement modal */}
       <Modal visible={!!announceModal} transparent animationType="fade" onRequestClose={() => setAnnounceModal(null)}>
         <View style={anStyles.overlay}>
@@ -701,26 +763,27 @@ export default function App() {
       {!ready ? (
         // 原生开屏已展示 app 图标（与开屏同色纯背景，避免黑屏闪烁）；签名 WebView 仍在后台预热。
         <View style={{ flex: 1, backgroundColor: splashBg }} />
-      ) : backgroundSource ? (
-        <ImageBackground
-          key={`${backgroundSource.uri}-${customBackgroundUpdatedAt || 0}`}
-          source={backgroundSource}
-          style={{ flex: 1, backgroundColor: palette.background }}
-          resizeMode="cover"
-          onLoad={() => setBackgroundLoadError('')}
-          onError={(event) => setBackgroundLoadError(`背景图加载失败：${backgroundSource.uri} ${event.nativeEvent?.error || ''}`)}
-        >
-          <View pointerEvents="none" style={{ position: 'absolute', left: 0, right: 0, top: 0, bottom: 0, backgroundColor: appTheme === 'dark' ? 'rgba(11,11,15,0.88)' : 'rgba(245,245,247,0.92)' }} />
-          {/* 错误边界外扩到 App 级：Modal/WebViewSigner/背景层渲染异常也有兜底（页面级由导航内的 ErrorBoundary 捕获） */}
-          <ErrorBoundary>{content}</ErrorBoundary>
-        </ImageBackground>
       ) : (
-        <ErrorBoundary>{content}</ErrorBoundary>
+        /**
+         * ⚠️ 自定义背景图（含遮罩/模糊）**只在导航层渲染一次**（navigation/index.tsx 的
+         * BlurTargetSurface 里那张）。App 这一层以前也画了一张同样的图 + 自己算遮罩，
+         * 结果被导航层整块盖住：调 bg_dim/bg_blur 完全没反应（用户 2026-11-09 二次反馈），
+         * 同一张 data URI 还被解码两次。这里只铺主题底色，内容照常渲染。
+         */
+        <View style={{ flex: 1, backgroundColor: palette.background }}>
+          <ErrorBoundary>{content}</ErrorBoundary>
+        </View>
       )}
-      {/* WebViewSigner 常驻挂载：即使 JS 开屏仍在显示，也提前预热签名模块。 */}
-      <WebViewSigner />
+      {/* WebViewSigner 常驻挂载：即使 JS 开屏仍在显示，也提前预热签名模块。
+          它是常驻组件且在页面兄弟层级，必须各自包一层「静默」错误边界：
+          渲染期一旦抛错会直冲根部导致整屏白屏，静默边界把它降级为「签名功能失效」。 */}
+      <ErrorBoundary silent>
+        <WebViewSigner />
+      </ErrorBoundary>
       {/* 音乐前台保活（后台播放通知栏控制 + 防进程被杀） */}
-      <MusicForegroundBridge />
+      <ErrorBoundary silent>
+        <MusicForegroundBridge />
+      </ErrorBoundary>
     </GestureHandlerRootView>
   );
 }

@@ -4,6 +4,7 @@ import { normalizeUrl } from '../utils/data';
 import { parseLrc } from '../utils/lyrics';
 import { getLyricsMatcher } from '../utils/lyricsIndex';
 import { fetchWithTimeout } from '../utils/network';
+import { trimToMax } from '../utils/cache';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const LYRICS_BASE_URL = 'https://yaya-data.pages.dev/lyrics';
@@ -140,14 +141,10 @@ export const MusicEngine = {
     });
   },
 
-  /** 写预热缓存并裁剪超限项（Map 插入序 = 最旧优先删） */
+  /** 写预热缓存并裁剪超限项（Map 插入序 = 最旧优先删；裁剪原语统一在 utils/cache.ts） */
   _cacheWarmUrl(key: string, url: string): void {
     this._warmUrls.set(key, url);
-    while (this._warmUrls.size > this._warmUrlsMax) {
-      const oldest = this._warmUrls.keys().next();
-      if (!oldest.done) this._warmUrls.delete(oldest.value);
-      else break;
-    }
+    trimToMax(this._warmUrls, this._warmUrlsMax);
   },
 
   /**
@@ -505,17 +502,13 @@ export const MusicEngine = {
             const lrcResp = await fetchWithTimeout(url, {}, 10000);
             const raw = await lrcResp.text();
             commit(parseLrc(raw));
-            cache[cacheKey] = { t: Date.now(), text: raw };
-            const keys = Object.keys(cache);
-            if (keys.length > 200) {
-              const oldest = keys
-                .map((k) => ({ k, t: cache[k].t }))
-                .sort((a, b) => a.t - b.t)
-                .slice(0, keys.length - 200)
-                .map((x) => x.k);
-              oldest.forEach((k) => delete cache[k]);
-            }
-            AsyncStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify(cache)).catch(() => {});
+            /**
+             * ⚠️ 必须走 saveLyricCache 串行链。
+             * 这里原先直接 `AsyncStorage.setItem(LYRICS_CACHE_KEY, JSON.stringify(cache))`，
+             * 属于 read-modify-write 整表重写：与下方常规路径（已用串行链）并发时，
+             * 后写者基于旧表覆盖会**丢掉对方刚写入的条目** —— 正是文件顶部注释警告的场景。
+             */
+            saveLyricCache(cacheKey, raw);
             return;
           }
         }

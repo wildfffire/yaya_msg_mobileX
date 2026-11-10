@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * 版本号四源一致性校验（typecheck 门禁的一部分）：
+ * 版本号五源一致性校验（typecheck 门禁的一部分）：
  *   - package.json           version
  *   - app.json               expo.version / expo.android.versionCode
  *   - android/app/build.gradle versionCode / versionName
  *   - src/constants/index.ts APP_VERSION
+ *   - src/constants/index.ts APP_BUILD（构建号 = versionCode，设置页在版本名下方显示为 Build）
  *
  * versionCode 由 Android 发布链路单独维护，必须保持递增；
  * 不再从 versionName 推导，因为同一 2.x 小版本可能有多个修复包。
@@ -59,6 +60,12 @@ if (!vnMatch || vnMatch[1] !== version) {
 const avMatch = constants.match(/APP_VERSION\s*=\s*'([^']+)'/);
 if (!avMatch || avMatch[1] !== version) {
   fail(`src/constants/index.ts APP_VERSION=${avMatch?.[1]} ≠ ${version}`);
+}
+
+// 4) APP_BUILD 常量（小版本 = versionCode，设置页显示；漂移会让用户对不上设备上的包）
+const abMatch = constants.match(/APP_BUILD\s*=\s*(\d+)/);
+if (!abMatch || Number(abMatch[1]) !== expectedVersionCode) {
+  fail(`src/constants/index.ts APP_BUILD=${abMatch?.[1]} ≠ app.json versionCode ${expectedVersionCode}`);
 }
 
 console.log(`✅ [verify-version] 版本一致：v${version} (versionCode ${expectedVersionCode})`);

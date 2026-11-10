@@ -41,8 +41,25 @@ export function buildLyricEntries(raw: RawIndexEntry[]): LyricEntry[] {
 }
 
 let cachedMatcher: { entries: LyricEntry[]; matcher: any } | null = null;
+/**
+ * 在途去重：`cachedMatcher` 只在**完成时**赋值，所以快速切歌导致的并发调用
+ * 会各自重新拉 `lyrics-index.json` 并重复 `buildLyricEntries`（大数组归一化，很贵）。
+ * 这里让并发调用共享同一个 Promise。
+ */
+let inflightMatcher: Promise<{ entries: LyricEntry[]; matcher: any }> | null = null;
 
 export async function getLyricsMatcher() {
+  if (cachedMatcher) return cachedMatcher;
+  if (inflightMatcher) return inflightMatcher;
+  inflightMatcher = loadLyricsMatcher();
+  try {
+    return await inflightMatcher;
+  } finally {
+    inflightMatcher = null; // 成功后 cachedMatcher 已生效；失败则允许下次重试
+  }
+}
+
+async function loadLyricsMatcher(): Promise<{ entries: LyricEntry[]; matcher: any }> {
   if (cachedMatcher) return cachedMatcher;
 
   // 1) 落盘缓存优先（24h TTL）

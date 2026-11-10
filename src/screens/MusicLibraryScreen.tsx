@@ -953,12 +953,7 @@ const styles = StyleSheet.create({
     margin: 5,
     borderRadius: radiiAlias.card,
     overflow: 'hidden',
-    // 克制阴影增强浮起感
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
+    // 扁平化：封面卡不再投影
   },
   coverWrap: { width: '100%', aspectRatio: 1 },
   playingBadge: {

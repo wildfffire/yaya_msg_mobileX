@@ -1,4 +1,4 @@
-import React, { forwardRef, useImperativeHandle, useRef } from 'react';
+import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
 import { StyleSheet } from 'react-native';
 import Video from 'react-native-video';
 import { PlayerSource } from '../types';
@@ -27,7 +27,7 @@ interface Props {
 }
 
 /** RNV 内核：HLS/mp4/mp3/flac 等 ExoPlayer 支持的流 */
-export const NativeKernel = forwardRef<NativeKernelHandle, Props>(function NativeKernel(
+const NativeKernelInner = forwardRef<NativeKernelHandle, Props>(function NativeKernel(
   { source, paused, rate, volume = 1, resumeAt, onLoad, onProgress, onEnd, onError, onFirstFrame, onBufferChange },
   ref,
 ) {
@@ -39,22 +39,33 @@ export const NativeKernel = forwardRef<NativeKernelHandle, Props>(function Nativ
       } catch {}
     },
   }));
+  /**
+   * source 必须记忆化：原先写成行内对象字面量，每次渲染都是新引用 → RN 会跨桥
+   * 重新下发一次 source。原生侧 ReactExoplayerView.setSrc() 进入后会先无条件调用
+   * clearResumePosition()（在 isSourceEqual 比对**之前**），即每次下发都会清掉续播位置；
+   * 虽然值相等时不会 re-init（Source.isEquals 是 data class 值比对），但
+   * "清掉续播位置 + 每帧跨桥传对象"都是纯浪费，且一旦紧接着发生 re-init 就丢了续播点。
+   */
+  const videoSource = useMemo(
+    () => ({
+      uri: source.url,
+      ...(source.headers ? { headers: source.headers } : {}),
+      // AWS/CDN 流播放中偶发缓冲耗尽卡顿：加大 Exo 缓冲池 + 30s 回看缓冲
+      bufferConfig: {
+        minBufferMs: 15000,
+        maxBufferMs: 60000,
+        bufferForPlaybackMs: 5000,
+        bufferForPlaybackAfterRebufferMs: 10000,
+        backBufferDurationMs: 30000,
+      },
+    }),
+    [source.url, source.headers],
+  );
   return (
     <Video
       ref={videoRef}
       key={source.url}
-      source={{
-        uri: source.url,
-        ...(source.headers ? { headers: source.headers } : {}),
-        // AWS/CDN 流播放中偶发缓冲耗尽卡顿：加大 Exo 缓冲池 + 30s 回看缓冲
-        bufferConfig: {
-          minBufferMs: 15000,
-          maxBufferMs: 60000,
-          bufferForPlaybackMs: 5000,
-          bufferForPlaybackAfterRebufferMs: 10000,
-          backBufferDurationMs: 30000,
-        },
-      }}
+      source={videoSource}
       style={StyleSheet.absoluteFill}
       resizeMode="contain"
       paused={paused}
@@ -100,5 +111,11 @@ export const NativeKernel = forwardRef<NativeKernelHandle, Props>(function Nativ
     />
   );
 });
+
+/**
+ * 包 memo：props（paused/rate/volume/onLoad…）未变时不再重渲染 <Video>。
+ * 原先没有 memo，父级（PlayerCore/PlayerScreen）任何一次渲染都会穿透到这里。
+ */
+export const NativeKernel = React.memo(NativeKernelInner);
 
 export default NativeKernel;

@@ -10,7 +10,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Animated,
-  AppState,
   DeviceEventEmitter,
   PanResponder,
   StyleSheet,
@@ -24,7 +23,6 @@ import Video from 'react-native-video';
 import { WebView } from 'react-native-webview';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
-import { useSettingsStore } from '../store';
 import { usePalette } from '../theme';
 import { setPipPlaying, setPipAspect } from '../utils/pip';
 import { useI18n } from '../i18n';
@@ -133,11 +131,29 @@ export function MiniPlayer() {
   const backToFull = useCallback(() => {
     if (!info) return;
     close();
+    /**
+     * 房间来源（backTo.roomMemberId）优先回**房间**：
+     * 用户 2026-09-30 明确「房间里的直播/回放，从房间进来的，退出也要留在房间里」——
+     * 以前一律跳 Media 直播 tab，回来就再也找不到她的房间了。
+     * 房间页支持 openMemberId 路由参数（进去即打开该成员房间），回到房间后可继续在房间内看直播。
+     */
+    const roomMemberId = String(info.backTo.roomMemberId || '');
+    if (roomMemberId) {
+      (navigation as any).navigate('Rooms', { openMemberId: roomMemberId });
+      return;
+    }
     (navigation as any).navigate('Media', {
       mode: info.backTo.mode,
       playUrl: info.backTo.playUrl,
       playTitle: info.backTo.playTitle,
       playCover: info.backTo.playCover,
+      /**
+       * 成员名 / 队伍 / 成员 id 必须原样带回：这条路是 MediaScreen 的 `playUrl` 直达分支，
+       * 会重新构造 PlayMedia —— 不带就从「右上角有成员名」变成空白胶囊（用户 2026-11-08）。
+       */
+      playOwner: info.backTo.playOwner,
+      playTeam: info.backTo.playTeam,
+      playOwnerId: info.backTo.playOwnerId,
       playNonce: Date.now(),
       // 小窗 → 大窗续播：传当前播放位置（仅录播）
       ...(info.backTo.mode !== 'live' ? { playPosition: useMiniPlayerStore.getState().currentPos } : {}),
@@ -557,10 +573,7 @@ const styles = StyleSheet.create({
     borderRadius: 14,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    shadowOffset: { width: 0, height: 4 },
+    // 扁平化：小窗不再投影（elevation 只用于盖住原生视频层，不做视觉阴影）
     elevation: 8,
     zIndex: 999,
   },

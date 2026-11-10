@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { PlayerSource, PlayerMeta, DanmakuSource } from '../types';
+import { logWarn } from '../../utils/runtimeLog';
 // 播放互斥（单向）：playerStore 开播(直播/录播/视频/电台经此)时暂停后台音乐；
 // 反向（音乐开播停 playerStore 媒体）在 MusicEngine.playTrack/resume 内处理。
 import { useMusicPlayerStore } from '../../store/musicPlayerStore';
@@ -80,7 +81,7 @@ function kernelForSource(source: PlayerSource): 'exo' | 'native' {
   return 'native';
 }
 
-export const usePlayerStore = create<PlayerState>((set, get) => ({
+export const usePlayerStore = create<PlayerState>((set) => ({
   onClose: null,
   setOnClose: (fn) => set({ onClose: fn }),
   source: null,
@@ -110,8 +111,11 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       if (mst.queue.length && (mst.playbackState === 'playing' || mst.playbackState === 'paused')) {
         mst.setPlaybackState('paused'); // → MusicLibrary 351 effect exoControl pause + 通知转暂停
       }
-    } catch {}
-    return set((s) => {
+    } catch (err) {
+      // 播放互斥失败不影响本次开播，但必须留痕：原先空 catch 导致线上无法定位
+      try { logWarn(`[player] 暂停后台音乐失败：${String((err as any)?.message || err)}`, 'player.open'); } catch {}
+    }
+    return set(() => {
       const urls = (source.urls && source.urls.length ? source.urls : [source.url]).filter(Boolean);
       return {
         source,
@@ -148,6 +152,23 @@ export const usePlayerStore = create<PlayerState>((set, get) => ({
       duration: 0,
       error: '',
       fullscreen: false,
+      /**
+       * ⚠️ 必须一起复位（用户 2026-09-30：「房间内的直播不要用 B 站那个播放器」）。
+       *
+       * `useWebKernel` / `forceWebOnce` 是**全局开关**，B 站页（BilibiliLiveScreen）会把它写成 true
+       * 来强制网页内核（WebView + flv.js/hls.js，观感就是"另一个播放器"）。以前 close() 不复位，
+       * 退出 B 站页后**任何页面**（含房间内直播）都会继续用网页内核 —— 这才是"房间用了 B 站播放器"的根因。
+       * 顺便清掉候选线路/画质/旋转镜像等一次性状态：退出直播后不该继续持有这些对象。
+       */
+      useWebKernel: false,
+      forceWebOnce: false,
+      candidateUrls: [],
+      candidateIndex: 0,
+      qualityQn: null,
+      rate: 1,
+      rotateDeg: 0,
+      mirrorMode: 'none' as const,
+      seekTarget: 0,
     }),
 
   setState: (state) => set({ state }),

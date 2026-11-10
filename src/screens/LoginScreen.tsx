@@ -6,9 +6,10 @@
  * - B站二维码卡：白卡圆角 16 + 二维码居中 + 过期刷新按钮
  * 业务逻辑 / API / 数据流 / 路由 / i18n 原文一律不动，仅重组布局。
  */
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   View, Text, TextInput, StyleSheet, ScrollView, KeyboardAvoidingView, Platform,
+  Animated, PanResponder,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
 
@@ -182,6 +183,9 @@ function parseAccountInfo(res: any) {
 
 type LoginMode = 'sms' | 'token' | 'bilibili';
 
+/** 三个登录方式的左右顺序（横划切换按它取「上一页 / 下一页」） */
+const LOGIN_MODES: LoginMode[] = ['sms', 'token', 'bilibili'];
+
 export default function LoginScreen() {
   const navigation = useNavigation();
   const settings = useSettingsStore((state) => state.settings);
@@ -197,6 +201,57 @@ export default function LoginScreen() {
    * 横屏下表单最大宽度 560、水平居中，不会被拉伸成难看的长条（见 styles.content）。
    */
   const [mode, setMode] = useState<LoginMode>('sms');
+  /**
+   * 三个登录方式支持左右滑切换（用户 2026-11-09）。
+   *
+   * 不用横向分页 ScrollView：三张卡高度差很大（短信卡有验证码+人机校验，Token 卡只有两行），
+   * 分页容器会被最高那张撑开、矮卡下面留一大片空白。这里用「滑出手势 + 位移动画」，
+   * 高度始终跟随当前这张卡，切换时左右滑出/滑入（原生驱动，不卡）。
+   */
+  const modeSlide = useRef(new Animated.Value(0)).current;
+  const modeRef = useRef<LoginMode>('sms');
+  modeRef.current = mode;
+
+  const switchMode = useCallback(
+    (next: LoginMode, dir?: 1 | -1) => {
+      if (next === modeRef.current) return;
+      const from = LOGIN_MODES.indexOf(modeRef.current);
+      const to = LOGIN_MODES.indexOf(next);
+      const d: 1 | -1 = dir ?? (to > from ? 1 : -1);
+      // 先滑出到 -56，再换内容 → 从 +56 弹回 0：手势方向与内容移动方向一致
+      modeSlide.stopAnimation();
+      Animated.timing(modeSlide, { toValue: d * -56, duration: 110, useNativeDriver: true }).start(() => {
+        setMode(next);
+        modeRef.current = next;
+        modeSlide.setValue(d * 56);
+        Animated.spring(modeSlide, { toValue: 0, tension: 240, friction: 26, useNativeDriver: true }).start();
+      });
+    },
+    [modeSlide],
+  );
+  const switchModeRef = useRef(switchMode);
+  switchModeRef.current = switchMode;
+
+  /**
+   * 整屏横划切换（用户 2026-11-09：「整个屏幕的位置都可以滑」）。
+   *
+   * 用 **capture** 阶段接管：垂直 ScrollView 会在移动时抢手势，只有父级在 capture 里先认领才抢得到。
+   * 阈值 24dp 且横向位移明显大于纵向 1.5 倍 —— 垂直滚动、点击、长按都不受影响。
+   */
+  const modePan = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => false,
+      onStartShouldSetPanResponderCapture: () => false,
+      onMoveShouldSetPanResponderCapture: (_, g) =>
+        Math.abs(g.dx) > 24 && Math.abs(g.dx) > Math.abs(g.dy) * 1.5,
+      onPanResponderRelease: (_, g) => {
+        if (Math.abs(g.dx) < 40) return;
+        const idx = LOGIN_MODES.indexOf(modeRef.current);
+        const next = LOGIN_MODES[idx + (g.dx < 0 ? 1 : -1)];
+        if (next) switchModeRef.current(next, g.dx < 0 ? 1 : -1);
+      },
+    }),
+  ).current;
   const [phone, setPhone] = useState('');
   const [area, setArea] = useState('86');
   const [code, setCode] = useState('');
@@ -534,6 +589,7 @@ export default function LoginScreen() {
     <KeyboardAvoidingView
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       style={styles.container}
+      {...modePan.panHandlers}
     >
     <ScrollView style={[styles.container, { backgroundColor: usePageBackground() }]} contentContainerStyle={styles.content} keyboardShouldPersistTaps="handled">
       <ScreenHeader title={t('账号设置')} />
@@ -543,13 +599,15 @@ export default function LoginScreen() {
         <GlassSegmented
           options={SEGMENTS.map((seg) => ({ key: String(seg.key), label: seg.label }))}
           value={String(mode)}
-          onChange={(k) => setMode(k as typeof mode)}
+          onChange={(k) => switchMode(k as LoginMode)}
           height={38}
           style={{ marginBottom: 12 }}
         />
       </FadeInView>
 
       <FadeInView delay={80} duration={300} distance={8}>
+        {/* 三个登录方式：可左右滑切换（手势挂在外层整屏上，这里只负责切页时的位移动画） */}
+        <Animated.View style={{ transform: [{ translateX: modeSlide }] }}>
         {/* 短信验证码登录 */}
         {mode === 'sms' ? (
           <GlassSurface radius={20} role="card" style={[styles.card, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
@@ -668,6 +726,7 @@ export default function LoginScreen() {
             {status && mode === 'bilibili' ? <Text style={[styles.status, { color: palette.labelSecondary }]}>{status}</Text> : null}
           </GlassSurface>
         ) : null}
+        </Animated.View>
 
         {/* 口袋账号切换：账户行卡列表 */}
         <GlassSurface radius={20} role="card" style={[styles.card, { backgroundColor: 'transparent', borderColor: palette.hairline, borderWidth: StyleSheet.hairlineWidth }]}>
@@ -797,11 +856,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
   },
   segmentItemActive: {
-    shadowColor: '#000',
-    shadowOpacity: 0.08,
-    shadowRadius: 6,
-    shadowOffset: { width: 0, height: 2 },
-    elevation: 2,
+    // 扁平化：选中块不再投影
   },
   segmentText: { fontSize: 14, fontWeight: '700' },
   // 卡片

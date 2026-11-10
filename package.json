@@ -1,16 +1,16 @@
 {
   "name": "yaya-msg-x",
-  "version": "2.7.5",
+  "version": "3.0.0",
   "description": "牙牙消息 X —— 口袋48 第三方 React Native 移动客户端（独立衍生项目）",
-  "homepage": "https://github.com/xuqinghhh/yaya_msg_mobile",
+  "homepage": "https://github.com/wildfffire/yaya_msg_mobile",
   "repository": {
     "type": "git",
-    "url": "https://github.com/xuqinghhh/yaya_msg_mobile"
+    "url": "https://github.com/wildfffire/yaya_msg_mobile"
   },
   "bugs": {
-    "url": "https://github.com/xuqinghhh/yaya_msg_mobile/issues"
+    "url": "https://github.com/wildfffire/yaya_msg_mobile/issues"
   },
-  "author": "xuqinghhh",
+  "author": "wildfffire",
   "license": "GPL-3.0",
   "private": true,
   "main": "index.ts",
@@ -29,7 +29,7 @@
     "build:android:copy": "node scripts/build-apk.js",
     "gen:wasm": "node scripts/gen-wasm-base64.mjs",
     "verify:version": "node scripts/verify-version.js",
-    "test:core": "node scripts/melee-parse.test.mjs && node scripts/network-request.test.mjs",
+    "test:core": "node scripts/melee-parse.test.mjs && node scripts/network-request.test.mjs && node scripts/media-duration.test.mjs && node scripts/audio-duration.test.mjs && node scripts/network-timeout.test.mjs && node scripts/async-guards.test.mjs && node scripts/room-media-rules.test.mjs && node scripts/room-media-scan.test.mjs && node scripts/room-reply.test.mjs && node scripts/room-time-rules.test.mjs && node scripts/room-unread-rules.test.mjs && node scripts/room-list-sort.test.mjs && node scripts/room-lastseen.test.mjs && node scripts/room-idle-notice.test.mjs && node scripts/room-list-avatar-rules.test.mjs && node scripts/live-carousel.test.mjs && node scripts/image-pager-rules.test.mjs && node scripts/room-scroll-anchor.test.mjs && node scripts/watch-dedupe.test.mjs && node scripts/home-lives.test.mjs && node scripts/watch-enrich.sim.mjs && node scripts/flip-card.test.mjs && node scripts/chrome-scroll.test.mjs && node scripts/member-data-guard.test.mjs && node scripts/room-churn-audit.js && node scripts/room-churn-sim.mjs && node scripts/emoji-text.test.mjs && node scripts/richtext.test.mjs && node scripts/gift-barrage.test.mjs && node scripts/mask-words.test.mjs && node scripts/theme-colors.test.mjs && node scripts/team-colors.test.mjs && node scripts/room-pinned.test.mjs && node scripts/room-new-messages.test.mjs && node scripts/netface-rules.test.mjs && node scripts/room-message-cursor.test.mjs && node scripts/notify-owner-rules.test.mjs && node scripts/notify-rules.test.mjs && node scripts/check-i18n-coverage.js",
     "typecheck": "tsc --noEmit && node scripts/verify-version.js"
   },
   "dependencies": {
@@ -49,10 +49,12 @@
     "expo-media-library": "~55.0.21",
     "expo-screen-orientation": "~55.0.20",
     "expo-status-bar": "~55.0.6",
+    "liquid-glass-native": "file:./modules/liquid-glass-native",
     "pako": "^3.0.1",
     "qrcode": "^1.5.4",
     "react": "19.2.0",
     "react-native": "0.83.10",
+    "react-native-draggable-flatlist": "^4.0.3",
     "react-native-gesture-handler": "~2.30.0",
     "react-native-keyboard-controller": "^1.22.5",
     "react-native-liquid-glassmorphism": "^1.2.1",
@@ -63,8 +65,7 @@
     "react-native-video": "^6.19.2",
     "react-native-webview": "13.16.0",
     "react-native-worklets": "0.7.4",
-    "zustand": "^5.0.12",
-    "liquid-glass-native": "file:./modules/liquid-glass-native"
+    "zustand": "^5.0.12"
   },
   "devDependencies": {
     "@react-native-community/cli": "^20.1.3",

@@ -9,6 +9,7 @@ import {
   Alert,
   FlatList,
   Image,
+  AppState,
   Linking,
   StyleSheet,
   Text,
@@ -30,13 +31,16 @@ import { HeaderAction } from '../components/HeaderAction';
 import { formatTimestamp , toMs } from '../utils/format';
 import { parseDurationSeconds } from '../utils/duration';
 import { errorMessage, messagePayload, messageText, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
+import { replaceEmojiText } from '../utils/emoji';
 import pocketApi from '../api/pocket48';
+import { checkMaskWords } from '../services/maskWords';
 import { usePalette, usePageBackground } from '../theme';
 import { useResolvedTheme } from '../hooks/useAppTheme';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { translate, useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
 import { thumbUrl, AVATAR_THUMB_WIDTH } from '../utils/imageThumb';
+import { buildMemberLookup, findMemberByHint } from '../utils/memberMatch';
 
 function convTargetId(conv: any): string {
   return String(conv?.targetUserId || conv?.user?.userId || conv?.userId || '');
@@ -79,7 +83,20 @@ function isMineMessage(msg: any, targetId: string, currentUserId = ''): boolean 
   return false;
 }
 
+/**
+ * 私信正文（**出口统一过一次表情替换**）。
+ *
+ * 用户反馈（2026-09-29）：「房间里还是有表情识别不出来，只显示 [示爱]」。
+ * 本函数有 8 条 return 分支（正文 / 翻牌问答 / JSON 里的 answer / 媒体占位…），
+ * 早期只在部分分支替换 → 其余分支把 `[示爱]` 原样糊到屏幕上。
+ * 包在最外层是最省事也最不会漏的收口：任何新增分支都自动覆盖。
+ * 替换幂等（emoji 不含方括号），对 `[语音消息]` 这类占位文案无影响。
+ */
 function privateMessageText(msg: any): string {
+  return replaceEmojiText(privateMessageTextRaw(msg));
+}
+
+function privateMessageTextRaw(msg: any): string {
   const payload = messagePayload(msg);
   const text = messageText(msg) || pickText(msg, ['content.text', 'text', 'message', 'msg'])
     || pickText(payload, ['text', 'content', 'message.text', 'msg.text']) || '';
@@ -305,6 +322,12 @@ export default function PrivateMessagesScreen() {
   const resolvedTheme = useResolvedTheme();
   const { t } = useI18n();
   const members = useMemberStore((s) => s.members);
+  /**
+   * 成员索引（全仓唯一口径 `utils/memberMatch`，O(1)）。
+   * 会话列表每一行都要按目标 id 查成员头像 —— 以前是 `members.find(...)`，
+   * 一行一次全库线性扫描（会话多 + 成员库近千人时明显发涩）。
+   */
+  const memberLookup = useMemo(() => buildMemberLookup(members), [members]);
   const showToast = useUiStore((s) => s.showToast);
   const [convs, setConvs] = useState<any[]>([]);
   const [hasMoreConvs, setHasMoreConvs] = useState(false);
@@ -395,6 +418,19 @@ export default function PrivateMessagesScreen() {
   // ⚠️ 必须挂在组件顶层 —— 之前误放进条件分支（列表/会话两个 return），钩子数量随分支变化直接崩
   const keyboardHeight = useKeyboardHeight();
   const [msgs, setMsgs] = useState<any[]>([]);
+  /**
+   * 会话消息加载失败（建议 9）：以前只弹 toast —— 网络不好时这一屏直接空白，
+   * 用户没有任何重试入口，只能退出去重进。现在聊天区上方挂一条带「重试」的横幅。
+   */
+  const [msgError, setMsgError] = useState('');
+  /**
+   * 供「回前台自动刷新」effect 取用的最新函数/会话。
+   * 用 ref 而不是把它们塞进依赖：那两个函数每次渲染都是新引用，放依赖里监听会反复重建。
+   */
+  const loadConvsRef = useRef<((initial?: boolean) => void) | null>(null);
+  const openConvRef = useRef<((c: any) => void) | null>(null);
+  const selRef = useRef<any>(null);
+  selRef.current = sel;
   const [text, setText] = useState('');
   const [uid, setUid] = useState('');
   const token = useSettingsStore((s) => s.settings.p48Token);
@@ -424,15 +460,104 @@ export default function PrivateMessagesScreen() {
   const selTargetId = String(sel ? convTargetId(sel) : '').trim();
   const member = useMemo(() => {
     if (!selTargetId) return null;
-    return (
-      members.find((m: any) =>
-        [m?.id, m?.userId, m?.memberId].some((v) => {
-          const s = String(v ?? '').trim();
-          return !!s && s === selTargetId;
-        }),
-      ) || null
-    );
-  }, [members, selTargetId]);
+    /**
+     * 走全仓唯一的成员索引（`utils/memberMatch`，O(1)）。
+     * 以前是 `members.find(...)`：每次会话切换 / 成员库变化都把整个成员库线性扫一遍。
+     * ⚠️ id 为空必须直接 null —— `findMemberByHint` 会过滤空值，
+     *    不会匹配到 userId 为空的成员记录（否则粉丝会话会被误判成成员）。
+     */
+    return findMemberByHint(memberLookup, { userId: selTargetId });
+  }, [memberLookup, selTargetId]);
+
+  /**
+   * 聊天行 → 聊天库消息。
+   *
+   * 原实现在 `if (sel) {` 块里**直接算**，带来两个浪费：
+   *   ① 输入框每敲一个字（`setText` → 重渲染）都会重算整段：排序全部消息 + 重建全部行
+   *      —— 消息多的会话里，打字会明显发涩（用户反馈的「打字卡」）；
+   *   ② 每条消息要**连调 3 次** `privateMessageMedia`（图片/语音/视频各判一次）。
+   *
+   * 收敛到这里：只在会话、消息、身份、成员资料、语言变化时重算，且每条消息只解析一次媒体。
+   * 逻辑与原来逐行一致（含注释里记录的那些「别再改回去」的坑）。
+   */
+  const chatIms = useMemo<any[]>(() => {
+    if (!sel) return [];
+    const targetId = convTargetId(sel);
+    // 聊天行数据：按天插入日期分隔条 + 3 分钟内同侧消息分组（组内连排小圆角）
+    const pad2 = (n: number) => (n < 10 ? `0${n}` : String(n));
+    const dayKeyOf = (ts: number) => {
+      const d = new Date(toMs(ts));
+      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+    };
+    const todayK = dayKeyOf(Date.now());
+    const yesterdayK = dayKeyOf(Date.now() - 86400000);
+    const dayLabel = (ts: number) => {
+      const k = dayKeyOf(ts);
+      if (k === todayK) return t('今天');
+      if (k === yesterdayK) return t('昨天');
+      return `${pad2(new Date(toMs(ts)).getMonth() + 1)}-${pad2(new Date(toMs(ts)).getDate())}`;
+    };
+    const chatRows: { type: 'date' | 'msg'; key: string; label?: string; item?: any; groupStart?: boolean }[] = [];
+    let prevDay = '';
+    let prevMine: boolean | null = null;
+    let prevTs = 0;
+    // 统一按时间正序（旧→新）喂给聊天库：接口返回可能是「新→旧」，
+    // 不排序会让最新一条回复跑到列表最上面（用户反馈「最新回复消息是反过来的」）
+    // ⚠️ 聊天库默认 inverted=true：FlatList 反转渲染，**数组第 0 项显示在最下面**。
+    // 所以 messages 必须是「新的在前（倒序）」——第十批我误改成 oldestFirst(正序)，
+    // 结果最旧的沉底、最新的跑到最上面（用户反馈「她的消息在我的消息上面」就是这个）。
+    // 排序键与 createdAt 用同一套「秒→毫秒」归一化，避免顺序与气泡显示的时间对不上。
+    [...msgs].sort((a: any, b: any) => {
+      const va = msgTimeNumber(a); const vb = msgTimeNumber(b);
+      const ka = va > 0 && va < 1e12 ? va * 1000 : va;
+      const kb = vb > 0 && vb < 1e12 ? vb * 1000 : vb;
+      return kb - ka;
+    }).forEach((item) => {
+      const ts = msgTimeNumber(item);
+      const mine = isMineMessage(item, targetId, uid);
+      const dk = dayKeyOf(ts);
+      if (dk !== prevDay) {
+        chatRows.push({ type: 'date', key: `d-${dk}`, label: dayLabel(ts) });
+        prevDay = dk;
+        prevMine = null;
+        prevTs = 0;
+      }
+      const groupStart = prevMine === null || prevMine !== mine || ts - prevTs > 3 * 60 * 1000;
+      chatRows.push({ type: 'msg', key: `m-${msgId(item)}`, item, groupStart });
+      prevMine = mine;
+      prevTs = ts;
+    });
+    // ── 聊天库接线（A+B）：行 → IMessage（original/groupStart 透传） ──
+    // 日期分隔交给聊天库自带（renderDay），这里只喂真实消息。
+    // ⚠️ 两个必须：① user._id 按真实发送者（库按它决定左右）② createdAt 归一化到毫秒
+    //（接口给的是秒，直接 new Date(秒) 会变成 1970）
+    const peerAvatar = (member as any)?.avatar || (member as any)?.avatarUrl || '';
+    const peerName = convName(sel);
+    return chatRows
+      .filter((row) => row.type === 'msg')
+      .map((row) => {
+        const mine = isMineMessage(row.item, targetId, uid);
+        const tsMs = msgTimeNumber(row.item);
+        // 每条消息只解析一次媒体（原来是图片/语音/视频各调一次 = 3 次）
+        const media = privateMessageMedia(row.item);
+        return {
+          _id: row.key,
+          text: privateMessageText(row.item) || '',
+          createdAt: new Date(tsMs < 1e12 ? tsMs * 1000 : tsMs),
+          user: {
+            _id: mine ? 'SELF' : String(targetId || 'peer'),
+            ...(mine ? {} : { avatar: peerAvatar, name: peerName }),
+          },
+          original: row.item,
+          groupStart: row.groupStart,
+          isMine: mine,
+          // 交给库自带的媒体渲染
+          ...(media?.type === 'image' ? { image: media.url } : {}),
+          ...(media?.type === 'audio' ? { audio: media.url } : {}),
+          ...(media?.type === 'video' ? { video: media.url } : {}),
+        };
+      });
+  }, [sel, msgs, uid, member, t]);
 
   useEffect(() => { loadConvs(); }, []);
 
@@ -502,6 +627,7 @@ export default function PrivateMessagesScreen() {
     const requestId = ++convRequestIdRef.current;
     setSel(c); setMsgs([]); setNextTime(0); setHasMore(false); setFlipType(0); setPlayUrl('');
     setLoading(true);
+    setMsgError('');
     if (scrollTimerRef.current) { clearTimeout(scrollTimerRef.current); scrollTimerRef.current = null; }
     try {
       if (!uid) {
@@ -519,17 +645,45 @@ export default function PrivateMessagesScreen() {
       scrollTimerRef.current = setTimeout(() => flatRef.current?.scrollToEnd?.({ animated: false }), 150);
     } catch (e) {
       if (requestId !== convRequestIdRef.current) return;
+      // 留痕 + 给重试入口：只弹 toast 的话这屏就停在空白了（断网场景最常见）
+      setMsgError(errorMessage(e));
       showToast(t('加载失败：{msg}', { msg: errorMessage(e) }));
     } finally {
       if (requestId === convRequestIdRef.current) setLoading(false);
     }
   };
 
+  loadConvsRef.current = loadConvs;
+  openConvRef.current = openConv;
+  /**
+   * 回前台自动刷新（建议 9「断网重连自动刷新」）。
+   *
+   * 为什么需要：手机切后台/断网后 JS 定时器与在途请求都会停 —— 什么都不做的话，
+   * 回到 App 看到的还是断网那一刻的会话列表与消息（用户体感「半天不更新，得手动刷新」）。
+   * 这里回前台静默重拉一次：会话列表刷新；当前开着的会话重拉首屏消息
+   *（重拉失败会在聊天区上方显示带「重试」的横幅，不会静默空白）。
+   */
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (next) => {
+      if (next !== 'active') return;
+      loadConvsRef.current?.(false);
+      const cur = selRef.current;
+      if (cur) openConvRef.current?.(cur);
+    });
+    return () => sub.remove();
+  }, []);
+
   const loadMore = async () => {
     if (!sel || loading || !hasMore || !nextTime) return;
+    // 会话代次：这里只**捕获**、不递增 —— 递增代表「进了一个新会话」，那是 openConv 的职责。
+    // 没有这道守卫时的真实故障（`openConv` 有守卫、`loadMore` 漏了）：
+    //   上滑加载历史（await 中）→ 切到另一个会话 → 旧会话的历史被 setMsgs 追加进新会话（串台），
+    //   并且旧的 nextTime / hasMore 会覆盖新会话的分页状态。
+    const requestId = convRequestIdRef.current;
     setLoading(true);
     try {
       const res = await pocketApi.getPrivateMessageDetail(convTargetId(sel), nextTime);
+      if (requestId !== convRequestIdRef.current) return; // 已切换会话，丢弃慢响应
       const list = unwrapList(res, ['content.messageList', 'content.messages', 'content.list', 'messageList', 'list']);
       if (!list.length) { setHasMore(false); return; }
       const older = oldestFirst(list, msgTimeNumber);
@@ -542,8 +696,11 @@ export default function PrivateMessagesScreen() {
       setNextTime(nextCursor);
       // 游标无前进时终止（防恒定游标死循环）
       setHasMore(list.length > 0 && nextCursor > 0 && nextCursor !== nextTime);
-    } catch (e) { showToast(t('历史加载失败：{msg}', { msg: errorMessage(e) })); }
-    finally { setLoading(false); }
+    } catch (e) {
+      if (requestId !== convRequestIdRef.current) return; // 旧会话的失败不该弹在新会话上
+      showToast(t('历史加载失败：{msg}', { msg: errorMessage(e) }));
+    }
+    finally { if (requestId === convRequestIdRef.current) setLoading(false); }
   };
 
   /**
@@ -641,6 +798,12 @@ export default function PrivateMessagesScreen() {
 
   const doSend = async (override?: string) => {    const txt = String(override ?? text).trim();
     if (!txt || !sel) return;
+    // 屏蔽词拦截（翻牌提问 / 私信共用）：命中就停下，不做无谓的扣费与请求
+    const masked = await checkMaskWords(txt);
+    if (masked.length) {
+      showToast(t('包含屏蔽词：{words}', { words: masked.join('、') }));
+      return;
+    }
     setLoading(true);
     try {
       if (flipType && member) {
@@ -671,79 +834,6 @@ export default function PrivateMessagesScreen() {
   };
 
   if (sel) {
-    const targetId = convTargetId(sel);
-    // 聊天行数据：按天插入日期分隔条 + 3 分钟内同侧消息分组（组内连排小圆角）
-    const pad2 = (n: number) => (n < 10 ? `0${n}` : String(n));
-    const dayKeyOf = (ts: number) => {
-      const d = new Date(toMs(ts));
-      return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
-    };
-    const todayK = dayKeyOf(Date.now());
-    const yesterdayK = dayKeyOf(Date.now() - 86400000);
-    const dayLabel = (ts: number) => {
-      const k = dayKeyOf(ts);
-      if (k === todayK) return t('今天');
-      if (k === yesterdayK) return t('昨天');
-      return `${pad2(new Date(toMs(ts)).getMonth() + 1)}-${pad2(new Date(toMs(ts)).getDate())}`;
-    };
-    const chatRows: { type: 'date' | 'msg'; key: string; label?: string; item?: any; groupStart?: boolean }[] = [];
-    let prevDay = '';
-    let prevMine: boolean | null = null;
-    let prevTs = 0;
-    // 统一按时间正序（旧→新）喂给聊天库：接口返回可能是「新→旧」，
-    // 不排序会让最新一条回复跑到列表最上面（用户反馈「最新回复消息是反过来的」）
-    // ⚠️ 聊天库默认 inverted=true：FlatList 反转渲染，**数组第 0 项显示在最下面**。
-    // 所以 messages 必须是「新的在前（倒序）」——第十批我误改成 oldestFirst(正序)，
-    // 结果最旧的沉底、最新的跑到最上面（用户反馈「她的消息在我的消息上面」就是这个）。
-    // 排序键与 createdAt 用同一套「秒→毫秒」归一化，避免顺序与气泡显示的时间对不上。
-    [...msgs].sort((a: any, b: any) => {
-      const va = msgTimeNumber(a); const vb = msgTimeNumber(b);
-      const ka = va > 0 && va < 1e12 ? va * 1000 : va;
-      const kb = vb > 0 && vb < 1e12 ? vb * 1000 : vb;
-      return kb - ka;
-    }).forEach((item, i) => {
-      const ts = msgTimeNumber(item);
-      const mine = isMineMessage(item, targetId, uid);
-      const dk = dayKeyOf(ts);
-      if (dk !== prevDay) {
-        chatRows.push({ type: 'date', key: `d-${dk}`, label: dayLabel(ts) });
-        prevDay = dk;
-        prevMine = null;
-        prevTs = 0;
-      }
-      const groupStart = prevMine === null || prevMine !== mine || ts - prevTs > 3 * 60 * 1000;
-      chatRows.push({ type: 'msg', key: `m-${msgId(item)}`, item, groupStart });
-      prevMine = mine;
-      prevTs = ts;
-    });
-    // ── 聊天库接线（A+B）：行 → IMessage（original/groupStart 透传） ──
-    // 日期分隔交给聊天库自带（renderDay），这里只喂真实消息。
-    // ⚠️ 两个必须：① user._id 按真实发送者（库按它决定左右）② createdAt 归一化到毫秒
-    //（接口给的是秒，直接 new Date(秒) 会变成 1970）
-    const ims: any[] = chatRows
-      .filter((row) => row.type === 'msg')
-      .map((row) => {
-        const mine = isMineMessage(row.item, targetId, uid);
-        const t = msgTimeNumber(row.item);
-        /** 对方头像：成员资料里的 avatar（会话页从 members 里按目标 id 取） */
-        const peerAvatar = (member as any)?.avatar || (member as any)?.avatarUrl || '';
-        return {
-          _id: row.key,
-          text: privateMessageText(row.item) || '',
-          createdAt: new Date(t < 1e12 ? t * 1000 : t),
-          user: {
-            _id: mine ? 'SELF' : String(targetId || 'peer'),
-            ...(mine ? {} : { avatar: peerAvatar, name: convName(sel) }),
-          },
-          original: row.item,
-          groupStart: row.groupStart,
-          isMine: mine,
-          // 交给库自带的媒体渲染
-          ...(privateMessageMedia(row.item)?.type === 'image' ? { image: privateMessageMedia(row.item)!.url } : {}),
-          ...(privateMessageMedia(row.item)?.type === 'audio' ? { audio: privateMessageMedia(row.item)!.url } : {}),
-          ...(privateMessageMedia(row.item)?.type === 'video' ? { video: privateMessageMedia(row.item)!.url } : {}),
-        };
-      });
 
     /**
      * 日期分隔：统一纯数字 yyyy/mm/dd（库自带的 zh 输出是「14 9月」这种不符合中文习惯的格式）
@@ -807,7 +897,6 @@ export default function PrivateMessagesScreen() {
               inline
               source={{ kind: media.type === 'audio' ? 'audio' : 'vod', url: media.url }}
               meta={{ title: t('消息媒体') }}
-              persistent
             />
           ) : null}
           {hh ? (
@@ -866,7 +955,6 @@ export default function PrivateMessagesScreen() {
                 inline
                 source={{ kind: media!.type === 'audio' ? 'audio' : 'vod', url: media!.url }}
                 meta={{ title: t('消息媒体') }}
-                persistent
               />
             ) : null}
             <Text style={[styles.msgTime, mine && { color: 'rgba(255,255,255,0.75)' }, !mine && { color: palette.labelTertiary }]}>
@@ -882,10 +970,27 @@ export default function PrivateMessagesScreen() {
       <View style={styles.screenContainer}>
         <View style={[styles.screen, { backgroundColor: usePageBackground(), paddingBottom: keyboardHeight }]}>
         <ScreenHeader title={convName(sel)} onBack={() => setSel(null)} />
+        {/* 消息加载失败 + 重试（建议 9）：首次拉取失败时聊天区是空的，
+            只弹一次 toast 用户再也找不到出路，这条横幅把重试入口留在屏幕上 */}
+        {msgError ? (
+          <View style={[styles.msgErrorBar, { backgroundColor: palette.fill2, borderColor: palette.hairline }]}>
+            <MaterialCommunityIcons name="alert-circle-outline" size={16} color={palette.tint} />
+            <Text style={[styles.msgErrorText, { color: palette.labelSecondary }]} numberOfLines={2}>
+              {t('消息加载失败：{msg}', { msg: msgError })}
+            </Text>
+            <TouchableOpacity
+              onPress={() => openConv(sel)}
+              activeOpacity={0.85}
+              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            >
+              <Text style={[styles.msgErrorRetry, { color: palette.tint }]}>{t('重试')}</Text>
+            </TouchableOpacity>
+          </View>
+        ) : null}
         {/* 官方 demo 用法：只给 messages / user / onSend，其余全用库默认（气泡、日期、输入条） */}
         <View style={{ flex: 1 }}>
         <Chat
-          messages={ims}
+          messages={chatIms}
           /* ⚠️ colorScheme 跟 App 的 resolvedTheme：库内部自己读系统深浅色，夜间系统
              进深色会走 darkTheme 分支丢弃下面浅色槽的透明背景 → 列表区黑底盖住背景
              （与房间页同一问题，2026-09-26 修复）。theme/darkTheme 两槽都给透明背景。 */
@@ -1003,7 +1108,7 @@ export default function PrivateMessagesScreen() {
             const isPinned = pinnedConvs.includes(convTargetId(conv));
             // 真实成员头像：按会话目标 id 从成员库匹配；无头像时回落首字母
             const convTarget = String(convTargetId(conv));
-            const convMember = members.find((m: any) => String(m.id || m.userId || m.memberId) === convTarget);
+            const convMember = findMemberByHint(memberLookup, { userId: convTarget });
             const convAvatarUrl = (convMember as any)?.avatar || (convMember as any)?.avatarUrl || '';
             return (
               <FadeInView delay={index < 12 ? 80 + index * 30 : 0} duration={300}>
@@ -1107,6 +1212,14 @@ export default function PrivateMessagesScreen() {
 }
 
 const styles = StyleSheet.create({
+  /** 会话消息加载失败横幅（建议 9）：文案 + 右侧「重试」 */
+  msgErrorBar: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+    marginHorizontal: 12, marginTop: 6, paddingHorizontal: 12, paddingVertical: 8,
+    borderRadius: 12, borderWidth: StyleSheet.hairlineWidth,
+  },
+  msgErrorText: { flex: 1, fontSize: 12, lineHeight: 17 },
+  msgErrorRetry: { fontSize: 13, fontWeight: '800' },
   screen: { flex: 1 },
   screenContainer: { flex: 1 },
   convList: { paddingHorizontal: 16, paddingTop: 4, paddingBottom: 16 },

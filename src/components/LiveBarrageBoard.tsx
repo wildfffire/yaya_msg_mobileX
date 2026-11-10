@@ -15,9 +15,8 @@
  *       这里沿用播放器覆盖层的既有做法使用半透明底）
  */
 
-import React, { useCallback, useMemo, useRef, useState } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
-  FlatList,
   Keyboard,
   StyleSheet,
   Text,
@@ -29,8 +28,10 @@ import {
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { GlassSurface } from './GlassSurface';
+import { PerfFlatList } from './PerfFlatList';
 import { useLiveBarrage, type UseLiveBarrageResult } from '../hooks/useLiveBarrage';
 import { BarrageItem } from '../services/pocketNim/types';
+import { replaceEmojiText } from '../utils/emoji';
 import { useI18n } from '../i18n';
 import { usePalette } from '../theme';
 
@@ -70,7 +71,6 @@ export function LiveBarrageBoard(props: LiveBarrageBoardProps) {
   const palette = usePalette();
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
-  const lastFailedRef = useRef('');
   const [hint, setHint] = useState('');
 
   const plain = variant === 'plain';
@@ -140,7 +140,8 @@ export function LiveBarrageBoard(props: LiveBarrageBoardProps) {
       <View style={styles.row}>
         <Text style={[styles.rowText, { color: itemColor(item.kind) }]} numberOfLines={1}>
           {item.nick ? <Text style={styles.nick}>{`${item.nick}：`}</Text> : null}
-          {item.text}
+          {/* 收口：昵称以外的正文一律过表情替换（上游 codec 已做，这里防新增来源漏网） */}
+          {replaceEmojiText(item.text)}
         </Text>
       </View>
     ),
@@ -223,7 +224,9 @@ export function LiveBarrageBoard(props: LiveBarrageBoardProps) {
   ) : (
     <>
       {header}
-      <FlatList
+      {/* 用项目自带的 PerfFlatList（内建 windowSize / maxToRenderPerBatch / 安卓回收裁剪），
+          弹幕榜刷到几百条时明显更省内存；其它 props 原样透传 */}
+      <PerfFlatList
         data={items}
         renderItem={renderItem}
         keyExtractor={(item) => item.id}

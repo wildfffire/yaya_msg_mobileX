@@ -2,9 +2,12 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
+  ActivityIndicator,
   BackHandler,
   Image,
   Linking,
+  Modal,
+  ScrollView,
   StyleSheet,
   Text,
   TextInput,
@@ -31,10 +34,12 @@ import {
   type PerformanceShow,
 } from '../services/performanceSchedule';
 import { errorMessage, normalizeUrl, parseMaybeJson, pickText, unwrapList } from '../utils/data';
+import { buildMemberLookup, pickMemberUserId, resolveTeam, type MemberLookup } from '../utils/memberMatch';
 import { formatTimestamp } from '../utils/format';
 import { usePalette } from '../theme';
 import { GlassSurface } from '../components/GlassSurface';
 import PerformanceStrip from '../components/PerformanceStrip';
+import { UserProfileSheet, type UserProfileTarget } from '../components/UserProfileSheet';
 
 interface OpenLiveItem {
   key: string;
@@ -42,9 +47,25 @@ interface OpenLiveItem {
   pageId: string;
   title: string;
   nickname: string;
+  /** 成员数字 id（能拿到就存）：队伍反查与「写进历史后仍能补出队伍」的稳定依据 */
+  userId: string;
   cover: string;
   msgTime: number;
   raw: any;
+}
+
+/** 成员榜一行（`getOpenLiveParticipants` → 归一化 + 成员库补全） */
+interface ParticipantRow {
+  key: string;
+  name: string;
+  avatar: string;
+  team: string;
+  /** 贡献值（接口 `hot`，可能为空） */
+  hot: string;
+  /** 排名（接口 `rank`，非法值按 null 处理，排最后） */
+  rank: number | null;
+  userId: string;
+  memberId: string;
 }
 
 function parseExtInfo(item: any) {
@@ -74,6 +95,8 @@ function normalizeOpenLiveMessage(item: any, index: number): OpenLiveItem | null
   if (!liveId && !pageId) return null;
   const title = String(info.title || info.liveTitle || item?.title || translate('公演记录'));
   const nickname = String(info.user?.nickname || info.nickname || info.memberName || info.ownerName || '');
+  // 成员数字 id：extInfo 里的 user.userId / userId（拿不到就留空，仍可按昵称归一化反查）
+  const userId = String(pickMemberUserId(info) || pickMemberUserId(item) || '');
   const msgTime = messageTime(item);
   const msgId = String(item?.msgidClient || item?.msgId || item?.messageId || item?.id || '');
   return {
@@ -82,6 +105,7 @@ function normalizeOpenLiveMessage(item: any, index: number): OpenLiveItem | null
     pageId: pageId || liveId,
     title,
     nickname,
+    userId,
     cover: normalizeCover(String(info.coverUrl || info.coverPath || info.picPath || '')),
     msgTime,
     raw: item,
@@ -165,13 +189,22 @@ export default function OpenLiveScreen() {
   const { t } = useI18n();
   const showToast = useUiStore((state) => state.showToast);
   const [member, setMember] = useState<Member | null>(null);
-  /** 昵称 → 成员（队伍应援色标注用）：公演记录可能来自任意成员，按条目昵称反查 */
+  /**
+   * 成员索引（**与写进播放历史的那条链路同一口径**：`utils/memberMatch`）。
+   * 以前这里是「昵称字符串精确相等」的 Map，而列表卡片又用 `|| member?.team`（选中成员）兜底 ——
+   * 于是卡片永远有队伍、写入历史的 meta.team 却常常是空串（用户反馈的历史页没徽章的来源之一）。
+   */
   const allMembers = useMemberStore((s) => s.members);
-  const memberByNickname = useMemo(() => {
-    const map = new Map<string, Member>();
-    for (const m of allMembers) map.set(String(m.ownerName || '').trim(), m);
-    return map;
-  }, [allMembers]);
+  const memberLookup: MemberLookup = useMemo(() => buildMemberLookup(allMembers), [allMembers]);
+  /** 条目 → 队伍（先 userId、后归一化昵称；当前选中成员作为最后兜底） */
+  const teamOfItem = useCallback(
+    (item: OpenLiveItem) => resolveTeam(
+      memberLookup,
+      { userId: item.userId, name: item.nickname },
+      '',
+    ) || String(member?.team || ''),
+    [memberLookup, member],
+  );
   const [items, setItems] = useState<OpenLiveItem[]>([]);
   const [query, setQuery] = useState('');
   const [nextTime, setNextTime] = useState(0);
@@ -179,7 +212,18 @@ export default function OpenLiveScreen() {
   const [loading, setLoading] = useState(false);
   const [status, setStatus] = useState('');
   const [listError, setListError] = useState('');
-  const [playing, setPlaying] = useState<{ url: string; title: string } | null>(null);
+  /**
+   * 播放中的公演回放：带 liveId 以便「历史 / 稍后再看」能记住来源并重新解析地址，
+   * 另带成员昵称与队伍 —— 历史/稍后再看的列表卡片要显示「队伍徽章 + 成员名」。
+   */
+  const [playing, setPlaying] = useState<{ url: string; title: string; liveId: string; owner: string; team: string; ownerId: string; isLive?: boolean } | null>(null);
+  /** 成员榜（公演直播/回放的参与成员） */
+  const [membersVisible, setMembersVisible] = useState(false);
+  const [memberRows, setMemberRows] = useState<ParticipantRow[]>([]);
+  const [memberStatus, setMemberStatus] = useState('');
+  const [memberLoading, setMemberLoading] = useState(false);
+  const [profileTarget, setProfileTarget] = useState<UserProfileTarget | null>(null);
+  const memberReqRef = useRef(0);
   const [upcoming, setUpcoming] = useState<PerformanceShow[]>([]);
   const loadingRef = useRef(false);
 
@@ -275,7 +319,14 @@ export default function OpenLiveScreen() {
       // 原先 rtmp/.flv 分支走原生 LivePlayerActivity 完全脱离 RN，找不到小窗按钮
       // （用户反馈「成员直播小窗在软件内点没用」的真因）。RN 端用同内核 LiveExoView
       // 渲染 rtmp/flv，与 native 播放器画面/音频一致，应用内小窗从此可达。
-      setPlaying({ url, title: item.title });
+      setPlaying({
+        url,
+        title: item.title,
+        liveId: String(item.liveId || ''),
+        owner: String(item.nickname || ''),
+        team: teamOfItem(item),
+        ownerId: String(item.userId || ''),
+      });
       setStatus(t('播放地址已就绪'));
     } catch (error) {
       const text = t('播放失败：{error}', { error: errorMessage(error) });
@@ -283,6 +334,104 @@ export default function OpenLiveScreen() {
       showToast(text);
     }
   };
+
+  /**
+   * 公演**直播**（应用内信号）就地起播 —— 给「即将开演 / 公演直播」卡条用。
+   *
+   * 为什么在应用内播而不是跳 B 站（用户 2026-10-04 要求）：柏欣妤生日会这类场次
+   * 口袋侧本身就是直播（Seine status=2），getOpenLiveOne 直接给 rtmp 流
+   *（cyflv.48.cn 标清/高清），根本不必绕到 B 站；此前卡片一律跳 B 站，
+   * 遇到只开了应用内信号的场次就「看不到」。
+   *
+   * 返回 false 仅表示「这场没有可用 ID」（组件回退 B 站）；解析失败只提示不跳转
+   *（status=2 说明口袋侧确实在直播，失败通常是网络/瞬时错误）。
+   */
+  const playShowLive = useCallback((show: PerformanceShow) => {
+    const liveId = String(show.liveId || '');
+    if (!liveId) return false;
+    setStatus(t('正在解析播放地址...'));
+    (async () => {
+      try {
+        const detail = await pocketApi.getOpenLiveOne(liveId);
+        const url = pickPlayableUrl(detail);
+        if (!url) throw new Error(t('没有解析到播放地址'));
+        setPlaying({
+          url,
+          title: show.title,
+          liveId,
+          owner: '',
+          team: show.teamLabel || '',
+          ownerId: '',
+          isLive: true,
+        });
+        setStatus(t('播放地址已就绪'));
+      } catch (error) {
+        const text = t('播放失败：{error}', { error: errorMessage(error) });
+        setStatus(text);
+        showToast(text);
+      }
+    })();
+    return true;
+  }, [showToast, t]);
+
+  /**
+   * 成员榜：公演直播 / 回放的参与成员（`live.48.cn` 首页的成员热力榜）。
+   * 数据层与桌面端同源（`getOpenLiveParticipants`），这里只做归一化 + 成员库补全队伍/头像，
+   * 并按 `rank` 升序（无 rank 的排最后，显示「—」）。
+   */
+  const loadParticipants = useCallback(async (liveId: string, title: string, dateHint = '') => {
+    const reqId = ++memberReqRef.current;
+    setMemberLoading(true);
+    setMemberRows([]);
+    setMemberStatus(t('正在读取成员榜...'));
+    try {
+      const res: any = await pocketApi.getOpenLiveParticipants(liveId, title, dateHint);
+      if (reqId !== memberReqRef.current) return;
+      const list = unwrapList(res, [
+        'content.participants', 'content.data', 'content.list',
+        'participants', 'data', 'list',
+      ]);
+      const rows: ParticipantRow[] = [];
+      const seen = new Set<string>();
+      list.forEach((raw: any, index: number) => {
+        const name = String(raw?.name || raw?.memberName || raw?.nickname || raw?.starName || '').trim();
+        const userId = pickMemberUserId(raw) || String(raw?.memberId || raw?.userId || raw?.ownerId || '').trim();
+        const memberId = String(raw?.memberId || raw?.userId || raw?.ownerId || '').trim();
+        const member = userId
+          ? allMembers.find((m) => String(m.id) === userId || String((m as any).userId || '') === userId)
+          : undefined;
+        const avatar = normalizeUrl(raw?.avatar || raw?.avatarUrl || raw?.headImg || (member as any)?.avatar || '');
+        const hotRaw = raw?.hot;
+        const hot = hotRaw === '' || hotRaw === undefined || hotRaw === null ? '' : String(hotRaw);
+        const rankNum = Number(raw?.rank);
+        const rank = Number.isInteger(rankNum) && rankNum > 0 ? rankNum : null;
+        const team = resolveTeam(memberLookup, { userId, name }, '') || String((member as any)?.team || '');
+        if (!name && !avatar) return;
+        const key = `${userId || name || 'member'}-${index}`;
+        if (seen.has(key)) return;
+        seen.add(key);
+        rows.push({
+          key,
+          name: name || t('未知成员'),
+          avatar,
+          team,
+          hot,
+          rank,
+          userId,
+          memberId: memberId || userId,
+        });
+      });
+      rows.sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
+      setMemberRows(rows);
+      setMemberStatus(rows.length ? t('共 {count} 位成员', { count: rows.length }) : t('未获取到成员榜'));
+    } catch (error) {
+      if (reqId !== memberReqRef.current) return;
+      setMemberRows([]);
+      setMemberStatus(t('成员榜加载失败：{msg}', { msg: errorMessage(error) }));
+    } finally {
+      if (reqId === memberReqRef.current) setMemberLoading(false);
+    }
+  }, [allMembers, memberLookup, t]);
 
   const downloadItem = async (item: OpenLiveItem) => {
     try {
@@ -295,20 +444,115 @@ export default function OpenLiveScreen() {
   };
 
   if (playing) {
+    /**
+     * 「外部打开」按钮（用户 2026-10-02：「总是有一个外部打开，点也点不了，还在最顶上占住」）。
+     *
+     * 根因：它此前是 PlayerScreen 的 children —— children 渲染在画面层之上、PlayerChrome 之下，
+     * 而 PlayerChrome 的**屏幕点按层**（`Pressable style={absoluteFill}`，负责单击唤出控制条 /
+     * 双击暂停）是在 children **之后**渲染的，等于整个盖在按钮上，把点击全部吃掉（"点也点不了"）；
+     * 同时它钉在容器最顶部、不随控制条自动隐藏（"在最顶上占住"）。
+     *
+     * 现改走 `extraActions`（进右上「…」播放器功能面板）：不再遮挡画面，且真正可点。
+     */
+    const externalAction = {
+      key: 'external',
+      icon: 'open-in-new',
+      label: t('外部打开'),
+      onPress: () => {
+        const target = String(playing.url || '');
+        if (!target) return;
+        Linking.openURL(target).catch(() => showToast(t('这个链接无法直接打开。')));
+      },
+    };
+    /** 成员榜入口（用户 2026-11-08）：只在公演直播/回放里出现，普通成员直播没有这份数据 */
+    const membersAction = {
+      key: 'participants',
+      icon: 'account-group',
+      label: t('成员榜'),
+      onPress: () => {
+        if (!playing.liveId) {
+          showToast(t('该场次没有 liveId，无法读取成员榜'));
+          return;
+        }
+        setMembersVisible(true);
+        void loadParticipants(playing.liveId, playing.title);
+      },
+    };
     // 统一播放器（重写）：公演回放 → PlayerScreen（控制条/全屏/内核切换/错误重试内置）
     return (
       <View style={styles.playerPage}>
         <PlayerScreen
-          source={{ kind: 'vod', url: playing.url, headers: buildPocketHeaders() }}
-          meta={{ title: playing.title }}
+          source={{
+            // 公演直播走 live 语义（无进度条）；公演回放仍是 vod（可拖）
+            kind: playing.isLive ? 'live' : 'vod',
+            url: playing.url,
+            headers: buildPocketHeaders(),
+            // 来源引用：历史记录/稍后再看可凭 liveId 重新解析（地址有时效）
+            ref: playing.liveId ? { kind: 'openlive', id: playing.liveId } : undefined,
+          }}
+          meta={{ title: playing.title, owner: playing.owner, team: playing.team, ownerId: playing.ownerId }}
           features={{ kernelSwitch: true, rate: true }}
+          extraActions={[externalAction, membersAction]}
           onClose={() => setPlaying(null)}
-          persistent
-        >
-          <TouchableOpacity activeOpacity={0.7} style={[styles.externalBtn, { backgroundColor: palette.tint }]} onPress={() => Linking.openURL(String(playing.url || '')).catch(() => {})}>
-            <Text style={[styles.externalText, { color: palette.onTint }]}>{t('外部打开')}</Text>
-          </TouchableOpacity>
-        </PlayerScreen>
+        />
+        {membersVisible ? (
+          <Modal visible transparent animationType="fade" onRequestClose={() => setMembersVisible(false)}>
+            <View style={styles.membersMask}>
+              <TouchableOpacity style={{ flex: 1 }} activeOpacity={1} onPress={() => setMembersVisible(false)} />
+              <View style={[styles.membersSheet, { backgroundColor: palette.surface, borderColor: palette.innerStroke }]}>
+                <View style={styles.membersHead}>
+                  <Text style={[styles.membersTitle, { color: palette.label }]}>{t('成员榜')}</Text>
+                  <TouchableOpacity onPress={() => setMembersVisible(false)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <MaterialCommunityIcons name="close" size={18} color={palette.labelSecondary} />
+                  </TouchableOpacity>
+                </View>
+                <Text style={[styles.membersStatus, { color: palette.labelTertiary }]}>{memberStatus}</Text>
+                {memberLoading ? (
+                  <View style={styles.membersCenter}><ActivityIndicator color={palette.tint} /></View>
+                ) : (
+                  <ScrollView style={styles.membersScroll} contentContainerStyle={styles.membersList}>
+                    {memberRows.map((row) => (
+                      <ScalePressable
+                        key={row.key}
+                        style={[styles.memberChip, { backgroundColor: palette.fill3 }]}
+                        onPress={() => setProfileTarget({ nick: row.name, avatar: row.avatar, userId: row.userId, memberId: row.memberId })}
+                        pressedScale={0.97}
+                      >
+                        <View style={[styles.memberRank, { backgroundColor: row.rank && row.rank <= 3 ? palette.tint : palette.fill2 }]}>
+                          <Text style={[styles.memberRankText, { color: row.rank && row.rank <= 3 ? palette.onTint : palette.labelSecondary }]}>
+                            {row.rank ? String(row.rank) : '—'}
+                          </Text>
+                        </View>
+                        {row.avatar ? (
+                          <Image source={{ uri: row.avatar }} style={styles.memberAvatar} />
+                        ) : (
+                          <View style={[styles.memberAvatar, { backgroundColor: palette.fill2 }]} />
+                        )}
+                        <View style={{ flex: 1, minWidth: 0, marginLeft: 10 }}>
+                          <View style={{ flexDirection: 'row', alignItems: 'center' }}>
+                            <Text style={[styles.memberName, { color: palette.label }]} numberOfLines={1}>{row.name}</Text>
+                            {row.team ? <View style={{ marginLeft: 6 }}><TeamBadge team={row.team} fontSize={9} /></View> : null}
+                          </View>
+                          {row.hot ? (
+                            <Text style={[styles.memberScore, { color: palette.labelTertiary }]} numberOfLines={1}>
+                              {t('贡献值')} {row.hot}
+                            </Text>
+                          ) : null}
+                        </View>
+                        <MaterialCommunityIcons name="chevron-right" size={18} color={palette.labelTertiary} />
+                      </ScalePressable>
+                    ))}
+                  </ScrollView>
+                )}
+              </View>
+            </View>
+          </Modal>
+        ) : null}
+        <UserProfileSheet
+          visible={!!profileTarget}
+          target={profileTarget}
+          onClose={() => setProfileTarget(null)}
+        />
       </View>
     );
   }
@@ -363,7 +607,7 @@ export default function OpenLiveScreen() {
           /* 即将开演：横向排开的剧场场次预告（与首页「公演直播」区块共用 PerformanceStrip）。
              放在列表头而不是固定区 —— 用户往下翻历史记录时它应该跟着滚走，否则永久占掉半屏。
              没有未来场次时组件自身返回 null（不显示空状态，避免在「公演记录」里塞一个空盒子）。 */
-          ListHeaderComponent={<PerformanceStrip shows={upcoming} showCount />}
+          ListHeaderComponent={<PerformanceStrip shows={upcoming} showCount onPlayLive={playShowLive} />}
           onEndReachedThreshold={0.35}
           ListEmptyComponent={
             loading ? (
@@ -416,7 +660,7 @@ export default function OpenLiveScreen() {
                   <Text style={[styles.cardTitle, { color: palette.label }]} numberOfLines={2}>{item.title}</Text>
                   <View style={{ flexDirection: 'row', alignItems: 'center', gap: 5, marginTop: 3 }}>
                     <TeamBadge
-                      team={memberByNickname.get(String(item.nickname || '').trim())?.team || member?.team}
+                      team={teamOfItem(item)}
                       fontSize={11}
                     />
                     <Text style={[styles.meta, { color: palette.labelSecondary }]} numberOfLines={1}>{item.nickname || shortMemberName(member) || t('成员')}</Text>
@@ -479,8 +723,6 @@ const styles = StyleSheet.create({
   playerErrorText: { fontSize: 13, lineHeight: 19, textAlign: 'center' },
   playerRetryBtn: { marginTop: 16, paddingHorizontal: 24, paddingVertical: 9, borderRadius: 18 },
   playerRetryText: { fontSize: 13, fontWeight: '800' },
-  externalBtn: { margin: 16, minHeight: 44, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
-  externalText: { fontWeight: '900' },
   skeletonWrap: { padding: 4 },
   skeletonCard: {
     flexDirection: 'row',
@@ -490,4 +732,33 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     borderWidth: StyleSheet.hairlineWidth,
   },
+  // --- 成员榜 ---
+  membersMask: { flex: 1, backgroundColor: 'rgba(0,0,0,0.45)', justifyContent: 'flex-end' },
+  membersSheet: {
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    borderWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: 16,
+    paddingTop: 14,
+    paddingBottom: 22,
+  },
+  membersHead: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  membersTitle: { fontSize: 16, fontWeight: '700' },
+  membersStatus: { fontSize: 12, marginTop: 6 },
+  membersCenter: { height: 120, alignItems: 'center', justifyContent: 'center' },
+  membersScroll: { marginTop: 8, maxHeight: 380 },
+  membersList: { paddingBottom: 8 },
+  memberChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    borderRadius: 12,
+    marginBottom: 6,
+  },
+  memberRank: { width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', marginRight: 8 },
+  memberRankText: { fontSize: 11, fontWeight: '700' },
+  memberAvatar: { width: 34, height: 34, borderRadius: 17 },
+  memberName: { fontSize: 14, fontWeight: '600', maxWidth: 150 },
+  memberScore: { fontSize: 11, marginTop: 2 },
 });

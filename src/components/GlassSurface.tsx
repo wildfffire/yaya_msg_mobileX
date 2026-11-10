@@ -99,6 +99,45 @@ const MATERIAL: { light: Material; dark: Material } = {
 };
 
 /**
+ * ★ 扁平化总闸门（用户 2026-11-09：「整个软件都要扁平化，去掉玻璃与高光」）
+ *
+ * 为 true 时**不再渲染 BlurView / LinearGradient 高光**，按 role 出「纯色底 + 1px 细描边」。
+ * 96 处调用点零改动；原玻璃分支保留在后面，改回 false 即可回滚。
+ */
+const FLAT_SURFACE = true;
+
+/**
+ * ★ 局部毛玻璃（用户 2026-11-09：「房间内的消息加强毛玻璃效果」「输入区域加重一点磨砂玻璃」）
+ *
+ * 全站扁平化（FLAT_SURFACE）仍然生效，只有显式传 `frost` 的表面走这套材质：
+ * intensity 60 + 纱层 0.18（用户选的「中等」）—— 能看出磨砂，但仍看得清房间背景。
+ * 没有顶部高光（highlight 0）：毛玻璃要的是「模糊」，不是「反光」。
+ */
+const FROST: { light: Material; dark: Material } = {
+  light: { ...MATERIAL.light, intensity: 60, overlay: 'rgba(255,255,255,0.18)', highlight: 0 },
+  dark: { ...MATERIAL.dark, intensity: 60, overlay: 'rgba(10,10,12,0.18)', highlight: 0 },
+};
+
+/** 扁平模式下按 role 取底色（层次靠色阶，不靠光影） */
+function flatColor(role: GlassRole, palette: ReturnType<typeof usePalette>): string {
+  switch (role) {
+    case 'chip':
+      return palette.fill2;
+    case 'selector':
+      return palette.tintContainer;
+    case 'toast':
+    case 'hero':
+      return palette.surfaceElevated;
+    case 'bar':
+    case 'header':
+    case 'card':
+    case 'modal':
+    default:
+      return palette.surface;
+  }
+}
+
+/**
  * 选中态（压在底栏玻璃上那块）。
  * 静止时保持低调（浅灰而非亮白）—— 变化留给交互：拖动时由原生 AGSL 出边缘色散/透镜，
  * 加上 AppTabBar 的液化拉伸。静止就很白会显得「一块贴纸」而不是玻璃。
@@ -141,6 +180,20 @@ export interface GlassSurfaceProps extends Omit<ViewProps, 'role'> {
   intensity?: number;
   /** 强调染色（叠在模糊上的颜色） */
   tintColor?: string;
+  /**
+   * 关掉顶部高光带（默认开 = 保持全站既有观感）。
+   *
+   * 为什么需要这个开关：高光带模拟「玻璃上沿受光」，在大卡片/底栏上是对的；
+   * 但在**小尺寸控件**（消息气泡）上，它是一条覆盖顶部 42% 的白色渐变，
+   * 视觉上就变成「一条对不齐的白块/白边」（用户 2026-09-28 反馈）。
+   * 只在消息气泡这类小控件上传 true；不传时行为与改动前完全一致。
+   */
+  noHighlight?: boolean;
+  /**
+   * 局部毛玻璃逃生门：为 true 时**绕过全站扁平化**，走真模糊（intensity 60 / 纱层 0.18）。
+   * 只给房间消息区、输入栏这类「压在房间背景图上」的区域用；列表内逐个使用会造成逐帧开销。
+   */
+  frost?: boolean;
   /** 兼容旧签名（AGSL 时代的色散强度），新引擎忽略 */
   iridescence?: number;
   /** 可点：给了就在内部渲染 TouchableOpacity/Pressable（玻璃自己就是按压容器） */
@@ -161,6 +214,8 @@ export function GlassSurface({
   interactive: _interactive,
   intensity,
   tintColor,
+  noHighlight = false,
+  frost = false,
   iridescence: _iridescence,
   onPress,
   onLongPress,
@@ -176,8 +231,12 @@ export function GlassSurface({
   const { tier } = useGlassSupport();
   const focused = useGlassFocused();
   const blurTarget = useBlurTarget();
-  const m =
-    role === 'selector'
+  /** 材质选择：frost（局部毛玻璃）> selector（底栏选中）> 常规 */
+  const m = frost
+    ? isDark
+      ? FROST.dark
+      : FROST.light
+    : role === 'selector'
       ? isDark
         ? SELECTOR.dark
         : SELECTOR.light
@@ -260,14 +319,16 @@ export function GlassSurface({
             },
           ]}
         >
-          <LinearGradient
-            colors={
-              isDark
-                ? [`rgba(255,255,255,${m.highlight})`, 'transparent']
-                : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.04)', 'transparent']
-            }
-            style={{ height: '42%' }}
-          />
+          {noHighlight ? null : (
+            <LinearGradient
+              colors={
+                isDark
+                  ? [`rgba(255,255,255,${m.highlight})`, 'transparent']
+                  : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.04)', 'transparent']
+              }
+              style={{ height: '42%' }}
+            />
+          )}
         </View>
         {children}
       </View>
@@ -302,21 +363,48 @@ export function GlassSurface({
             },
           ]}
         >
-          <LinearGradient
-            colors={
-              isDark
-                ? [`rgba(255,255,255,${m.highlight})`, 'transparent']
-                : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.04)', 'transparent']
-            }
-            style={{ height: '42%' }}
-          />
+          {noHighlight ? null : (
+            <LinearGradient
+              colors={
+                isDark
+                  ? [`rgba(255,255,255,${m.highlight})`, 'transparent']
+                  : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.04)', 'transparent']
+              }
+              style={{ height: '42%' }}
+            />
+          )}
         </View>
         {children}
       </LiquidGlassView>
     );
   }
 
-  const inner = (
+  /**
+   * 扁平分支：纯色底 + 细描边（无模糊、无高光）。
+   * 调用方传 tintColor 时以 tintColor 为准（保持既有语义）；selector 不画描边。
+   */
+  const flatInner = (
+    <View
+      pointerEvents="none"
+      style={[
+        StyleSheet.absoluteFill,
+        {
+          borderRadius: r,
+          backgroundColor: tintColor ?? flatColor(role, palette),
+          borderWidth: incoming?.borderWidth ?? (role === 'selector' ? 0 : StyleSheet.hairlineWidth),
+          borderColor: (incoming?.borderColor as string) ?? palette.hairline,
+          overflow: 'hidden',
+        },
+      ]}
+    />
+  );
+
+  const inner = FLAT_SURFACE && !frost ? (
+    <>
+      {flatInner}
+      {children}
+    </>
+  ) : (
     <>
       {/* 底层：硬件模糊（Android 31+ = RenderEffect / Dimezis BlurView） */}
       <BlurView
@@ -344,20 +432,23 @@ export function GlassSurface({
           },
         ]}
       >
-        <LinearGradient
-          colors={
-            isDark
-              ? [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.02)', 'transparent']
-              : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.06)', 'transparent']
-          }
-          style={{ height: '42%' }}
-        />
+        {noHighlight ? null : (
+          <LinearGradient
+            colors={
+              isDark
+                ? [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.02)', 'transparent']
+                : [`rgba(255,255,255,${m.highlight})`, 'rgba(255,255,255,0.06)', 'transparent']
+            }
+            style={{ height: '42%' }}
+          />
+        )}
       </View>
       {children}
     </>
   );
 
   // 可点玻璃：内部渲染 TouableOpacity/Pressable，玻璃本身就是按压容器
+
   if ((onPress || onLongPress) && !asBackground) {
     if (activeOpacity != null) {
       return (

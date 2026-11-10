@@ -15,6 +15,16 @@ export interface DanmakuSettings {
   area: DanmakuArea;
   /** 字号 12 ~ 24 */
   fontSize: number;
+  /**
+   * 礼物特效开关（收到送礼公屏时在画面上播放礼物卡片动画）。
+   * 与弹幕总开关**相互独立**：关掉弹幕仍可看礼物特效，反之亦然。
+   */
+  giftEffect: boolean;
+  /**
+   * 防重叠（用户 2026-11-09）：开 = 每条弹幕等上一条完全离屏 + 安全间隔才复用泳道
+   * （默认，画面干净）；关 = 泳道轮转立即入场，弹幕更密集（人多时允许重叠）。
+   */
+  avoidOverlap: boolean;
   set: (p: Partial<DanmakuSettings>) => void;
   reset: () => void;
 }
@@ -25,6 +35,8 @@ const DEFAULT: Omit<DanmakuSettings, 'set' | 'reset'> = {
   speed: 1,
   area: 'full',
   fontSize: 15,
+  giftEffect: true,
+  avoidOverlap: true,
 };
 
 export const useDanmakuSettings = create<DanmakuSettings>()(

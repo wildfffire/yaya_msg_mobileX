@@ -1,31 +1,17 @@
-// iOS 26 阴影体系：深色微弱，亮色清晰；玻璃卡片用低深宽阴影
-import { Platform, ViewStyle } from 'react-native';
+/**
+ * 阴影体系 —— 用户 2026-11-09：「整个软件都要扁平化，把阴影去掉」。
+ *
+ * 四级 API 全部返回空对象：全站 40+ 处 `...shadows.md` 展开处零改动即失去投影，
+ * 层次改由「纯色底 + 1px 细描边 + 圆角 + 间距」建立。
+ * 保留函数签名（isDark 参数）以免调用点报错，也方便以后要恢复时只改这一处。
+ */
+import type { ViewStyle } from 'react-native';
 
-const shadowImpl = (level: 'xs' | 'sm' | 'md' | 'lg', isDark: boolean) => {
-  const cfg = {
-    xs: { offsetY: 1, blur: 2, alpha: isDark ? 0.24 : 0.05, radius: 1 },
-    sm: { offsetY: 2, blur: 5, alpha: isDark ? 0.28 : 0.06, radius: 2 },
-    md: { offsetY: 5, blur: 14, alpha: isDark ? 0.34 : 0.09, radius: 5 },
-    lg: { offsetY: 10, blur: 28, alpha: isDark ? 0.42 : 0.12, radius: 10 },
-  }[level];
+const EMPTY: ViewStyle = {};
 
-  if (Platform.OS === 'ios') {
-    return {
-      shadowColor: '#000',
-      shadowOffset: { width: 0, height: cfg.offsetY },
-      shadowOpacity: cfg.alpha,
-      shadowRadius: cfg.blur,
-    } as ViewStyle;
-  }
-  return {
-    elevation: cfg.radius,
-    shadowColor: '#000',
-  } as ViewStyle;
-};
-
-export const makeShadows = (isDark: boolean) => ({
-  xs: shadowImpl('xs', isDark),
-  sm: shadowImpl('sm', isDark),
-  md: shadowImpl('md', isDark),
-  lg: shadowImpl('lg', isDark),
+export const makeShadows = (_isDark: boolean) => ({
+  xs: EMPTY,
+  sm: EMPTY,
+  md: EMPTY,
+  lg: EMPTY,
 });

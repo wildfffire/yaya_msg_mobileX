@@ -9,6 +9,10 @@ dist/
 web-build/
 expo-env.d.ts
 
+# member-db 产物要入库（App 通过 jsDelivr 拉取），在 dist/ 规则之后显式放行
+!/member-db/dist/
+!/member-db/dist/members.json
+
 # Native
 .kotlin/
 *.orig.*
@@ -32,10 +36,23 @@ yarn-error.*
 *.pem
 
 # local env files
-.env*.local
+.env
+.env.*
+!.env.example
 
 # typescript
 *.tsbuildinfo
+
+# 日志与系统/IDE 垃圾文件
+*.log
+!docs/*.log
+Thumbs.db
+desktop.ini
+.idea/
+*.iml
+*.hprof
+*.bak
+*.tmp
 
 # generated native folders
 /android/local.properties
@@ -87,3 +104,25 @@ android/app/.cxx/
 # 本地原生模块构建产物
 modules/*/android/build/
 modules/*/build/
+modules/*/android/.gradle/
+modules/*/android/.cxx/
+
+# Gradle 本地缓存（含模块内的）
+.gradle/
+
+# 安装包 / 签名产物
+*.aab
+*.idsig
+
+# IDE 本地配置（个人按键与索引，不入库）
+.vscode/
+
+# 本机 npm 源（国内镜像，仅本机加速；避免强加给所有克隆者与 CI）
+/.npmrc
+
+# 一次性 codemod / 补丁脚本归档（保留参考，不参与构建）
+scripts/archive/
+
+# 本地修复记录 / 复盘文档（只在本地保留，不公开）
+docs/修复记录汇总.md
+docs/修复报告-*.md

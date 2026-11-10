@@ -1,4 +1,5 @@
 import { useSettingsStore } from '../store';
+import { requestJson } from '../utils/network';
 
 const BASE = 'https://pocketapi.48.cn';
 
@@ -12,16 +13,6 @@ const DESKTOP_APP_INFO = JSON.stringify({
   deviceName: 'pixel',
 });
 
-function parseJson(text: string): any {
-  if (!text) return null;
-  const fixed = text.replace(/:\s*([0-9]{15,})/g, ':"$1"');
-  try {
-    return JSON.parse(fixed);
-  } catch {
-    return { status: 500, success: false, message: text.slice(0, 200) };
-  }
-}
-
 function responseMessage(res: any, fallback: string): string {
   return res?.message || res?.msg || res?.error || fallback;
 }
@@ -31,34 +22,22 @@ function assertOk(res: any, fallback: string) {
   throw new Error(responseMessage(res, fallback));
 }
 
-function desktopPost(path: string, payload: Record<string, any>, fallback: string): Promise<any> {
-  const body = JSON.stringify(payload);
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', `${BASE}${path}`, true);
-    xhr.timeout = 15000;
-    xhr.setRequestHeader('Content-Type', 'application/json');
-    xhr.setRequestHeader('app-info', DESKTOP_APP_INFO);
-    xhr.onload = () => {
-      const res = parseJson(xhr.responseText);
-      if (xhr.status >= 200 && xhr.status < 300) {
-        try {
-          resolve(assertOk(res, fallback));
-        } catch (error) {
-          reject(error);
-        }
-        return;
-      }
-      reject(new Error(responseMessage(res, `HTTP ${xhr.status}`)));
-    };
-    xhr.onerror = () => reject(new Error('网络请求失败'));
-    xhr.ontimeout = () => reject(new Error('网络请求超时'));
-    try {
-      xhr.send(body);
-    } catch (error: any) {
-      reject(new Error(error?.message || String(error)));
-    }
+/**
+ * 桌面端接口 POST。
+ *
+ * 改用统一请求层 `utils/network.requestJson`：它已内置超时（AbortController）、
+ * 宽松 JSON 解析（超大整数补引号）、错误消息提取与并发去重。
+ * 原先这里手写了一份 XHR 版本，把同样的超时/解析/错误处理又实现了一遍，
+ * 且不享受任何请求层优化（无去重、无统一超时语义）。
+ */
+async function desktopPost(path: string, payload: Record<string, any>, fallback: string): Promise<any> {
+  const res = await requestJson<any>(`${BASE}${path}`, {
+    method: 'POST',
+    body: payload,
+    headers: { 'app-info': DESKTOP_APP_INFO },
+    timeout: 15000,
   });
+  return assertOk(res, fallback);
 }
 
 export const officialMediaApi = {

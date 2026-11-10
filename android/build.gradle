@@ -2,6 +2,15 @@
 
 buildscript {
   repositories {
+    // 见 allprojects 里的说明：只把 com.facebook.react.* 交给国内镜像（阿里云 → 腾讯备用）。
+    maven {
+      url 'https://maven.aliyun.com/repository/public'
+      content { includeGroupByRegex 'com\\.facebook\\.react.*' }
+    }
+    maven {
+      url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/'
+      content { includeGroupByRegex 'com\\.facebook\\.react.*' }
+    }
     google()
     mavenCentral()
   }
@@ -16,11 +25,57 @@ buildscript {
 
 allprojects {
   repositories {
+    /**
+     * `com.facebook.react:*` **只走国内镜像**（阿里云）。
+     *
+     * 根因（2026-10-06 出包卡死）：Maven 中央仓库的 `com.facebook.react:react-android`
+     * 会被 301 重定向到 `repo.reactnative.dev`，该域名在这台机器的网络上 TCP 直连超时
+     * （curl 实测 3MB / 30s 收到 0 字节）→ Gradle 卡在「下载依赖」不报错、CPU 空转，
+     * 表现为「构建了几十分钟没动静」（卡点：react-native-worklets 的 configureCMake
+     * 要拉 react-android 的 prefab AAR）。阿里云同一文件实测 3MB / 0.28s。
+     *
+     * ⚠️ 为什么用 content 过滤器**只限流这一个 group**、而不是把镜像整体放最前：
+     * 实测把阿里云 public 放在 google()/mavenCentral() 之前会让 `com.netease.nimlib:qchat`
+     * 的 variant 解析失败 —— `Failed to transform qchat-10.9.11.aar to match attributes
+     * {artifactType=android-prefab, libraryelements=jar} / Could not find qchat-10.9.11.jar`。
+     * 其余依赖（网易云信、ExoPlayer…）保持原来的仓库顺序即可，不要动。
+     */
+    maven {
+      url 'https://maven.aliyun.com/repository/public'
+      content { includeGroupByRegex 'com\\.facebook\\.react.*' }
+    }
+    /** 备用镜像（2026-10-06 补齐）：阿里云不可用时兜底；实测同一 AAR 206 / 0.84s。同样只限 RN 家族。 */
+    maven {
+      url 'https://mirrors.cloud.tencent.com/nexus/repository/maven-public/'
+      content { includeGroupByRegex 'com\\.facebook\\.react.*' }
+    }
     google()
     mavenCentral()
-    maven { url 'https://artifactory.appodeal.com/appodeal-public/' }
-    jcenter()
-    maven { url 'https://www.jitpack.io' }
+    /**
+     * appodeal（2026-10-06 补齐 group 过滤）：本机实测**不可达** —— TLS 握手报
+     * `schannel: CRYPT_E_REVOCATION_OFFLINE`，且 60s 无响应；依赖树里也**没有任何** appodeal
+     * 依赖（node_modules 全仓零引用）。加 group 过滤后它只在真的引入 appodeal 系 SDK 时才会
+     * 被访问，不会再对其它依赖的解析拖时间（每个 miss 都要等到超时才回退）。
+     */
+    maven {
+      url 'https://artifactory.appodeal.com/appodeal-public/'
+      content { includeGroupByRegex 'com\\.appodeal.*|net\\.appodeal.*|com\\.applovin.*|com\\.adjust.*' }
+    }
+    /**
+     * jitpack（2026-10-06 补齐 group 过滤）：**不能删** —— expo-blur 的 Android 端依赖
+     * `com.github.Dimezis:BlurView:version-3.1.0`（见 node_modules/expo-blur/android/build.gradle），
+     * 这个坐标只在 jitpack 上有（阿里云 public / 腾讯 / 华为云实测都是 404；阿里云的
+     * repository/jitpack 代理返回 401 不对外）。
+     * ⚠️ 但必须限制命名空间：jitpack 是「按需现场构建 GitHub 仓库」的服务，
+     * **对不存在的坐标会长时间不响应**（实测探一个不存在的 maven-metadata 挂住 12s+），
+     * 不加过滤就会拖慢每一次「某个依赖在前面的仓库里没找到」的解析。
+     */
+    maven {
+      url 'https://www.jitpack.io'
+      content { includeGroupByRegex 'com\\.github\\..*|com\\.gitlab\\..*|org\\.bitbucket\\..*|com\\.gitee\\..*' }
+    }
+    // jcenter() 已移除（2026-10-06）：Bintray 已于 2022 年停服、Gradle 9 也移除了该方法
+    //（本工程已在做 Gradle 9 兼容），且依赖树里没有任何 artifact 需要它（node_modules 零引用）。
   }
   // react-native-video 6.19.x 编译字节码依赖 androidx.media3(ExoPlayer) 的 DefaultLoadControl ABI。
   // 较新 Android(15/16) 会把 media3 解析到更新大版本，构造函数签名变化导致挂载 <Video> 即

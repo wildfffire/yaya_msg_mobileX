@@ -12,12 +12,18 @@ import {
 import PlayerScreen, { buildPocketHeaders } from '../player';
 import officialMediaApi from '../api/officialMedia';
 import { useI18n } from '../i18n';
-import { useSettingsStore } from '../store';
+import { useSettingsStore, useMemberStore } from '../store';
 import { FadeInView, ScalePressable } from '../components/Motion';
 import { CenterSpinner } from '../components/Loaders';
 import { EmptyState, ErrorState } from '../components/StateViews';
 import { Skeleton } from '../components/Skeleton';
 import { errorMessage, normalizeUrl, unwrapList } from '../utils/data';
+import {
+  buildMemberLookup,
+  pickMemberNickname,
+  pickMemberUserId,
+  resolveTeam,
+} from '../utils/memberMatch';
 import { formatTimestamp, formatDuration } from '../utils/format';
 import ScreenHeader from '../components/ScreenHeader';
 import { HeaderAction } from '../components/HeaderAction';
@@ -83,6 +89,12 @@ export default function VideoLibraryScreen() {
   const nextCtimeRef = useRef(0);
   const [loadError, setLoadError] = useState('');
   const loadingRef = useRef(false);
+  /**
+   * 成员索引：官方视频条目若带用户信息，播放时把「成员名 + 队伍 + 成员 id」一起写进历史
+   * —— 与直播页同一口径（`utils/memberMatch`），否则官方视频库收藏进历史后永远没有队伍徽章。
+   */
+  const members = useMemberStore((s) => s.members);
+  const memberLookup = React.useMemo(() => buildMemberLookup(members), [members]);
 
   const load = async (refresh = true) => {
     if (loadingRef.current) return;
@@ -142,11 +154,25 @@ export default function VideoLibraryScreen() {
       <View style={styles.playerPage}>
         {/* 统一播放器（重写）：官方视频 → PlayerScreen（控制条/全屏/内核切换/错误重试内置） */}
         <PlayerScreen
-          source={{ kind: 'vod', url: playUrl, headers: buildPocketHeaders() }}
-          meta={{ title: playing?.title || t('视频') }}
+          source={{
+            kind: 'vod',
+            url: playUrl,
+            headers: buildPocketHeaders(),
+            // 来源引用：历史记录/稍后再看可凭 videoId 重新解析地址（播放地址有时效）
+            ref: { kind: 'video', id: String(playing?.videoId || playing?.id || '') },
+          }}
+          meta={{
+            title: playing?.title || t('视频'),
+            // 官方视频若带归属成员：一并写进历史（列表卡片要显示成员名 + 队伍徽章）
+            owner: pickMemberNickname(playing),
+            team: resolveTeam(memberLookup, {
+              userId: pickMemberUserId(playing),
+              name: pickMemberNickname(playing),
+            }),
+            ownerId: pickMemberUserId(playing),
+          }}
           features={{ kernelSwitch: true, rate: true }}
           onClose={() => setPlayUrl('')}
-          persistent
         />
       </View>
     );

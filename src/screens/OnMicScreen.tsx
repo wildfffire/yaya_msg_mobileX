@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Image,
   ActivityIndicator,
+  AppState,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { usePalette } from '../theme';
@@ -83,9 +84,13 @@ export default function OnMicScreen() {
   }, [members, t]);
 
   // tab 可见时每 60s 静默刷新（store 内部节流 60s + 预算制增量：每轮 1/3 成员，约 3 轮全覆盖）
+  // ⚠️ 加 AppState 守卫：focus 只保证"页面在前台栈顶"，App 切后台时页面仍是 focused，
+  //    原先的定时器会在后台继续扫接口（耗电/流量）。
   useFocusEffect(
     useCallback(() => {
-      const id = setInterval(() => scan(), 60000);
+      const id = setInterval(() => {
+        if (AppState.currentState === 'active') scan();
+      }, 60000);
       return () => clearInterval(id);
     }, [scan]),
   );

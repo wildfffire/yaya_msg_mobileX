@@ -15,7 +15,20 @@ export const MEMBERS_URL_SELF = 'https://cdn.jsdelivr.net/gh/Xenia0922/yaya_msg_
 /** 上游 yk1z 库：自建源不可用时的回退（保证不全依赖自建可用性） */
 export const MEMBERS_URL = 'https://data.gnz.hk/members.json';
 
-export const APP_VERSION = '2.7.5';
+export const APP_VERSION = '3.0.0';
+
+/**
+ * 构建号（Build）= Android versionCode。
+ *
+ * 用户 2026-10-05 要求：设置页在版本名**下面**单独显示一行，显示为 `Build 3000000` ——
+ * 同一个 `vX.Y.Z` 常常会有多个修复包（改完就出包），只显示版本名分不清设备上装的是哪一个。
+ * （用户明确不要中文「小版本」三个字，统一用英文 Build，四个语言字典同值。）
+ *
+ * ⚠️ 必须与 `app.json` / `android/app/build.gradle` 的 versionCode 完全一致，
+ * `scripts/verify-version.js` 会拦下任何漂移（改版本时三处一起动：versionName 走语义版本，
+ * versionCode / APP_BUILD 每出一个包必须递增）。
+ */
+export const APP_BUILD = 3000034;
 
 // 成员数据原始仓库（yk1z 的牙牙消息电脑版），数据由其维护并发布。
 export const MEMBER_DATA_SOURCE_URL = 'https://github.com/yk1z/yaya_msg';
@@ -80,28 +93,39 @@ export const POCKET_GIFT_DATA: GiftItem[] = [
 ];
 
 /**
- * 各队应援色（2026-09-26 按官方代表色校对过一轮，来源：中文维基各团成员列表「代表色」）：
- *   SNH48  SII 浅蓝 A1D5ED / NII 紫 BE98C7 / HII 柑橘橙 F8941D / X 浅绿(黄绿) B1D61B
- *   GNZ48  G 鲜绿 9FBF40 / NIII 鲜黄 FFE249 / Z 蜜桃 EA617B
- *   BEJ48  B 玫瑰红 FF4083 / E 蓝绿 0CC8C3（J 队已并入，保留旧值）
- *   CKG48  K 鲜黄 / C 橘红（维基未给 RGB，按色名取近似）
- *   预备生 固定灰（用户要求）
+ * 各队应援色（2026-11-09 按桌面端 yk1z/yaya_msg 校正，权威源：
+ *   src/renderer/bootstrap-shared.js 的 TEAM_COLORS
+ *   src/renderer/database/app.jsx 的 TEAM_COLORS（Tailwind 色值，两处一致）
+ * 之前 J / C / K / CII 是「按色名取近似」的旧值，这次全部换成桌面端实际用的色值。
+ *
+ *   SNH48  SII A1D5ED / NII BE98C7 / HII F8941D / X B1D61B
+ *   GNZ48  G 9FBF40 / NIII FFE249 / Z EA617B
+ *   BEJ48  B FF4083 / E 0CC8C3 / J 192F6B（深蓝，取浅色主题色）
+ *   CKG48  C FEB90D / K FF5043
+ *   CGT48  CII D21217 / GII 0061C0
+ *   IDFT   900058 / 预备生、荣誉毕业生、海外练习生 7B8493
+ *
+ * 同时保留不带 `TEAM ` 前缀的别名，方便成员库里各种写法直接命中。
  */
 export const TEAM_COLORS: Record<string, string> = {
-  'TEAM SII': '#A1D5ED',
-  'TEAM NII': '#BE98C7',
-  'TEAM HII': '#F8941D',
-  'TEAM X': '#B1D61B',
-  'TEAM G': '#9FBF40',
-  'TEAM NIII': '#FFE249',
-  'TEAM Z': '#EA617B',
-  'TEAM B': '#FF4083',
-  'TEAM E': '#0CC8C3',
-  'TEAM J': '#FF5722',
-  'TEAM C': '#FF6136',
-  'TEAM K': '#FFD400',
-  CII: '#9C27B0', // CGT48：未查到权威代表色，沿用旧值
-  '预备生': '#757575',
+  'TEAM SII': '#A1D5ED', SII: '#A1D5ED',
+  'TEAM NII': '#BE98C7', NII: '#BE98C7',
+  'TEAM HII': '#F8941D', HII: '#F8941D',
+  'TEAM X': '#B1D61B', X: '#B1D61B',
+  'TEAM G': '#9FBF40', G: '#9FBF40',
+  'TEAM NIII': '#FFE249', NIII: '#FFE249',
+  'TEAM Z': '#EA617B', Z: '#EA617B',
+  'TEAM B': '#FF4083', B: '#FF4083',
+  'TEAM E': '#0CC8C3', E: '#0CC8C3',
+  'TEAM J': '#192F6B', J: '#192F6B',
+  'TEAM C': '#FEB90D', C: '#FEB90D',
+  'TEAM K': '#FF5043', K: '#FF5043',
+  'TEAM CII': '#D21217', CII: '#D21217',
+  'TEAM GII': '#0061C0', GII: '#0061C0',
+  IDFT: '#900058',
+  '预备生': '#7B8493',
+  '荣誉毕业生': '#7B8493',
+  '海外练习生': '#7B8493',
 };
 
 export const GROUP_NAMES = ['SNH48', 'GNZ48', 'BEJ48', 'CKG48', 'CGT48', 'IDFT'];

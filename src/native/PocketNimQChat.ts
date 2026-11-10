@@ -10,6 +10,7 @@
  */
 
 import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
+import { NATIVE_SEND_TIMEOUT_MS, withNativeTimeout } from './timeout';
 
 interface PocketNimQChatNative {
   connect(appKey: string, account: string, token: string): Promise<boolean>;
@@ -44,7 +45,14 @@ export async function qchatConnect(appKey: string, account: string, token: strin
   await native.connect(appKey, account, token);
 }
 
-/** 返回 msgIdClient（发送成功由服务端应答确认，这里 await 到应答后返回） */
+/**
+ * 返回 msgIdClient（发送成功由服务端应答确认，这里 await 到应答后返回）。
+ *
+ * ⚠️ 必须带超时：原生若不回应答，await 永久挂起 → 发送按钮永远转圈，
+ * 且 qchat.ts 里那段「失败就重连重试」的兜底**根本不会触发**（它只在 reject 时跑）。
+ * 注：`qchatConnect` 的超时已在调用侧（services/pocketNim/qchat.ts 的 Promise.race）处理，
+ * 这里不重复包一层，避免两个超时语义叠在一起难以排查。
+ */
 export async function qchatSend(
   serverId: string,
   channelId: string,
@@ -52,7 +60,9 @@ export async function qchatSend(
   extJson: string
 ): Promise<string> {
   if (!native) throw new Error('当前平台不支持原生房间消息通道');
-  return native.send(serverId, channelId, text, extJson);
+  // 用发送专用的 30s（比连接类宽）：超时会触发调用方「重连 + 重发」，
+  // 而原生 send 是「等服务端应答才 resolve」—— 15s 判失败可能造成重复发消息。
+  return withNativeTimeout(native.send(serverId, channelId, text, extJson), '房间消息发送', NATIVE_SEND_TIMEOUT_MS);
 }
 
 export function qchatDisconnect(): void {

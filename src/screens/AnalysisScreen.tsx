@@ -726,7 +726,6 @@ export default function AnalysisScreen() {
                             source={{ kind: isVoice ? 'audio' : 'vod', url: answerUrl, headers: buildPocketHeaders() }}
                             meta={{ title: t('翻牌答案') }}
                             features={{ kernelSwitch: true, rate: true }}
-                            persistent
                           />
                         ) : null}
                       </View>
@@ -766,7 +765,6 @@ export default function AnalysisScreen() {
               meta={{ title: t('视频') }}
               features={{ kernelSwitch: true, rate: true }}
               onClose={() => setPlayMedia(null)}
-              persistent
             />
           </View>
         </Modal>

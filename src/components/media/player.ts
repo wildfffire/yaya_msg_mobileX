@@ -1,3 +1,5 @@
+import { getAccentSeed } from '../../theme/colors';
+
 export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime?: number, showControls = true, extraHeaders: Record<string, string> = {}, volumeBoost = 1): string {
   const poster = posterUrl || '';
   const startTime = Number.isFinite(initialTime) && (initialTime as number) > 0 ? (initialTime as number) : 0;
@@ -15,7 +17,7 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
   #player-wrapper{position:relative;width:100%;height:100%;display:flex;align-items:center;justify-content:center}
   video{width:100%;height:auto;max-height:100vh;background:#000}
   #loading{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#5a5a5a;font-size:14px;font-family:sans-serif}
-  .spinner{border:2px solid #333;border-top:2px solid #ff6f91;border-radius:50%;width:24px;height:24px;animation:spin 1s linear infinite;margin:0 auto 8px}
+  .spinner{border:2px solid #333;border-top:2px solid ${getAccentSeed()};border-radius:50%;width:24px;height:24px;animation:spin 1s linear infinite;margin:0 auto 8px}
   @keyframes spin{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
   #error{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);color:#ff4444;font-size:13px;font-family:sans-serif;text-align:center;padding:16px;line-height:1.6}
 </style>
@@ -128,8 +130,16 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
   }
 
   // 外部控制指令（RN 控制层）：seek / 倍速 / 播放暂停
+  //
+  // ⚠️ 必须同时监听 window 与 document 两个事件目标：
+  // react-native-webview 在 **Android** 上是用 document.dispatchEvent(event) 投递
+  // RN→Web 消息的（见 node_modules/react-native-webview/android/.../RNCWebViewManagerImpl.kt
+  // 里 postMessage 分支），而 iOS/部分版本用 window。
+  // 此前只监听 window → 安卓上 seek / 倍速 / 暂停指令**全部被丢弃**
+  // （症状：B站直播的自研控制条点了没反应，且直播未挂原生 controls，等于完全无法暂停）。
+  // NativeSigner(webviewSigner.tsx) 里早已同时监听两者，此处对齐。
   if (window.ReactNativeWebView) {
-    window.addEventListener('message', function(ev) {
+    var onRnMessage = function(ev) {
       var msg = {};
       try { msg = JSON.parse(ev.data); } catch (e) { return; }
       try {
@@ -138,7 +148,11 @@ export function getPlayerHtml(streamUrl: string, posterUrl?: string, initialTime
         else if (msg.type === 'play') video.play();
         else if (msg.type === 'pause') video.pause();
       } catch (e) {}
-    });
+    };
+    window.addEventListener('message', onRnMessage);
+    if (typeof document !== 'undefined' && document.addEventListener) {
+      document.addEventListener('message', onRnMessage);
+    }
   }
 
   var url = ${JSON.stringify(streamUrl)};

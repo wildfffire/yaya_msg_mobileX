@@ -54,13 +54,15 @@ export async function loadNimCredentials(force = false): Promise<NimCredentials 
     try {
       const res = await pocketApi.getNimLoginInfo();
       const creds = normalizeCredentials(res);
-      // 诊断（排查云信登录 414）：打印原始响应键路径与归一化结果（token 只留长度/前 4 位）
+      // 诊断（排查云信登录 414）：只打印键路径与 token **长度**。
+      // ⚠️ 不要打印 token 片段（哪怕前 4 位）：日志可能被导出/截图分享用于排障，
+      // 凭据片段外泄属于安全事故。accid 与 tokenLen 已足够定位 414 类问题。
       try {
         const content = (res && (res.content || res.data)) || {};
         // eslint-disable-next-line no-console
         console.log('[nim] userinfo keys =', Object.keys(content).join(','), '| status =', (res && (res.status ?? res.code)) ?? '-');
         // eslint-disable-next-line no-console
-        console.log('[nim] creds =', creds ? `accid=${creds.accid} userId=${creds.userId} tokenLen=${creds.token.length} tokenHead=${creds.token.slice(0, 4)}` : 'null');
+        console.log('[nim] creds =', creds ? `accid=${creds.accid} userId=${creds.userId} tokenLen=${creds.token.length}` : 'null');
       } catch {
         /* 诊断失败忽略 */
       }

@@ -1,6 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
@@ -29,24 +28,28 @@ import { setPipPlaying, setPipAspect, isPipActive } from '../utils/pip';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import { FadeInView } from '../components/Motion';
 import ScreenHeader from '../components/ScreenHeader';
+import { chromeScrollProps } from '../navigation/chromeScroll';
 import { VODItem, Member } from '../types';
 import { formatTimestamp, formatDuration } from '../utils/format';
-import { errorMessage, liveIdFromUrl, normalizeUrl, pickText, unwrapList } from '../utils/data';
+import { errorMessage, normalizeUrl, pickText, unwrapList } from '../utils/data';
 import { thumbUrl } from '../utils/imageThumb';
-import { getResumePosition } from '../utils/resumePosition';
-import { logWarn } from '../utils/runtimeLog';
+import { giftCost, giftImage, giftName, normalizeGiftList } from '../utils/gift';
+import { logInfo } from '../utils/runtimeLog';
 import pocketApi from '../api/pocket48';
 import { setLiveImmersiveMode } from '../native/LivePlayer';
-import PlayerScreen from '../player';
+import { MediaPlaybackHost, type MediaPlaybackHostHandle, type PlayMedia } from '../player/session';
 import { usePlayerStore } from '../player/store/playerStore';
-import { DanmakuOverlay } from '../components/DanmakuOverlay';
-import { LiveBarrageBoard } from '../components/LiveBarrageBoard';
-import { useLiveBarrage } from '../hooks/useLiveBarrage';
-import DanmakuSettingsSheet from '../components/DanmakuSettingsSheet';
-import { useDanmakuSettings } from '../store/danmakuSettings';
-import DanmakuListSheet, { type DanmakuListEntry } from '../components/DanmakuListSheet';
-import { parseDanmaku, DanmakuItem } from '../utils/danmaku';
+// 弹幕层（DanmakuOverlay / 弹幕列表 / 弹幕设置 / 直播输入条 / 礼物特效）已收口到
+// 统一播放宿主（src/player/session/MediaPlaybackHost），本页只保留公告正文的表情替换。
 import { memberSearchText } from '../utils/members';
+import {
+  buildMemberLookup,
+  findMemberByHint,
+  pickMemberNickname,
+  pickMemberUserId,
+  resolveTeam,
+  type MemberLookup,
+} from '../utils/memberMatch';
 import TeamBadge from '../components/TeamBadge';
 import { EmptyState } from '../components/StateViews';
 import { LoginPrompt } from '../components/LoginPrompt';
@@ -56,7 +59,6 @@ import { usePalette, radii, radiiAlias } from '../theme';
 import { translate, useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
 import { GlassSegmented, GlassSegmentedScroll } from '../components/GlassSegmented';
-import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { UserProfileSheet, type UserProfileTarget } from '../components/UserProfileSheet';
 
 /** 回放列表加载占位：居中低调研度指示，无微光闪烁，避免「转圈 + 文字」混排打架 */
@@ -294,11 +296,6 @@ function pickPlayableUrl(raw: any): string {
   return pickPlayableUrls(raw)[0] || '';
 }
 
-function streamNeedsProxy(url: string): boolean {
-  const lower = url.toLowerCase();
-  return lower.startsWith('rtmp://') || lower.includes('.flv');
-}
-
 function normalizeLiveList(res: any): VODItem[] {
   const source = unwrapList(res, [
     'content.liveList',
@@ -339,24 +336,8 @@ function normalizeLiveList(res: any): VODItem[] {
   })) as VODItem[];
 }
 
-/** 按 liveId 在直播/录播列表（首屏）中查找条目，作为详情接口解析失败的兜底 */
-async function findLiveItemInLists(liveId: string, record: boolean) {
-  const calls: Promise<any>[] = [
-    pocketApi.getLiveList({ record, debug: true, next: 0 }),
-    pocketApi.getOpenLivePublicList({ record, next: 0 }),
-  ];
-  for (const p of calls) {
-    try {
-      const res = await p;
-      const list = unwrapList(res, ['content.liveList', 'content.list', 'data.liveList', 'liveList', 'list', 'data']);
-      const found = list.find((it: any) => String(it.liveId || it.id || it.live_id || '') === String(liveId));
-      if (found) return found;
-    } catch {
-      /* 尝试下一个源 */
-    }
-  }
-  return null;
-}
+// findLiveItemInLists（详情接口失败时按 liveId 在列表首屏兜底查找）已删除：
+// 解析兜底统一到会话层 src/player/session/resolveMedia.ts（resolveRoomLiveMediaWithRetry）。
 
 function mergeUniqueLiveItems(prev: VODItem[], next: VODItem[]) {
   const seen = new Set(prev.map((item: any, index) => String(item.liveId || item.id || item.title || index)));
@@ -370,32 +351,8 @@ function mergeUniqueLiveItems(prev: VODItem[], next: VODItem[]) {
   return merged;
 }
 
-function playerSource(url: string) {
-  return {
-    uri: url,
-    headers: {
-      'User-Agent': 'PocketFans201807/7.0.41 (iPhone; iOS 16.3.1; Scale/2.00)',
-      Referer: 'https://h5.48.cn/',
-    },
-  };
-}
-
-function normalizeGiftList(res: any): any[] {
-  const categories = unwrapList(res, ['content', 'content.list', 'data.content', 'data.list', 'list']);
-  const gifts: any[] = [];
-  for (const item of categories) {
-    const nested = unwrapList(item, ['giftList', 'gifts', 'list']);
-    if (nested.length) gifts.push(...nested);
-    else if (item?.giftId || item?.id) gifts.push(item);
-  }
-  const seen = new Set<string>();
-  return gifts.filter((gift) => {
-    const id = String(gift.giftId || gift.id || '');
-    if (!id || seen.has(id)) return false;
-    seen.add(id);
-    return true;
-  });
-}
+/* 礼物归一化（normalizeGiftList / giftName / giftCost / giftImage）已抽到 utils/gift，
+   直播页与房间礼物面板共用同一份口径 —— 官方接口返回的是分类数组，房间侧旧实现按平铺解析会显示空列表。 */
 
 function normalizeLiveRank(res: any): any[] {
   let list = unwrapList(res, [
@@ -496,18 +453,6 @@ function profileFromUserRes(res: any) {
   };
 }
 
-function giftName(gift: any): string {
-  return String(gift.giftName || gift.name || translate('未知礼物'));
-}
-
-function giftCost(gift: any): number {
-  return Number(gift.money ?? gift.cost ?? gift.canSendNum ?? 0) || 0;
-}
-
-function giftImage(gift: any): string {
-  return normalizeUrl(gift.picPath || gift.icon || gift.giftPic || gift.url || '');
-}
-
 function acceptUserId(item: any): string {
   return String(item?.userInfo?.userId || item?.user?.userId || item?.userId || item?.ownerId || item?.memberId || '');
 }
@@ -555,8 +500,6 @@ function MediaGridSkeleton() {
   );
 }
 
-/** 播放器公告是否收起（'1'=收起）：跨直播间/跨启动记忆（用户要求） */
-const PLAYER_ANNOUNCE_COLLAPSED_KEY = 'yaya_player_announce_collapsed_v1';
 
 export default function MediaScreen() {
   const route = useRoute<MediaRouteProp>();
@@ -564,8 +507,16 @@ export default function MediaScreen() {
   const palette = usePalette();
   const { t } = useI18n();
   const setTabBarHidden = useUiStore((state) => state.setTabBarHidden);
-  const showToast = useUiStore((state) => state.showToast);
   const members = useMemberStore((state) => state.members);
+  /**
+   * 成员索引（**全仓唯一口径**：`utils/memberMatch`）。
+   *
+   * ⚠️ 这里以前是「昵称字符串精确相等 → 成员」的 Map（`ownerName` 原样当键），
+   * 而网格卡片的 `teamOfItem` 走的是「`userInfo.userId` → 成员库」—— 两条链路口径不同，
+   * 于是同一场直播「卡片上有队伍徽章、写进历史后没有」（用户 2026-09-30 反复反馈的点）。
+   * 现在两者共用同一个 `resolveTeam(...)`，先 id 后归一化昵称，结果必然一致。
+   */
+  const memberLookup: MemberLookup = useMemo(() => buildMemberLookup(members), [members]);
   const [tab, setTab] = useState<'live' | 'vod'>(route.params?.mode ?? 'live');
   const token = useSettingsStore((s) => s.settings.p48Token);
   const [showSearch, setShowSearch] = useState(false);
@@ -573,47 +524,41 @@ export default function MediaScreen() {
   const [liveList, setLiveList] = useState<VODItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  const [nextCursor, setNextCursor] = useState(0);
-  const nextCursorRef = useRef(0); // 翻页游标 ref：避免自动翻页闭包读到旧游标重复拉同一页
+  const nextCursorRef = useRef(0); // 翻页游标：避免自动翻页闭包读到旧游标重复拉同一页（唯一来源，state 镜像已删）
   const [pageVersion, setPageVersion] = useState(0); // 每次拉取完成 +1：驱动自动翻页 effect 续链
   const [error, setError] = useState('');
-  const [playerError, setPlayerError] = useState('');
-  const [useWebPlayer, setUseWebPlayer] = useState(false);
-  // 画面旋转（翻转）：0/90/180/270，每按一次步进 90°
-  const [videoRotate, setVideoRotate] = useState(0);
-  const [playing, setPlaying] = useState<{ url: string; urls: string[]; title: string; cover?: string; item: any; isLive: boolean; needsVlc: boolean; resolving?: boolean; position?: number } | null>(null);
-  /** memberId → Member 查找表：网格卡上的队伍应援色标注 + 「进入房间」入口用 */
-  const memberById = useMemo(() => {
-    const map = new Map<string, any>();
-    for (const m of members) map.set(String(m.id), m);
-    return map;
-  }, [members]);
-  /** 当前播放内容归属的成员（官方条目 userInfo.userId → 全量成员库反查）；找不到=非成员直播 */
-  const playingMember = useMemo(() => {
-    const uid = String((playing as any)?.item?.userInfo?.userId || (playing as any)?.item?.userId || '');
-    if (!uid) return null;
-    return memberById.get(uid) || null;
-  }, [playing, memberById]);
   /**
-   * 直播弹幕（云信聊天室）—— 全页唯一一条连接：
-   *   - 接收：推给 DanmakuOverlay 的 liveItems，直接飘在画面上
-   *   - 发送：播放器底部的弹幕输入条（同一 source，不重复建连）
-   * 录播不受影响（走 danmaku + currentTime 时间轴）。
+   * 主直播页当前播放的条目（用户 2026-10-02：四场景统一播放器）。
+   *
+   * 只存「播什么」（PlayMedia）——解析（含「解析中/失败重试」shell）、续播与进度、
+   * 弹幕（云信/HTTP 轮询/LRC）、在线人数、小窗交棒全部由统一播放宿主完成
+   *（src/player/session/MediaPlaybackHost）。
    */
-  const liveBarrageId = playing?.isLive ? String(playing.item?.liveId || playing.item?.id || '') : '';
-  const liveBarrage = useLiveBarrage({ liveId: liveBarrageId, enabled: !!liveBarrageId, module: 'live' });
-  const liveDanmakuItems = useMemo(
-    () => liveBarrage.items.map((item) => ({ key: item.id, text: item.nick ? `${item.nick}：${item.text}` : item.text })),
-    [liveBarrage.items]
-  );
-  // 修复「直播弹幕不飘屏」：showDanmaku 此前只由 HTTP 轮询打开，
-  // 原生云信通道有弹幕也不会飘 —— 云信一到货就自动打开飘屏。
-  useEffect(() => {
-    if (liveBarrage.items.length) setShowDanmaku(true);
-  }, [liveBarrage.items.length]);
-  // 直播输入条已并入播放器底坞（随控制条自动隐藏），不再需要单独的收起状态
-  // 续播位置：打开回放时读取上次进度，播放中由 WebView 回传进度落盘
-  const [webResumeTime, setWebResumeTime] = useState(0);
+  const [media, setMedia] = useState<PlayMedia | null>(null);
+  /** 小窗回大窗 / 路由带入的续播位置（秒）：交给宿主作为 initialPosition */
+  const [pendingResumeAt, setPendingResumeAt] = useState(0);
+  const mediaRef = useRef<PlayMedia | null>(null);
+  mediaRef.current = media;
+  /** 统一播放宿主 ref：送礼的云信公屏广播走宿主内部同一条聊天室连接 */
+  const playbackHostRef = useRef<MediaPlaybackHostHandle | null>(null);
+  /**
+   * 当前播放内容归属的成员（官方条目 → 全量成员库反查）；找不到 = 非成员直播。
+   *
+   * ⚠️ 以前这里只用「`String(m.id)` 单键」的自建 Map 且只认 `userInfo.userId` 一条路径，
+   * 而卡片队伍用的是另一条 —— 两条口径不一致正是「卡片有队伍徽章、进播放器后
+   * 『进入房间』入口时有时无」的来源。现在统一走 `memberMatch` 的多键反查
+   *（userId / serverId / channelId / account / 归一化昵称全收）。
+   */
+  const playingMember = useMemo(() => {
+    const raw = media?.raw;
+    if (!raw) return null;
+    return findMemberByHint(memberLookup, {
+      userId: pickMemberUserId(raw),
+      name: pickMemberNickname(raw),
+    });
+  }, [media, memberLookup]);
+  // 直播弹幕（云信聊天室连接 · 飘屏 · 输入条）与回放 LRC 弹幕已收口到统一播放宿主：
+  // 见 src/player/session/usePlaybackDanmaku.ts —— 本页不再自建任何弹幕连接。
   const [giftVisible, setGiftVisible] = useState(false);
   const [gifts, setGifts] = useState<any[]>([]);
   const [selectedGift, setSelectedGift] = useState<any | null>(null);
@@ -624,298 +569,60 @@ export default function MediaScreen() {
   const [rankVisible, setRankVisible] = useState(false);
   const [rankRows, setRankRows] = useState<any[]>([]);
 
-  // 续播 key 用稳定 id（liveId）而非播放 URL：URL 换线路/带签名/拼接参数会变，
-  // 用 URL 做 key 会导致同一视频换线路后续播进度丢失
-  const resumeKey = React.useMemo(
-    () => String(playing?.item?.liveId || playing?.item?.id || playing?.url || ''),
-    [playing],
-  );
+  // 续播读取与进度落盘已收口到统一播放宿主（services/replayProgress 统一存储，
+  // 与房间/历史/稍后再看互通）：见 src/player/session/usePlaybackResume.ts。
 
-  // 打开回放时读取上次观看进度，用于 WebView 续播
-  useEffect(() => {
-    if (!playing?.url) {
-      setWebResumeTime(0);
-      return;
-    }
-    let alive = true;
-    getResumePosition(resumeKey)
-      .then((t) => { if (alive) setWebResumeTime(t); })
-      .catch((e) => { logWarn('读取续播进度失败: ' + errorMessage(e), 'MediaScreen.resume'); });
-    return () => { alive = false; };
-  }, [resumeKey]);
-
-  // 拉取/轮询弹幕并解析；失败静默，不拖垮播放
-  useEffect(() => {
-    if (!playing) {
-      setDanmaku([]);
-      setShowDanmaku(false);
-      return;
-    }
-    const lid = String(playing.item?.liveId || playing.item?.id || '');
-    if (!lid) { setDanmaku([]); setShowDanmaku(false); return; }
-    let alive = true;
-    const seenMsg = new Set<string>();
-    const collect = (infos: any[]): DanmakuItem[] => {
-      const flat: DanmakuItem[] = [];
-      for (const b of infos) {
-        const parsed = parseDanmaku(b.content);
-        if (parsed.length) flat.push(...parsed);
-        else flat.push({ time: Number(b.time) || 0, text: String(b.content || ''), ...(b.user ? { nick: b.user } : {}) });
-      }
-      let items = flat.filter((d) => d && d.text) as DanmakuItem[];
-      if (!items.length) return items;
-      // 时间轴归一化：覆盖接口返回的多种 time 形态，保证弹幕能对上视频相对进度飘出来
-      //  1) 毫秒时间戳（>1e6）：先转秒
-      //  2) 绝对秒时间戳（>1e7，远超任何视频时长）：以最早弹幕为 0 做相对偏移
-      //  3) 全 0 / 异常（maxT<=0）：按序均匀分配，至少保证弹幕能飘
-      const rangeOf = (arr: DanmakuItem[]) => arr.reduce(
-        (acc, d) => ({ max: Math.max(acc.max, d.time), min: Math.min(acc.min, d.time) }),
-        { max: 0, min: Infinity },
-      );
-      let { max: maxT, min: minT } = rangeOf(items);
-      if (maxT > 1e6) {
-        items.forEach((d) => { d.time = d.time / 1000; });
-        ({ max: maxT, min: minT } = rangeOf(items));
-      }
-      if (maxT > 1e7) {
-        const base = minT;
-        items.forEach((d) => { d.time = d.time - base; });
-        ({ max: maxT } = rangeOf(items));
-      }
-      if (maxT <= 0) {
-        items.forEach((d, i) => { d.time = i * 1.2; });
-      }
-      items.sort((a, b) => a.time - b.time);
-      return items;
-    };
-    if (playing.isLive) {
-      // 直播：轮询 barrage/list 累积实时弹幕
-      // ⚠️【串台修复】换直播（url/lid 变化触发本 effect 重跑）先清空上一间的残留弹幕，
-      // 否则旧条目会按时间窗在新直播间飘出（录播 LRC 分支本就整体重建，无需处理）
-      setDanmaku([]);
-      setShowDanmaku(false);
-      const poll = async () => {
-        try {
-          const infos = await pocketApi.getLiveBarrage(lid);
-          if (!alive) return;
-          const items = collect(infos);
-          if (!items.length) return;
-          setDanmaku((prev) => {
-            const merged = [...prev];
-            for (const it of items) {
-              const key = it.nick ? `${it.nick}:${it.text}` : it.text;
-              if (!seenMsg.has(key)) {
-                seenMsg.add(key);
-                // 长播防泄漏：去重集超出窗口后重建（最多短暂放行少量重复，避免无限增长直至 OOM）
-                if (seenMsg.size > 3000) {
-                  seenMsg.clear();
-                  seenMsg.add(key);
-                }
-                merged.push(it);
-              }
-            }
-            merged.sort((a, b) => a.time - b.time);
-            return merged.slice(-800);
-          });
-          setShowDanmaku(true);
-        } catch {}
-      };
-      poll();
-      const id = setInterval(poll, 5000);
-      return () => { alive = false; clearInterval(id); };
-    }
-    // 回放：从 LRC 文件拉取（参考 pocket48_lite：录播弹幕在 getLiveOne 的
-    // content.msgFilePath 指向的 LRC 文件，而非 barrage/list；格式 [hh:mm:ss.fff]昵称\t内容，
-    // 已由 parseDanmaku 解析为「秒」对上 playbackTime）
-    // ⚠️【串台修复】与直播分支对齐：切台（live↔vod、vod↔vod）先清空旧弹幕，
-    // 否则旧条目会残留到 LRC 返回为止（飘屏 + 弹幕列表抽屉同源）
-    setDanmaku([]);
-    setShowDanmaku(false);
-    pocketApi.getLiveLrc(lid)
-      .then((text) => {
-        if (!alive) return;
-        if (!text) {
-          setDanmaku([]);
-          setShowDanmaku(false);
-          showToast(t('该视频暂无弹幕'));
-          return;
-        }
-        const items = parseDanmaku(text);
-        setDanmaku(items);
-        setShowDanmaku(items.length > 0);
-        showToast(items.length > 0 ? t('弹幕 {count} 条', { count: items.length }) : t('该视频暂无弹幕'));
-      })
-      .catch(() => { if (alive) setDanmaku([]); });
-    return () => { alive = false; };
-  }, [playing?.url, playing?.isLive, playing?.item?.liveId, playing?.item?.id]);
-
-  // R1: 弹幕时间轴统一由 playerStore.position 驱动（统一播放器接管后原生 onProgress 实时上报，
-  //     无需本地插值；旧 useWebPlayer 插值路径已随内核切换删除）
-  /**
-   * 在线人数（官方 `getLiveOne.content.onlineNum`）。
-   *
-   * ⚠️【产品规则】「不显示在线人数」的限制**只针对房间内**：
-   *   - 本页（主直播页）的**直播与回放都显示**：回放取到的是「该场结束时的 onlineNum」，
-   *     是官方给出的数字，用户要求保留（上一版误把这里也一起挡掉了，属回归）。
-   *   - **房间里的**直播与回放不显示 —— 见 FollowedRoomsScreen 里对应的说明。
-   *   所以这里 `playerIsLive` 只用来决定**刷新频率**，不再当显示守卫。
-   *
-   * ⚠️ 实测结论（2026-09-26 直接打接口核实，不是猜的）：
-   *   - `getLiveOne` **没有** playNum / praiseNum 字段（上一版按文档猜的名字 → 所以胶囊不显示）
-   *   - 它返回 `onlineNum`：直播时是实时在线人数；回放能读到该场结束时的值
-   *   - 直播列表接口不带该字段，必须单独取详情（所以这里自己请求）
-   * 直播中每 30s 刷新；回放是定值，取一次即可。
-   */
-  const [liveOnlineNum, setLiveOnlineNum] = useState(0);
-  const playerLiveId = String(playing?.item?.liveId || playing?.item?.id || '')
-    // 回放兜底：VOD 地址里就带 liveId（详情接口对回放同样会返回 onlineNum，实测有值）
-    || liveIdFromUrl(String(playing?.url || ''));
-  const playerIsLive = !!playing?.isLive;
-  useEffect(() => {
-    // ⚠️【串台修复】换直播/录播先清零：旧直播间的「N 人在线」不再残留到新直播间数据返回
-    setLiveOnlineNum((prev) => (prev ? 0 : prev));
-    if (!playerLiveId) {
-      setLiveOnlineNum((prev) => (prev ? 0 : prev));
-      return undefined;
-    }
-    let alive = true;
-    const pull = () => {
-      pocketApi.getLiveOne(playerLiveId)
-        .then((res: any) => {
-          if (!alive) return;
-          const c = res?.content || res?.data || {};
-          setLiveOnlineNum(Number(c?.onlineNum || 0) || 0);
-        })
-        .catch(() => undefined);
-    };
-    pull();
-    // 回放（定值）：取一次就够，不轮询
-    if (!playerIsLive) return () => { alive = false; };
-    const timer = setInterval(pull, 30000);
-    return () => { alive = false; clearInterval(timer); };
-  }, [playerLiveId, playerIsLive]);
+  // 弹幕拉取/解析（直播 HTTP 轮询 5s + 回放 LRC）与人数胶囊已收口到统一播放宿主：
+  //   · 弹幕：src/player/session/usePlaybackDanmaku.ts（本页传 danmakuLivePollMs=5000 保持历史行为）
+  //   · 人数：直播=云信聊天室实时在线；回放=官方累计观看人次
+  //     （src/player/session/usePlaybackOnlineStat.ts + MediaPlaybackHost 的 onlineStat）
 
   const [rankStatus, setRankStatus] = useState('');
-  const [announcement, setAnnouncement] = useState('');
-  const [announceVisible, setAnnounceVisible] = useState(false);
-  /** 进入直播间默认展开公告（用户要求）。关闭后停留本次会话，不再自动弹回 */
+  // 公告（拉取 / 面板 / 展开态持久化 / 顶栏与控制坞按钮）已收口到统一播放宿主：
+  // 见 src/player/session/usePlaybackAnnouncement.ts + MediaPlaybackHost 的 announcement 开关
+  //（用户 2026-10-02：房间与观看历史里也要能看到公告）。
   /**
-   * 公告展开态：**记住收起状态**（用户要求）。挂载时从 AsyncStorage 读一次；
-   * 收起/展开即时写回；新开播不再强制展开（否则记住的收起被打回）。
+   * 请求在途标记，**按 tab(live/vod) 分别持有**。
+   * 旧实现是一个全局布尔：live 的请求还在飞时切到 vod，新请求会被
+   * `if (loadingRef.current) return` 直接吞掉，而旧请求（另一个 tab 的数据）
+   * 仍会照常写状态 → 列表串台 / 切 tab 后空白。
    */
-  const [announceExpanded, setAnnounceExpanded] = useState(true);
-  const announcePrefLoadedRef = useRef(false);
-  useEffect(() => {
-    if (announcePrefLoadedRef.current) return;
-    announcePrefLoadedRef.current = true;
-    AsyncStorage.getItem(PLAYER_ANNOUNCE_COLLAPSED_KEY)
-      .then((v: string | null) => setAnnounceExpanded(v !== '1'))
-      .catch(() => {});
-  }, []);
-  const setAnnounceExpandedPersisted = (v: boolean) => {
-    setAnnounceExpanded(v);
-    AsyncStorage.setItem(PLAYER_ANNOUNCE_COLLAPSED_KEY, v ? '0' : '1').catch(() => {});
-  };
-  /** 本次进入是否已自动展开过（避免用户手动收起后被自动展开逻辑again弹开） */
-  const announceAutoShownRef = useRef(false);
-  const loadingRef = useRef(false);
-  const playingRef = useRef<typeof playing>(null);
+  const loadingRef = useRef<Record<'live' | 'vod', boolean>>({ live: false, vod: false });
   // v2.6: group filter + search
-  // 默认选中「关注」：直播/录播默认只看关注成员（用户要求），点「全部」等 chips 可切换
-  const [groupId, setGroupId] = useState(-1);
+  /**
+   * 默认选中「全部」（用户 2026-11-04：「切换到直播页面改为进入全部页面而不再是关注」）。
+   * -1 仍是「关注」chip（保留筛选能力），只是不再作为进入页面时的默认值。
+   */
+  const [groupId, setGroupId] = useState(0);
   const [search, setSearch] = useState('');
-  // 弹幕：解析后的弹幕数组 + 是否显示 + 当前播放进度（驱动弹幕发射）
-  const [danmaku, setDanmaku] = useState<DanmakuItem[]>([]);
-  const [showDanmaku, setShowDanmaku] = useState(false);
   // 关注成员 id 集合：「关注」tag 实时筛选（60s 同步一次）
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
-  const [playbackTime, setPlaybackTime] = useState(0);
-  // R1: 弹幕时钟 = 统一播放器上报的真实进度（live 也在播中持续推进，对齐 poll 弹幕时间轴）
-  const danmakuClock = usePlayerStore((s) => s.position);
-  // 弹幕显示开关：统一读弹幕设置里的总开关（AsyncStorage 持久化）。
-  // 不再读 playerStore.danmakuOn —— 那个字段每次 open() 都被强制重置为 true，
-  // 用户关掉弹幕后一换直播间就又飘起来（「关了还飘」的根因）。
-  const playerDanmakuOn = useDanmakuSettings((s) => s.enabled);
-  // 播放器控制（哔哩哔哩风格自定义控制条）
-  const videoRef = useRef<any>(null);
-  const [duration, setDuration] = useState(0);
-  const [paused, setPaused] = useState(false);
-  const [playbackRate, setPlaybackRate] = useState(1);
 
-  // 画中画（悬浮窗）状态同步：正在播放且未暂停时置位，切后台自动进悬浮窗
+  // 画中画（悬浮窗）状态同步：播放器打开即置位（暂停/内核细节由播放器内部处理），
+  // 切后台自动进悬浮窗
   useEffect(() => {
     // 应用内小窗已接管 PiP 标志时不覆盖（防小窗切后台不进悬浮窗）
     if (useMiniPlayerStore.getState().visible) return;
-    setPipPlaying(!!playing && !paused && !useWebPlayer);
-  }, [playing, paused, useWebPlayer]);
+    setPipPlaying(!!media);
+  }, [media]);
   // 搜索：选中成员后，搜索框转为「该成员的标题/日期」过滤
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
+  /**
+   * selectedMember 的 ref 镜像（用户 2026-10-01 bug 修复）：
+   * 「关注录播并发扫描」（loadFollowVodFast）是个 useCallback，靠 eslint-disable 固定依赖，
+   * 若把 selectedMember 放进闭包就会读到旧值 —— 用 ref 让扫描在成员检索模式下**中途也能让位**，
+   * 否则扫描结果会 merge 进成员列表（混入关注成员的录播、把成员数据搅乱）。
+   */
+  const selectedMemberRef = useRef<Member | null>(null);
+  selectedMemberRef.current = selectedMember;
   const [dateFilter, setDateFilter] = useState<Date | null>(null);
   const [showCalendar, setShowCalendar] = useState(false);
-  const [showDanmakuSettings, setShowDanmakuSettings] = useState(false);
-  /**
-   * 弹幕列表抽屉（对齐桌面端弹幕时间轴面板）。
-   * 录播 = LRC 弹幕按时间升序（可点击跳转 + 跟随播放）；
-   * 直播 = 实时弹幕按最新在前（无时间轴，只做列表/搜索/按人筛选）。
-   */
-  const [showDanmakuList, setShowDanmakuList] = useState(false);
   /** 弹幕列表点发送者 → 用户资料卡（成员/粉丝同一个界面） */
   const [danmakuProfile, setDanmakuProfile] = useState<UserProfileTarget | null>(null);
-  const danmakuListEntries = useMemo<DanmakuListEntry[]>(() => {
-    if (playing?.isLive) {
-      return liveBarrage.items.map((item) => ({
-        id: item.id,
-        time: 0,
-        nick: item.nick || '',
-        text: item.text || '',
-        kind: item.kind,
-        // 直播弹幕带发送者口袋 userId → 弹幕列表点昵称可直接查资料
-        userId: item.userId || undefined,
-        avatar: item.avatar || undefined,
-      }));
-    }
-    // 录播：danmaku 由 parseDanmaku 保证按时间升序
-    return danmaku.map((item, index) => ({
-      id: `dm-${index}-${item.time}`,
-      time: item.time,
-      nick: item.nick || '',
-      text: item.text,
-    }));
-  }, [playing?.isLive, liveBarrage.items, danmaku]);
-  const [moreVisible, setMoreVisible] = useState(false);
   const screen = useWindowDimensions();
   /** 播放器页是否横屏：公告偏移与礼物/贡献榜浮层都要按横屏重算 */
   const isPlayerLandscape = isLandscapeSize(screen.width, screen.height);
-  /**
-   * 公告面板 top 偏移。
-   *
-   * ⚠️ 历史坑（用户反馈「公告的收起会和播放器功能重叠」）：
-   * 这里原先用一套**本地**的 controlsVisible / controlsOpacity + 3 秒定时器驱动面板上滑，
-   * 而真正的控制条显隐在 playerStore 里（由 PlayerChrome 消费），两套状态完全不同步 ——
-   * 面板长期停在 NO_BAR(≈insets.top+4) 位置，而播放器顶栏的「…」按钮恰好也在右上角，
-   * 且顶栏 zIndex(30) > 面板(29) → 「收起」被「…」压住，点击还被顶栏抢走。
-   * 现在：偏移**只**由 playerStore 的真实控制条状态驱动，并且任何情况下都不越过顶栏区域。
-   */
-  const insets = useSafeAreaInsets();
-  const announceTopAnim = useRef(new Animated.Value(96)).current;
-  const playerControlsVisible = usePlayerStore((s) => s.controlsVisible);
-  const playerFullscreen = usePlayerStore((s) => s.fullscreen);
-  /** 与 PlayerChrome 顶栏同一套公式（见 src/player/chrome/PlayerChrome.tsx 的 topPad） */
-  const playerTopPad = isPlayerLandscape ? (playerFullscreen ? 8 : insets.top + 6) : insets.top + 6;
-  /** 顶栏盒底 = paddingTop + 按钮 40 + 6 余量 */
-  const ANNOUNCE_TOP_WITH_BAR = playerTopPad + 46;
-  /**
-   * 控制条隐藏时的目标位置：只比 WITH_BAR 高一点点，**不回到屏幕最上沿** ——
-   * 玩家一点屏幕顶栏就回来了，若面板此刻在最上沿，180ms 动画期间必然与「…」重叠。
-   */
-  const ANNOUNCE_TOP_NO_BAR = Math.max(playerTopPad + 6, insets.top + 10);
-  useEffect(() => {
-    Animated.timing(announceTopAnim, {
-      toValue: playerControlsVisible ? ANNOUNCE_TOP_WITH_BAR : ANNOUNCE_TOP_NO_BAR,
-      duration: 180,
-      useNativeDriver: true,
-    }).start();
-  }, [playerControlsVisible, ANNOUNCE_TOP_WITH_BAR, ANNOUNCE_TOP_NO_BAR, announceTopAnim]);
+  // 公告面板的 top 偏移/动画（与控制条显隐联动）随之收进统一播放宿主。
 
   const GROUPS: { label: string; id: number; match: string }[] = [
     { label: '全部', id: 0, match: '' },
@@ -941,8 +648,18 @@ export default function MediaScreen() {
   }, [members, followedIds]);
   const list = useMemo(() => {
     let raw = tab === 'live' ? liveList : vodList;
-    // 关注筛选：命中关注成员 id 或昵称 的在播直播/录播（id 字段因接口而异，昵称兜底保证录播也能打通）
-    if (groupId === -1) {
+    /**
+     * ⚠️ 成员检索模式（selectedMember）下**不能再套「关注 / 团体」筛选**（用户 2026-10-01 bug 修复）。
+     *
+     * 数据已经是服务端按该成员 userId 直查的结果（见 doFetch 的 userId 分支），
+     * 而搜索是从**全成员库**里选的 —— 搜到的成员未必在「已关注」里，
+     * 而默认分组就是「关注」（groupId === -1）→ 关注筛选会把 TA 的录播整片滤掉，
+     * 表现为「选中成员名之后一条都没有 / 还是别人的内容」。
+     */
+    if (selectedMember) {
+      // 成员模式：raw 即该成员数据，只保留日期/标题过滤（见下方 dateFilter / search）
+    } else if (groupId === -1) {
+      // 关注筛选：命中关注成员 id 或昵称 的在播直播/录播（id 字段因接口而异，昵称兜底保证录播也能打通）
       raw = raw.filter((item: any) => {
         const owner = String(
           item.userId || item.ownerId || item.memberId || item.userInfo?.userId || item.userInfo?.id
@@ -982,9 +699,12 @@ export default function MediaScreen() {
   }, [tab, liveList, vodList, search, groupId, selectedMember, dateFilter, followedIds]);
 
   // 录播按日期分组（今天/昨天/更早），live tab 不用
-  /** 条目 → 队伍名（应援色标注用）：官方条目带 userInfo.userId / userId，全量成员库反查 */
+  /**
+   * 条目 → 队伍名（应援色标注用）：**先 userId、后归一化昵称**，与写进历史的
+   * `meta.team` 用同一个 `resolveTeam`（口径分裂 = 「卡片有队伍、历史没有」的根因）。
+   */
   const teamOfItem = (it: any): string =>
-    memberById.get(String(it?.userInfo?.userId || it?.userId || ''))?.team || '';
+    resolveTeam(memberLookup, { userId: pickMemberUserId(it), name: pickMemberNickname(it) });
   const vodRows = useMemo(() => {
     if (tab !== 'vod') return null;
     // 纯网格：不再按「今天/昨天/更早」分组（接口 startTime 为字符串毫秒，日期分组易出错），
@@ -1008,151 +728,100 @@ export default function MediaScreen() {
     [giftNum, selectedGift],
   );
 
-  useEffect(() => {
-    playingRef.current = playing;
-  }, [playing]);
-
-  // v2.6: auto-play when navigated from room with playLiveId/playUrl
+  /**
+   * 深链 / 房间直达播放（v2.6；2026-10-02 起改走统一播放宿主）：
+   * 只把路由参数转成 PlayMedia 交给宿主 —— 解析（含公告兜底）、续播、弹幕、在线人数
+   * 全部由 MediaPlaybackHost 完成，本页不再手写解析链路（原 130 行 startPlay 逻辑已删）。
+   */
   useEffect(() => {
     const lid = route.params?.playLiveId;
     const directUrl = route.params?.playUrl;
     if (!lid && !directUrl) return;
-    // ⚠️【串台修复】深链/directUrl 复用已挂载实例时对齐 startPlay 的重置：
-    // 否则上次播放失败的报错文案 + 重试按钮会显示在新直播间的解析 shell 里
-    setPlayerError('');
-    setUseWebPlayer(false);
     const isLive = route.params?.mode !== 'vod';
-    (async () => {
-      try {
-        if (directUrl) {
-          // 房间页已解析出可用地址：直接播放，不再二次请求接口
-          // ⚠️【公告串场修复】此分支会提前 return，跳过下方深链解析路径的清空，需单独清一次
-          setAnnouncement('');
-          setAnnounceVisible(false);
-          announceAutoShownRef.current = false;
-          const title = route.params?.playTitle || t('直播');
-          const cover = route.params?.playCover || '';
-          setPlaying({
-            url: directUrl,
-            urls: [directUrl],
-            title,
-            cover: normalizeUrl(cover),
-            item: { liveId: lid || '', title, liveCover: cover },
-            isLive,
-            needsVlc: streamNeedsProxy(directUrl),
-            // 大小窗切换续播：小窗回传 playPosition
-            position: Number(route.params?.playPosition) || 0,
-          });
-          if (!isLive && tab !== 'vod') switchTab('vod');
-          return;
-        }
-        if (!lid) return;
-        // 点击即进播放器：先以「解析中」状态渲染播放器 shell，解析完成后无缝播放；
-        // 失败在播放器内提示（含重试），不再停留在列表页干等或弹窗
-        const guessTitle = route.params?.playTitle || t('直播');
-        const guessCover = route.params?.playCover || '';
-        setPlaying({
-          url: '',
-          urls: [],
-          title: guessTitle,
-          cover: normalizeUrl(guessCover),
-          item: { liveId: lid, title: guessTitle, liveCover: guessCover },
-          isLive,
-          needsVlc: false,
-          resolving: true,
-        });
-        // ⚠️【公告串场修复】深链/换直播进入时组件不重挂载，先清空旧公告再解析，
-        // 仅当新直播确有公告才显示（下方设置处）。
-        setAnnouncement('');
-        setAnnounceVisible(false);
-        announceAutoShownRef.current = false;
-        // 解析：详情接口 → 公开详情 → 直播/录播列表按 liveId 查找（多层兜底）
-        let detail: any = await pocketApi.getLiveOne(lid).catch(() => null);
-        if (!detail) detail = await pocketApi.getOpenLiveOne(lid).catch(() => null);
-        const item = (detail?.content || detail?.data || detail || {}) as any;
-        // ⚠️【公告修复】这条链路（首页/房间卡片直进播放器）以前只解析播放地址，
-        // 从不读 announcement → 只有「在列表里点」才看得到公告。
-        // 这里补一次设置（与 startPlay 同判定，含 getOpenLiveOne 兜底）。
-        const annText = String(item?.announcement || '').trim();
-        if (annText) {
-          setAnnouncement(annText);
-          setAnnounceVisible(true);
-          setAnnounceExpandedPersisted(true);
-          announceAutoShownRef.current = true;
-        } else {
-          // getLiveOne 没拿到 → 用公开详情兜底再试一次（上面 detail 可能是 getLiveOne 的结果）
-          const detail2 = await pocketApi.getOpenLiveOne(lid).catch(() => null);
-          const d2 = (detail2?.content || detail2?.data || detail2 || {}) as any;
-          const annText2 = String(d2?.announcement || '').trim();
-          if (annText2) {
-            setAnnouncement(annText2);
-            setAnnounceVisible(true);
-            setAnnounceExpandedPersisted(true);
-            announceAutoShownRef.current = true;
-          }
-        }
-        let urls = pickPlayableUrls(item, isLive);
-        if (!urls.length) {
-          const found = await findLiveItemInLists(lid, isLive).catch(() => null);
-          if (found) urls = pickPlayableUrls(found, isLive);
-        }
-        const url = urls[0] || '';
-        if (!url) {
-          setPlayerError(t('未解析到播放地址，请点击重试。'));
-          setPlaying((p) => (p ? { ...p, resolving: false } : p));
-          return;
-        }
-        const title = route.params?.playTitle || item.title || item.liveRoomTitle || t('直播');
-        const cover = route.params?.playCover || item.liveCover || item.coverPath || '';
-        setPlaying({
-          url,
-          urls,
-          title,
-          cover: normalizeUrl(cover),
-          item: { ...item, liveId: lid, title, liveCover: cover },
-          isLive,
-          needsVlc: streamNeedsProxy(url),
-          resolving: false,
-        });
-        // Switch tab to match mode
-        if (!isLive && tab !== 'vod') switchTab('vod');
-      } catch (e) {
-        setPlayerError(errorMessage(e));
-        setPlaying((p) => (p ? { ...p, resolving: false } : p));
-      }
-    })();
+    const title = route.params?.playTitle || t('直播');
+    const cover = normalizeUrl(route.params?.playCover || '');
+    // 小窗回大窗／播放列表带入的续播位置（宿主 initialPosition 优先用它）
+    setPendingResumeAt(Number(route.params?.playPosition) || 0);
+    // 来源 tab（首页直达带 playFrom='Home'）：本次播放期间记住，关闭播放器时回跳。
+    // 只认这次直达的参数 —— 之后用户从列表点卡片播放（startPlay）会清掉，避免路由上
+    // 残留的旧参数把「退出播放」错误地弹回首页。
+    mediaFromRef.current = String(route.params?.playFrom || '');
+    setMedia({
+      kind: isLive ? 'live' : 'replay',
+      url: directUrl || '',
+      title,
+      cover,
+      liveId: String(lid || ''),
+      // 明确直播/回放语义（与 mode 一致）：避免 m3u8/mp4 二义流再走一次列表探测
+      isLive,
+      // 电台直播（首页直播卡带过来的 liveType=2）：首帧就用照片轮播，不闪「成员离开」
+      radio: isLive && Number(route.params?.playLiveType) === 2,
+      // nickname / team 从路由参数带入（历史/稍后再看跳来时）：meta 的 owner/team 靠它取，
+      // 记录观看历史时也靠它保留成员名与队伍徽章（成员库还没同步的设备也能保住队伍）
+      owner: String(route.params?.playOwner || ''),
+      team: String(route.params?.playTeam || ''),
+      ownerId: String(route.params?.playOwnerId || ''),
+      // raw：供「进入房间」按钮做成员反查（与列表点击同一条 findMemberByHint 链路）
+      raw: {
+        liveId: String(lid || ''),
+        title,
+        liveType: Number(route.params?.playLiveType) || undefined,
+        liveCover: cover,
+        nickname: String(route.params?.playOwner || ''),
+        team: String(route.params?.playTeam || ''),
+        ownerId: String(route.params?.playOwnerId || ''),
+        userId: String(route.params?.playOwnerId || ''),
+      },
+    });
+    /**
+     * 录播/回放：顺带把 tab 切到「录播」，让用户退出播放时看到的是录播列表。
+     *
+     * ⚠️ 但**从历史 / 稍后再看跳进来时不要切**（用户 2026-09-30：「从稍后再看出来还容易
+     * 直接卡住」）：切 tab 会触发 doFetch('vod') 拉整页录播列表并渲染整个网格，
+     * 而这条路径的用户退出播放是回到列表页，根本不会看这个 tab。
+     */
+    if (!isLive && tab !== 'vod' && !route.params?.fromWatch) switchTab('vod');
   }, [route.params?.playLiveId, route.params?.playUrl, route.params?.playNonce]);
 
   useEffect(() => {
-    setTabBarHidden(!!playing);
+    setTabBarHidden(!!media);
     return () => setTabBarHidden(false);
-  }, [playing, setTabBarHidden]);
+  }, [media, setTabBarHidden]);
 
   // 从房间导航进来时，房间页失焦会把 tabBarHidden 重置为 false；
   // 这里在获得焦点时兜底一次，确保播放状态下底部导航始终隐藏。
   useFocusEffect(useCallback(() => {
-    if (playing) setTabBarHidden(true);
-  }, [playing, setTabBarHidden]));
+    if (media) setTabBarHidden(true);
+  }, [media, setTabBarHidden]));
 
+  /**
+   * 硬件 / 手势返回：**必须与左上角关闭按钮走同一条出口**（closePlayer）。
+   *
+   * 这里以前是直接 `setLiveImmersiveMode(false)` + `setPlaying(null)` —— 只关播放器、
+   * 不做任何来源判断，于是从「历史 / 稍后再看」进来时返回键会留在 Media（直播）页，
+   * 回不到原列表（用户反馈「历史和稍后再看退出后不要到直播界面」）。
+   * closePlayer 定义在下方若干行（普通函数，每次渲染重建）→ 用 ref 转发避免 TDZ。
+   */
+  const closePlayerRef = useRef<() => void>(() => {});
+  /** 本次播放的来源 tab（首页直达带 playFrom）：关闭播放器时回跳（见 closePlayer） */
+  const mediaFromRef = useRef('');
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!playing) return false;
-      setLiveImmersiveMode(false);
-      followSystem();
-      setPlaying(null);
+      if (!media) return false;
+      closePlayerRef.current();
       return true;
     });
     return () => subscription.remove();
-  }, [playing]);
+  }, [media]);
 
   const doFetch = useCallback(async (mode: 'live' | 'vod', cursor = 0, append = false, silent = false, userId?: string | number) => {
-    if (loadingRef.current) {
-      // 上一次请求还在飞：早退必须顺手把下拉刷新的指示器复位，
+    if (loadingRef.current[mode]) {
+      // 上一次同 tab 请求还在飞：早退必须顺手把下拉刷新的指示器复位，
       // 否则用户下拉撞上在飞的请求时，转圈会永远留在那里没人关（见 RefreshControl 注释）。
       setRefreshing(false);
       return;
     }
-    loadingRef.current = true;
+    loadingRef.current[mode] = true;
     if (!silent) setLoading(true);
     setError('');
     try {
@@ -1176,8 +845,7 @@ export default function MediaScreen() {
       if (!Array.isArray(shellList)) throw new Error('live list empty shell');
       const next = normalizeLiveList(res);
       const nextToken = Number((res as any)?.content?.next ?? (res as any)?.data?.next ?? (res as any)?.next ?? 0) || 0;
-      setNextCursor(nextToken);
-      nextCursorRef.current = nextToken; // 同步 ref：翻页用最新游标，避免闭包读到旧值重复拉同一页
+      nextCursorRef.current = nextToken; // 翻页用最新游标，避免闭包读到旧值重复拉同一页
       // 翻页终止条件：本页有数据 且 游标确有前进（nextToken>0 且不等于本次请求的 cursor）。
       // 加 `nextToken !== cursor` 兜底，防止接口返回不变游标却持续吐相同数据导致的死循环。
       setHasMore(next.length > 0 && nextToken > 0 && nextToken !== cursor);
@@ -1186,10 +854,15 @@ export default function MediaScreen() {
     } catch (err) {
       // 静默轮询失败（60s 自动刷新）不弹错误条：保留旧列表继续展示，下一轮自愈；
       // 仅首屏/下拉/切 tab（silent=false）失败才提示（列表为空时不会误显示"暂无数据"）。
+      //
+      // ⚠️ 这里必须无条件关掉分页（hasMore=false），**不要**只对非静默失败关：
+      // 下方自动翻页 effect 的依赖里有 pageVersion，而 doFetch 的 finally 每次都会
+      // 递增 pageVersion → 若失败后 hasMore 仍为 true，effect 会立刻再翻下一页、
+      // 再失败、再递增……形成重试风暴（搜索/成员筛选分支还没有 60 页上限）。
       if (!silent) setError(errorMessage(err));
       setHasMore(false);
     } finally {
-      loadingRef.current = false;
+      loadingRef.current[mode] = false;
       if (!silent) setLoading(false);
       setRefreshing(false);
       setPageVersion((v) => v + 1); // 通知自动翻页 effect：本次拉取完成，可继续下一页
@@ -1199,12 +872,26 @@ export default function MediaScreen() {
   const reloadList = useCallback(() => {
     // 刷新时保留当前列表内容，避免列表被清空导致骨架屏闪一下；
     // 仅当列表本就为空（首屏）时才走骨架屏逻辑。
-    setNextCursor(0); setHasMore(true);
+    nextCursorRef.current = 0;
+    setHasMore(true);
     doFetch(tab, 0);
   }, [doFetch, tab]);
 
   // initial load
-  useEffect(() => { doFetch(tab, 0); }, [doFetch, tab]);
+  useEffect(() => {
+    /**
+     * ⚠️ 成员检索模式下**不要**在这里发「不带 userId」的全局请求（用户 2026-10-01 bug 修复）。
+     *
+     * 点选成员时 `setTab('vod')` 会触发本 effect，它发出的全局请求会先占住
+     * `loadingRef['vod']`；紧接着「成员检索 effect」里的 userId 直查
+     *   `doFetch('vod', 0, false, false, mid)`
+     * 因 doFetch 开头「上一次同 tab 请求还在飞 → 早退」的守卫被**整段吞掉** ——
+     * 最终列表里留下的是全局录播，看起来就是「选中成员名没有正确检索」。
+     * 成员数据统一交给下面的成员检索 effect 带 userId 直查。
+     */
+    if (selectedMember && tab === 'vod') return;
+    doFetch(tab, 0);
+  }, [doFetch, tab, selectedMember]);
 
   // 选中成员时切到「回放」并重置列表，立即触发首屏加载。
   // 用 setTimeout(0) 让上面的 setState 先提交，避免读到切换前的旧 tab；
@@ -1215,7 +902,7 @@ export default function MediaScreen() {
   useEffect(() => {
     if (!selectedMember) return;
     const mid = String(selectedMember.id || (selectedMember as any).userId || (selectedMember as any).memberId || '');
-    setVodList([]); setNextCursor(0); setHasMore(true);
+    setVodList([]); setHasMore(true);
     setTab('vod');
     const id = setTimeout(() => doFetch('vod', 0, false, false, mid), 0);
     return () => clearTimeout(id);
@@ -1226,7 +913,7 @@ export default function MediaScreen() {
   const prevMemberRef = useRef<any>(null);
   useEffect(() => {
     if (prevMemberRef.current && !selectedMember && tab === 'vod') {
-      setVodList([]); setNextCursor(0); setHasMore(true);
+      setVodList([]); setHasMore(true);
       doFetch('vod', 0);
     }
     prevMemberRef.current = selectedMember;
@@ -1238,12 +925,15 @@ export default function MediaScreen() {
   // 并行翻页可用性（state 驱动：false 时本 effect 接管游标链）
   const [pageModeOk, setPageModeOk] = useState<boolean | null>(null);
   useEffect(() => {
-    if (loadingRef.current || loading) return;
+    if (loadingRef.current[tab] || loading) return;
     const haveFilter = !!search.trim() || !!selectedMember || groupId === -1;
     if (!haveFilter || !hasMore) return;
     if (selectedMember && tab !== 'vod') return; // 成员检索固定在录播页，等 tab 切到 vod 再翻
     // 「关注」录播：并行扫描进行中不重复走游标链；扫描完成后从最深处继续兜底补更老录播
-    if (groupId === -1 && tab === 'vod' && pageModeOk !== false && !scanDoneRef.current) return;
+    // ⚠️ 成员检索模式必须排除（用户 2026-10-01 bug 修复）：该模式下关注扫描已被跳过
+    //（scanDoneRef 永远不为 true），若还在这里 return，成员列表就**永远只加载第一页**
+    //—— 直接走游标链翻页即可（loadMore 会带上该成员 userId）。
+    if (!selectedMember && groupId === -1 && tab === 'vod' && pageModeOk !== false && !scanDoneRef.current) return;
     // 「关注」tag 翻页上限：最多补 60 页（1200 条），覆盖被新录播挤到深处的关注成员；静默加载不闪控件
     if (groupId === -1) {
       if (filterPages.current >= 60) return;
@@ -1269,8 +959,15 @@ export default function MediaScreen() {
   // 关注成员录播：并发按 userId 服务端直查（用户指定实现）——
   // 不再"扫描全局流 48h 再前端筛选"（慢且命中率低），直接对每个关注成员的 userId 调
   // getLiveList({ userId }) 拿 TA 专属录播，合并去重。桌面基线/48tools 同款能力。
+  /**
+   * ★ 结果缓存（用户 2026-10-01 性能优化）：每次切到录播 tab 都重扫 8 个成员接口
+   * （真机日志：1-2s 的 JS/网络占用）。现在缓存「userId → 最近一页」，3 分钟内
+   * 重复进入直接回放缓存（瞬时渲染），过期才重新扫描。下拉刷新走 refreshTick 强制重扫。
+   */
+  const followVodCacheRef = useRef<{ at: number; data: Array<{ uid: string; items: any[] }> } | null>(null);
   const loadFollowVodFast = useCallback(async () => {
-    if (followLoadingRef.current || groupId !== -1 || tab !== 'vod') return;
+    // 成员检索模式（selectedMember）让位：并发扫描是「关注」视图的能力，不能污染成员直查结果
+    if (followLoadingRef.current || groupId !== -1 || tab !== 'vod' || selectedMemberRef.current) return;
     if (!useSettingsStore.getState().settings.p48Token) { scanDoneRef.current = true; return; }
     followLoadingRef.current = true;
     setFollowFetching(true);
@@ -1282,6 +979,13 @@ export default function MediaScreen() {
       return merged.sort((a: any, b: any) => (startTimeOf(b) - startTimeOf(a)) || 0);
     });
     try {
+      // 0) 缓存命中：3 分钟内直接回放，不碰网络
+      const cached = followVodCacheRef.current;
+      if (cached && Date.now() - cached.at < 3 * 60 * 1000) {
+        for (const { items } of cached.data) merge(items);
+        scanDoneRef.current = true;
+        return;
+      }
       // 1) 关注成员 id 列表
       const idsRes = await pocketApi.getFollowedIds().catch(() => null);
       const ids = idsRes ? unwrapList(idsRes, ['content.data', 'content', 'data', 'list']).map(String) : [];
@@ -1301,21 +1005,25 @@ export default function MediaScreen() {
         return;
       }
       const BATCH = 8;
+      const cacheData: Array<{ uid: string; items: any[] }> = [];
       for (let i = 0; i < userIds.length; i += BATCH) {
-        if (groupId !== -1) return;
+        // 中途让位：切换分组 / 用户在扫描期间选中了某个成员 → 立即停止继续 merge
+        if (groupId !== -1 || selectedMemberRef.current) return;
         const chunk = userIds.slice(i, i + BATCH);
         const results = await Promise.allSettled(
           chunk.map((uid) => pocketApi.getLiveList({ next: 0, record: true, debug: true, size: PAGE_SIZE, userId: uid })),
         );
         let got = 0;
-        for (const r of results) {
+        for (let k = 0; k < results.length; k += 1) {
+          const r = results[k];
           if (r.status !== 'fulfilled') continue;
           const items = normalizeLiveList(r.value);
-          if (items.length) { got += 1; merge(items); }
+          if (items.length) { got += 1; merge(items); cacheData.push({ uid: chunk[k], items }); }
         }
         setPageVersion((v) => v + 1);
         console.info(`[FollowVod] userId 直查批次 ${i / BATCH + 1}/${Math.ceil(userIds.length / BATCH)} 命中成员=${got}/${chunk.length}`);
       }
+      followVodCacheRef.current = { at: Date.now(), data: cacheData };
       console.info(`[FollowVod] userId 并发直查完成 members=${userIds.length} 耗时=${Date.now() - t0}ms`);
     } catch (e) {
       console.warn('[FollowVod] userId 直查失败，退回游标链', e);
@@ -1330,12 +1038,15 @@ export default function MediaScreen() {
   // 进入「关注」录播视图或下拉刷新后触发并行扫描
   const [refreshTick, setRefreshTick] = useState(0);
   useEffect(() => {
+    // 成员检索模式跳过关注扫描（用户 2026-10-01 bug 修复）：扫描结果会 merge 进 vodList，
+    // 把「该成员的录播」掺成「关注成员的录播」
+    if (selectedMember) return;
     if (groupId === -1 && tab === 'vod' && token) {
       scanDoneRef.current = false;
       loadFollowVodFast();
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [groupId, tab, refreshTick]);
+  }, [groupId, tab, refreshTick, selectedMember]);
 
   // 关注成员 id 同步（60s 一次；state 声明在组件上部供「关注」tag 筛选使用）
   useEffect(() => {
@@ -1346,16 +1057,18 @@ export default function MediaScreen() {
       setFollowedIds(new Set(ids));
     }).catch(() => {});
     load();
-    const id = setInterval(load, 60000);
+    // 后台不轮询：省电省流量（原先这些定时器在 App 切后台后仍全速跑）
+    const id = setInterval(() => { if (AppState.currentState === 'active') load(); }, 60000);
     return () => { alive = false; clearInterval(id); };
   }, []);
 
   // 直播列表实时自动刷新：浏览直播 tab 且未播放时每 60s 静默重拉（关注成员开播即时可见）
   useEffect(() => {
-    if (tab !== 'live' || playing) return;
-    const id = setInterval(() => { doFetch('live', 0, false, true); }, 60000);
+    if (tab !== 'live' || media) return;
+    // 后台不轮询：省电省流量（原先这些定时器在 App 切后台后仍全速跑）
+    const id = setInterval(() => { if (AppState.currentState === 'active') doFetch('live', 0, false, true); }, 60000);
     return () => clearInterval(id);
-  }, [tab, playing, doFetch]);
+  }, [tab, media, doFetch]);
 
   useEffect(() => () => {
     setLiveImmersiveMode(false);
@@ -1375,96 +1088,81 @@ export default function MediaScreen() {
         setTimeout(() => {
           if (!isPipActive()) followSystem();
         }, 600);
-      } else if (playing) {
+      } else if (media) {
         const wantLandscape = !!usePlayerStore.getState().fullscreen;
         applyOrientation(wantLandscape ? 'landscape' : 'follow');
       }
     });
     return () => sub.remove();
-  }, [playing]);
+  }, [media]);
 
   const closePlayer = () => {
     setLiveImmersiveMode(false);
     followSystem();
-    setPlaying(null);
-    setAnnouncement('');
-    setAnnounceVisible(false);
-    // 复位为「默认展开」：下次进入直播间仍是默认打开公告
-    setAnnounceExpandedPersisted(true);
-    announceAutoShownRef.current = false;
+    // 关闭即卸载宿主（卸载会自动作废在途解析，并停止弹幕/轮询/内核）
+    setMedia(null);
+    setPendingResumeAt(0);
+    /**
+     * 从「历史 / 稍后再看」进来的：关闭播放器要回到**那个列表本身**。
+     *
+     * ⚠️ 必须按页名 navigate（`watchFrom`，由 MediaListPage 带过来）：
+     *   · 这两个页面是**根栈页面**（旧注释「它们留在 Settings tab 的栈里」是错的），
+     *     入口在设置页只是 navigate 到根栈的 `HistoryScreen` / `WatchLaterScreen`；
+     *   · 进播放用的是 `navigate('Main', {screen:'Media'})`，会把根栈上的它们 pop 掉，
+     *     所以 `goBack()` 回不去（上一页已经卸载）—— 这正是用户反馈
+     *     「退出后跑到直播页/设置页」的原因。
+     * 兜底：老调用方只带了 fromWatch（无 watchFrom）→ 回设置 tab，至少不停在直播页。
+     */
+    const watchFrom = String(route.params?.watchFrom || '');
+    // 诊断（用户 2026-10-01「看完回到本来的页面，不要去直播页」）：回跳分支的走向落一条日志
+    logInfo(`[watch] closePlayer: fromWatch=${!!route.params?.fromWatch} watchFrom=${watchFrom || '(无)'} fromRoom=${!!route.params?.fromRoom}`, 'watch');
+    if (watchFrom) {
+      /**
+       * ★ 先把 Main 的活跃 tab 恢复到 Settings，再回到列表页（用户 2026-10-01：
+       * 「退出观看历史应该回到设置，怎么到直播界面了」）。
+       * 根因：进播放器用的是 navigate('Main', {screen:'Media'}) —— 它把 Main 的
+       * 活跃 tab 从 Settings 切到了 Media；之后用户在历史页按返回键 goBack 回 Main，
+       * Main 显示的是**上次活跃的 tab（Media）**＝「跑到直播界面」。
+       * 先 navigate 回 Settings tab，退出历史页后 goBack 落在设置上。
+       */
+      navigation.navigate('Main', { screen: 'Settings' });
+      navigation.navigate(watchFrom as any);
+      return;
+    }
+    if (route.params?.fromWatch) {
+      navigation.navigate('Main', { screen: 'Settings' });
+      return;
+    }
+    /**
+     * 首页直达（公演直播卡 / 首页直播卡，playFrom='Home'）：关闭播放器 = **回到首页**。
+     * 用户 2026-10-04：「生日会退出之后怎么没有留在主页而是到了直播页」——
+     * 首页跳转是 tab 切换（不是根栈 push），不走 goBack，不显式切回就会停在 Media（直播页）。
+     */
+    const playFrom = mediaFromRef.current;
+    mediaFromRef.current = '';
+    if (playFrom) {
+      // 诊断（用户 2026-10-04「生日会退出之后怎么没有留在主页」）：回跳分支的走向落一条日志
+      logInfo(`[media] closePlayer: 回来源 ${playFrom}`, 'media');
+      navigation.navigate(playFrom as any);
+      return;
+    }
     // fromRoom 直达（房间点开）：关闭播放器 = 返回房间
     if (route.params?.fromRoom) navigation.goBack();
   };
+  // 供硬件返回键调用（见上方 BackHandler 的 closePlayerRef）：始终指向最新的 closePlayer
+  closePlayerRef.current = closePlayer;
 
-  // 应用内小窗：当前播放交棒给悬浮小窗（小窗独立 Video/LiveExoView 实例续播），关掉大播放器。
-  // RTMP/FLV 直播也放行：MiniPlayer 对 rtmp/.flv + isLive 渲染原生 LiveExoView（与大播放器同内核），
-  // 录播/HLS 走 RNV Video —— 不再全屏拦截（此前拦截导致成员直播「小窗点了没用」）。
-  /** 大窗视频真实宽高（PlayerCore onVideoSize 上报）：交棒小窗时带上，小窗立即按比例适配 */
-  const videoSizeRef = useRef<{ w: number; h: number } | null>(null);
-  const handleMiniPlayer = useCallback(async () => {
-    const cur = playing;
-    if (!cur?.url) return;
-    // ⚠️ 交棒前**重新解析一条新流地址**（用户反馈「切小窗后直播中断」根因）：
-    // 口袋的 rtmp/flv 直播流带 wsSecret 签名且大窗播放器关闭即销毁；小窗是新实例，
-    // 复用大窗这条 URL 重连大概率被服务端拒绝 → 小窗黑屏。有 liveId 时先拿新签名流。
-    let url = cur.url;
-    if (cur.isLive) {
-      const lid = String(cur.item?.liveId || cur.item?.id || '');
-      if (lid) {
-        try {
-          const res: any = await pocketApi.getLiveOne(lid);
-          const detail = res?.content || res?.data || {};
-          const fresh = pickPlayableUrls(detail, true)[0];
-          if (fresh) url = fresh;
-        } catch {}
-      }
-    }
-    useMiniPlayerStore.getState().open({
-      url,
-      title: cur.title,
-      cover: cur.cover,
-      isLive: !!cur.isLive,
-      position: playbackTime,
-      aspectW: videoSizeRef.current?.w,
-      aspectH: videoSizeRef.current?.h,
-      backTo: {
-        mode: cur.isLive ? 'live' : 'vod',
-        playUrl: url,
-        playTitle: cur.title,
-        playCover: cur.cover,
-      },
-    });
-    closePlayer();
-  }, [playing, playbackTime, closePlayer]);
+  // 应用内小窗交棒已收口到统一播放宿主（用户 2026-10-02）：
+  // 「小窗」按钮、交棒前重新解析新签名流、位置/宽高透传全部在 MediaPlaybackHost 内，
+  // 本页只保留系统画中画（PiP）的比例同步（见下方 onVideoSize）。
 
-  // v2.6: came from room (explicit fromRoom flag) → hide list, back goes to room
-  // 注意：不能仅凭 playLiveId 判断——首页直播卡跳转也带 playLiveId，
-  // 无 fromRoom 标记时保持列表页（不误切 Rooms tab）
-  // fromRoom 直达：不再"首帧未播放即弹回房间"——此前 playing 初始为 null（解析中）时
-  // useEffect 立即 navigate('Rooms')，导致房间点录播/直播「第一次必进不去播放器」。
-  // 播放失败由播放器错误态 + 重试呈现；关闭时 closePlayer 负责 goBack 回房间。
-  const fromRoom = !!route.params?.fromRoom;
-
-  const refreshAnnouncement = async () => {
-    if (!playing || !playing.isLive) return;
-    try {
-      const detail = await pocketApi.getLiveOne(playing.item.liveId).catch(() => null);
-      const detail2 = !detail ? await pocketApi.getOpenLiveOne(playing.item.liveId).catch(() => null) : null;
-      const d = (detail || detail2 || {}) as any;
-      const annText = d?.content?.announcement || d?.announcement || d?.data?.announcement || '';
-      setAnnouncement(annText || t('暂无公告'));
-      setAnnounceVisible(true);
-      setAnnounceExpandedPersisted(true);
-    } catch {
-      setAnnouncement(t('公告加载失败'));
-      setAnnounceVisible(true);
-      setAnnounceExpandedPersisted(true);
-    }
-  };
+  // fromRoom 直达（房间点开）的关闭回跳见 closePlayer（goBack 回房间）。
+  // 注意：不能仅凭 playLiveId 判断来源 —— 首页直播卡跳转也带 playLiveId。
+  // （旧实现曾用「首帧未播放即 navigate('Rooms')」导致房间点播「第一次必进不去播放器」，已删除。）
 
   const switchTab = (next: 'live' | 'vod') => {
     setTab(next);
-    setNextCursor(0);
+    nextCursorRef.current = 0;
     setHasMore(true);
     // rely on useEffect to trigger fetch
   };
@@ -1476,7 +1174,7 @@ export default function MediaScreen() {
     const mode = route.params?.mode;
     if (mode === 'live' || mode === 'vod') {
       setTab((prev) => (prev === mode ? prev : mode));
-      setNextCursor(0);
+      nextCursorRef.current = 0;
       setHasMore(true);
     }
   }, [route.params?.mode]);
@@ -1489,112 +1187,60 @@ export default function MediaScreen() {
   };
 
   const loadMore = (silent = false) => {
-    if (loading || loadingRef.current || !hasMore) return;
+    if (loading || loadingRef.current[tab] || !hasMore) return;
     const mid = selectedMember ? String(selectedMember.id || (selectedMember as any).userId || (selectedMember as any).memberId || '') : undefined;
     doFetch(tab, nextCursorRef.current, true, silent, mid || undefined);
   };
 
-  const startPlay = async (item: VODItem) => {
+  /**
+   * 列表点卡片 → 交给统一播放宿主（用户 2026-10-02）。
+   *
+   * 这里只做「构造 PlayMedia」+ 清场（公告/沉浸复位）；解析（详情/公开详情/列表兜底、
+   * 公告补拉见 handleResolved）、快速起播、失败重试、代次守卫全部在宿主内完成 ——
+   * 原来 100 多行的手写解析链与 playSeqRef 竞态守卫已删除。
+   */
+  const startPlay = (item: VODItem) => {
+    const preferLive = tab === 'live';
     setError('');
-    setPlayerError('');
-    setUseWebPlayer(false);
-    setVideoRotate(0);
     setLiveImmersiveMode(false);
-    setPaused(false);
-    setDuration(0);
-    setPlaybackTime(0);
-    setLoading(true);
-    // ⚠️【公告串场修复】解析新直播前先清空旧公告：
-    // 旧逻辑只在「新直播有公告」时 set，无公告时上个直播间的公告面板会残留串场。
-    setAnnouncement('');
-    setAnnounceVisible(false);
-    announceAutoShownRef.current = false;
-    // 点击即进播放器：解析完成前先以「解析中」状态渲染播放器 shell（loading 提示），
-    // 解析完成后无缝替换为真实播放；不再让用户停留在列表页干等或失败弹窗
-    setPlaying({
-      url: '',
-      urls: [],
+    setPendingResumeAt(0);
+    // 列表内点播：来源是本站，退出播放留在直播页（清掉可能残留的首页来源标记）
+    mediaFromRef.current = '';
+    const urls = pickPlayableUrls(item, preferLive);
+    setMedia({
+      kind: preferLive ? 'live' : 'replay',
+      url: urls[0] || '',
+      urls,
       title: item.title || item.liveRoomTitle || t('直播 / 回放'),
       cover: item.liveCover || item.coverPath,
-      item,
-      isLive: tab === 'live',
-      needsVlc: false,
-      resolving: true,
+      liveId: String(item.liveId || ''),
+      // tab 预判直播/回放（与旧行为一致）：vod tab 一律按录播（可拖进度条）
+      isLive: preferLive,
+      // 成员名 + 队伍 + 数字 id：历史记录/稍后再看列表卡片要用（播放器不显示）
+      owner: String((item as any)?.nickname || (item as any)?.ownerName || ''),
+      team: resolveTeam(
+        memberLookup,
+        {
+          userId: (item as any)?.userInfo?.userId || (item as any)?.userId || (item as any)?.ownerId || '',
+          name: (item as any)?.nickname || (item as any)?.ownerName || '',
+        },
+        (item as any)?.team || '',
+      ),
+      ownerId: String((item as any)?.userInfo?.userId || (item as any)?.userId || (item as any)?.ownerId || ''),
+      /**
+       * 电台直播（liveType=2，用户 2026-11-04）：
+       * 官方推流画面只有「成员离开」的占位图，播放器要用成员照片轮播作为画面
+       *（照片来自 getLiveOne → content.carousels，由播放宿主补拉）。
+       * 列表项已带 liveType → 首帧就是轮播形态，不会先闪一下那张占位图。
+       */
+      radio: preferLive && Number((item as any)?.liveType) === 2,
+      raw: item,
     });
-    try {
-      let urls = pickPlayableUrls(item, tab === 'live');
-      let detail: any = item;
-      const initialUrl = urls[0] || '';
-      if (initialUrl) {
-        setPlaying({
-          url: initialUrl,
-          urls,
-          title: item.title || item.liveRoomTitle || t('直播 / 回放'),
-          cover: item.liveCover || item.coverPath,
-          item,
-          isLive: tab === 'live',
-          needsVlc: streamNeedsProxy(initialUrl),
-        });
-      }
-      if (item.liveId) {
-        detail = await pocketApi.getLiveOne(item.liveId).catch(() => null);
-        urls = [...pickPlayableUrls(detail, tab === 'live'), ...urls];
-        const d = (detail || {}) as any;
-        const annText = d?.content?.announcement || d?.announcement || d?.data?.announcement || '';
-        if (annText) {
-          setAnnouncement(annText);
-          setAnnounceVisible(true);
-          // 进入直播间默认展开公告（用户要求）；只有用户手动收起后才保持收起
-          setAnnounceExpandedPersisted(true);
-          announceAutoShownRef.current = true;
-        }
-        else {
-          const detail2 = await pocketApi.getOpenLiveOne(item.liveId).catch(() => null);
-          if (detail2) {
-            const d2 = detail2 as any;
-            const annText2 = d2?.content?.announcement || d2?.announcement || d2?.data?.announcement || '';
-            if (annText2) {
-              setAnnouncement(annText2);
-              setAnnounceVisible(true);
-              setAnnounceExpandedPersisted(true);
-              announceAutoShownRef.current = true;
-            }
-          }
-        }
-        if (!urls.filter(Boolean).length) {
-          detail = await pocketApi.getOpenLiveOne(item.liveId).catch(() => null);
-          urls = [...pickPlayableUrls(detail, tab === 'live'), ...urls];
-        }
-      }
-      urls = Array.from(new Set(urls.filter(Boolean)));
-      const baseUrl = urls[0] || '';
-      if (!baseUrl) {
-        // 播放器内提示（播放器已进入，用户可见错误与重试），不再只停留在列表页
-        setPlayerError(t('未解析到播放地址，可点击重试'));
-        setPlaying((p) => (p ? { ...p, resolving: false } : p));
-        return;
-      }
-      setPlaying({
-        url: baseUrl,
-        urls,
-        title: item.title || item.liveRoomTitle || t('直播 / 回放'),
-        cover: item.liveCover || item.coverPath,
-        item: { ...item, ...(detail?.content || detail?.data || detail) },
-        isLive: tab === 'live',
-        needsVlc: streamNeedsProxy(baseUrl),
-        resolving: false,
-      });
-    } catch (err) {
-      setError(errorMessage(err));
-      setPlayerError(errorMessage(err));
-      setPlaying((p) => (p ? { ...p, resolving: false } : p));
-    } finally {
-      setLoading(false);
-    }
   };
 
-  const openGiftPanel = async (source = playingRef.current || playing) => {
-    if (!source?.item?.liveId) {
+  const openGiftPanel = async () => {
+    const cur = mediaRef.current;
+    if (!cur?.liveId) {
       setGiftStatus(t('当前直播缺少 liveId，不能送礼'));
       setGiftVisible(true);
       return;
@@ -1605,7 +1251,7 @@ export default function MediaScreen() {
     setGifts([]); // ⚠️【串台修复】先清空旧直播间的礼物格，避免新请求返回前显示上一间的列表
     try {
       const [giftRes, moneyRes] = await Promise.all([
-        pocketApi.getGiftList(String(source.item.liveId)),
+        pocketApi.getGiftList(String(cur.liveId)),
         pocketApi.getUserMoney().catch(() => null),
       ]);
       const next = normalizeGiftList(giftRes);
@@ -1619,12 +1265,13 @@ export default function MediaScreen() {
   };
 
   const sendGift = async () => {
-    if (!playing || !selectedGift) {
+    const cur = mediaRef.current;
+    if (!cur || !selectedGift) {
       setGiftStatus(t('请先选择礼物'));
       return;
     }
     const num = Math.max(1, Math.floor(Number(giftNum) || 1));
-    const targetUserId = acceptUserId(playing.item);
+    const targetUserId = acceptUserId(cur.raw);
     if (!targetUserId) {
       setGiftStatus(t('无法获取主播 ID，不能送礼'));
       return;
@@ -1633,9 +1280,34 @@ export default function MediaScreen() {
     try {
       await pocketApi.sendGift({
         giftId: String(selectedGift.giftId || selectedGift.id),
-        liveId: String(playing.item.liveId),
+        liveId: String(cur.liveId || ''),
         acceptUserId: targetUserId,
         giftNum: num,
+      });
+      /**
+       * ⚠️ 礼物公屏广播（用户反馈 2026-09-29：「我送礼物，主播看不到我送的」）。
+       * HTTP 送礼接口只扣款/入账；直播间里的礼物公屏**是客户端发到云信聊天室的**
+       *（官方客户端同款 PRESENT_NORMAL）—— 别人送的能看到，就是因为对方发了这条。
+       * 广播走统一播放宿主内的同一条云信连接（宿主 ref 暴露）。
+       * 广播失败一律静默：礼物已经送出，公屏失败不该把「已送出」变成失败提示。
+       */
+      const toName = pickText(cur.raw, [
+        'userInfo.nickName',
+        'userInfo.nickname',
+        'user.nickName',
+        'user.nickname',
+        'nickname',
+        'nickName',
+        'ownerName',
+        'title',
+      ]) || String((playingMember as any)?.ownerName || '');
+      playbackHostRef.current?.sendGiftBroadcast({
+        toUserId: targetUserId,
+        toName,
+        giftId: String(selectedGift.giftId || selectedGift.id),
+        giftName: giftName(selectedGift),
+        giftNum: num,
+        giftPic: giftImage(selectedGift),
       });
       setGiftStatus(t('已送出 {num} 个 {giftName}', { num, giftName: giftName(selectedGift) }));
       const money = await pocketApi.getUserMoney().catch(() => null);
@@ -1645,8 +1317,9 @@ export default function MediaScreen() {
     }
   };
 
-  const openRankPanel = async (source = playingRef.current || playing) => {
-    if (!source?.item?.liveId) {
+  const openRankPanel = async () => {
+    const cur = mediaRef.current;
+    if (!cur?.liveId) {
       setRankRows([]);
       setRankStatus(t('当前直播缺少 liveId，不能获取贡献榜'));
       setRankVisible(true);
@@ -1656,7 +1329,7 @@ export default function MediaScreen() {
     setRankStatus('');
     setRankRows([]); // ⚠️【串台修复】先清空旧直播间的榜单，避免新请求返回前显示上一间的贡献榜
     try {
-      const res = await pocketApi.getLiveRank(String(source.item.liveId));
+      const res = await pocketApi.getLiveRank(String(cur.liveId));
       const rows = normalizeLiveRank(res);
       setRankRows(rows);
       if (rows.some((row, index) => row.userId && (!row.avatar || rankNameIsFallback(row, index)))) {
@@ -1683,23 +1356,16 @@ export default function MediaScreen() {
 
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('LivePlayerGiftRequested', () => {
-      const current = playingRef.current;
+      const current = mediaRef.current;
       if (!current?.isLive) {
         setGiftStatus(t('当前没有可送礼的直播上下文'));
         setGiftVisible(true);
         return;
       }
-      openGiftPanel(current);
+      openGiftPanel();
     });
     return () => sub.remove();
   }, []);
-
-  // 画面旋转（翻转）：旋转 90° 时交换容器宽高，使视频填满屏幕且不裁剪
-  // 注：screen / isPlayerLandscape 已在本组件更上方声明（公告面板偏移也要用），此处不再重复声明。
-  const videoRotated = videoRotate === 90 || videoRotate === 270;
-  const videoBoxW = videoRotated ? screen.height : screen.width;
-  const videoBoxH = videoRotated ? screen.width : screen.height;
-  const videoRotateDeg = `${videoRotate}deg`;
 
   // PiP 退出兜底 remount key：Dimensions 在 Android 上对 windowMode 变化未必刷新，
   // 万一 key 随 winW 没翻也没法触发 FlatList 重挂载 → 直接 bump 这个 nonce 强制 remount。
@@ -1727,257 +1393,151 @@ export default function MediaScreen() {
   // 不再由视频比例强制切方向（用户在竖屏看横屏视频是合理需求）。
   const onVideoSize = useCallback((w: number, h: number) => {
     if (!(w > 0) || !(h > 0)) return;
-    videoSizeRef.current = { w, h };
+    // 系统 PiP 窗口比例跟随内容（应用内小窗的宽高由宿主自己记录）
     setPipAspect(w, h);
   }, []);
 
-  if (playing) {
+  /**
+   * 控制坞按钮（函数形式：礼物只在直播显示，需要解析后的 isLive）：
+   * 进入房间 / 礼物 / 贡献榜 —— 公告、弹幕设置、弹幕列表、小窗由宿主统一追加。
+   */
+  const mediaExtraActions = useCallback((ctx: { isLive: boolean }) => ([
+    ...(playingMember ? [{ key: 'room', icon: 'account-group', label: t('进入房间'), onPress: () => (navigation as any).navigate('Rooms', { openMemberId: playingMember.id }) }] : []),
+    ...(ctx.isLive ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openGiftPanel() }] : []),
+    { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: () => openRankPanel() },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  ]), [t, playingMember, navigation]);
+
+  if (media) {
     return (
       <View style={styles.playerPage}>
-        {announceExpanded && announceVisible && announcement && !inSystemPip ? (
-          <Animated.View
-            style={[
-              styles.announcePanel,
-              // 横屏：挖孔/导航条在侧边，面板不能还贴 10px 边（会压到圆角/挖孔）
-              isPlayerLandscape ? { left: Math.max(10, insets.left), right: Math.max(10, insets.right) } : null,
-              { transform: [{ translateY: announceTopAnim }] },
-            ]}
-          >
-            <View style={styles.announcePanelTop}>
-              {/* ⚠️ 标题组必须 flex:1 + minWidth:0，否则内层 title 的 flex:1 失效
-                  （它撑的是这个 wrapper，而 wrapper 默认按内容宽）→ wrapper 撑满整行，
-                  把右侧「刷新/收起」两个按钮顶出屏幕（用户截图：收起按钮跑到屏幕外）。 */}
-              <View style={styles.announcePanelTitleRow}>
-                <MaterialCommunityIcons name="bullhorn" size={15} color="#FFFFFF" style={{ marginRight: 5 }} />
-                <Text style={styles.announcePanelTitle} numberOfLines={1}>{t('公告')}</Text>
-              </View>
-              <View style={styles.announcePanelBtns}>
-                <TouchableOpacity onPress={refreshAnnouncement} style={styles.announceSmallBtn}>
-                  <Text style={styles.announceSmallBtnText}>{t('刷新')}</Text>
-                </TouchableOpacity>
-                <TouchableOpacity onPress={() => setAnnounceExpanded(false)} style={styles.announceSmallBtn}>
-                  <Text style={styles.announceSmallBtnText}>{t('收起')}</Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-            <ScrollView style={styles.announcePanelBody}>
-              <Text style={styles.announcePanelText}>{announcement}</Text>
-            </ScrollView>
-          </Animated.View>
-        ) : null}
-
-        {/* 解析中/解析失败：url 未就绪时渲染播放器 shell 内提示（点击即进播放器的等待态） */}
-        {!playing.url ? (
-          <View style={styles.player}>
-            {playerError ? (
-              <View style={styles.resolvingWrap}>
-                <Text style={styles.resolvingText}>{playerError}</Text>
-                <TouchableOpacity
-                  style={[styles.webFallbackBtn, { backgroundColor: palette.tint }]}
-                  onPress={() => startPlay(playing.item)}
-                >
-                  <Text style={styles.webFallbackText}>{t('重试')}</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View style={styles.resolvingWrap}>
-                <ActivityIndicator size="large" color="#FFFFFF" />
-                <Text style={styles.resolvingText}>{t('正在解析播放地址…')}</Text>
-              </View>
-            )}
-          </View>
-        ) : (
-          /* 统一播放器（重写）：口袋直播/录播 → PlayerScreen
-             - 内核路由：rtmp/flv → Exo / HLS/mp4 → Native / 失败可切 Web（flv.js+hls.js）
-             - 候选线路 urls：失败自动切下一候选
-             - 弹幕：children 插槽挂 DanmakuOverlay（poll/LRC 数据源保留在页面）
-             - 倍速/续播/内核切换/礼物/贡献榜/公告/弹幕设置全部经 features + extraActions */
-          <PlayerScreen
-            source={{
-              kind: playing.isLive ? 'live' : 'vod',
-              url: playing.url,
-              urls: playing.urls,
-              liveId: String(playing.item?.liveId || playing.item?.id || ''),
-              needsNativeExo: playing.needsVlc,
-              headers: { 'User-Agent': 'PocketFans201807/7.0.41 (iPhone; iOS 16.3.1; Scale/2.00)', Referer: 'https://h5.48.cn/', Origin: 'https://h5.48.cn' },
-            }}
-            // 标题右侧：官方在线人数（直播实时 / 回放为该场结束时的值，都要显示；
-            // 「不显示」的限制只针对**房间内**的直播与回放）
-            meta={{
-              title: playing.title,
-              cover: playing.cover,
-              stat: liveOnlineNum > 0
-                ? { icon: 'account-multiple', text: t('{n} 人在线', { n: liveOnlineNum }) }
-                : undefined,
-            }}
-            onVideoSize={onVideoSize}
-            danmaku={playing.isLive ? { type: 'poll', liveId: String(playing.item?.liveId || playing.item?.id || '') } : { type: 'lrc', lrcUrl: '' }}
-            features={{ rate: !playing.isLive, danmaku: true, kernelSwitch: true, resume: !playing.isLive }}
-            resumeAt={webResumeTime || (playing?.position || 0)}
-            extraActions={[
-              ...(playingMember ? [{ key: 'room', icon: 'account-group', label: t('进入房间'), onPress: () => (navigation as any).navigate('Rooms', { openMemberId: playingMember.id }) }] : []),
-              ...(playing.isLive ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openGiftPanel() }] : []),
-              { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: () => openRankPanel() },
-              ...((announceVisible && announcement) ? [{ key: 'announce', icon: 'bullhorn', label: t('公告'), active: announceExpanded, onPress: () => setAnnounceExpanded((v) => !v) }] : []),
-              { key: 'danmaku', icon: 'cog', label: t('弹幕设置'), onPress: () => setShowDanmakuSettings(true) },
-              { key: 'danmakuList', icon: 'format-list-bulleted', label: t('弹幕列表'), active: showDanmakuList, onPress: () => setShowDanmakuList((v) => !v) },
-              { key: 'pip', icon: 'picture-in-picture-bottom-right-outline', label: t('小窗'), onPress: handleMiniPlayer },
-            ]}
-            // 顶栏左上公告按钮（返回键旁）：公告收起后仍可随时点开重看；
-            // 已有文本 → 切换展开/收起；尚无文本 → 拉取公告（refreshAnnouncement 含兜底提示）
-            topLeftAction={(playing.isLive || (announceVisible && announcement)) ? {
-              icon: 'bullhorn',
-              label: t('公告'),
-              active: announceExpanded && !!announcement && announceVisible,
-              onPress: () => {
-                if (announcement) setAnnounceExpandedPersisted(!announceExpanded);
-                else refreshAnnouncement();
-              },
-            } : undefined}
-            // 直播弹幕输入条：进播放器底坞（随控制条自动隐藏/呼出），不再单独叠一层 + 收起按钮
-            barrageInput={playing.isLive ? (
-              <LiveBarrageBoard
-                source={liveBarrage}
-                liveId={String(playing.item?.liveId || playing.item?.id || '')}
-                module="live"
-                variant="plain"
-                inputOnly
-              />
-            ) : undefined}
-            onClose={() => { setPipPlaying(false); closePlayer(); }}
-            // 直播流地址有时效（wsSecret）：失败重试 = 重新解析（startPlay），而非重播同 URL
-            onRetry={() => startPlay(playing.item)}
-            persistent
-          >
-            <DanmakuOverlay
-              // key 绑定直播/回放条目：切台时强制重挂载，重置 seenLive 去重集，
-              // 杜绝上一间「未上屏过的弹幕」在新直播间被当新弹幕飘出（串台修复）
-              key={playing.item?.liveId || playing.item?.id || 'danmaku'}
-              danmaku={danmaku}
-              currentTime={danmakuClock}
-              visible={playerDanmakuOn && showDanmaku && !!playing}
-              live={!!playing?.isLive}
-              liveItems={playing?.isLive ? liveDanmakuItems : undefined}
-            />
-            {/* 弹幕列表抽屉（直播/录播通用）：列表 + 搜索 + 按发送者筛选 + 点击跳转 + 跟随播放 */}
-            <DanmakuListSheet
-              visible={showDanmakuList && !inSystemPip}
-              onClose={() => setShowDanmakuList(false)}
-              entries={danmakuListEntries}
-              currentTime={danmakuClock}
-              onSeek={playing?.isLive ? undefined : (sec) => usePlayerStore.getState().setSeekTarget(sec)}
-              live={!!playing?.isLive}
-              loading={
-                playing?.isLive
-                  ? liveBarrage.status === 'connecting' || liveBarrage.status === 'resolving'
-                  : false
-              }
-              // 点发送者昵称 → 用户资料卡（成员/粉丝同一界面）
-              onOpenProfile={(entry) => setDanmakuProfile({ nick: entry.nick, avatar: entry.avatar, userId: entry.userId != null ? String(entry.userId) : undefined })}
-            />
-            {/* 直播弹幕输入条已并入播放器底坞（barrageInput），不再单独叠一层，也没有单独的收起按钮 */}
-          </PlayerScreen>
-        )}
-
-        {/* 弹幕列表点发送者 → 用户资料卡（含关注/取消关注 + 私信） */}
-        <UserProfileSheet
-          visible={!!danmakuProfile}
-          target={danmakuProfile}
-          onClose={() => setDanmakuProfile(null)}
-          onOpenChat={({ id, name }) => {
-            setDanmakuProfile(null);
-            navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
-          }}
-        />
-
-        <Modal visible={giftVisible} transparent animationType="slide" onRequestClose={() => setGiftVisible(false)}>
-          <View style={styles.modalShade}>
-            <GlassSurface radius={20} role="card" style={[styles.giftPanel, isPlayerLandscape ? styles.giftPanelLandscape : null, { backgroundColor: 'transparent' }]}>
-              <View style={styles.giftHeader}>
-                <Text style={[styles.giftTitle, { color: palette.label }]}>{t('直播送礼')}</Text>
-                <TouchableOpacity onPress={() => setGiftVisible(false)} activeOpacity={0.8}>
-                  <Text style={[styles.backBtnText, { color: palette.tint }]}>{t('关闭')}</Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={[styles.giftTip, { color: palette.danger }]}>{t('直播送礼主播看不到赠送，仅能统计贡献值')}</Text>
-              <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>
-                {balance ? `${t('余额：{balance} 鸡腿', { balance })} · ` : ''}{giftStatus}
-              </Text>
-              <ScrollView style={[styles.giftGrid, isPlayerLandscape ? styles.giftGridLandscape : null]}>
-                <View style={styles.giftGridInner}>
-                  {gifts.map((gift) => {
-                    const active = String(selectedGift?.giftId || selectedGift?.id) === String(gift.giftId || gift.id);
-                    return (
-                      <TouchableOpacity
-                        key={String(gift.giftId || gift.id)}
-                        style={[
-                          styles.giftItem,
-                          active && styles.giftItemActive,
-                          { backgroundColor: active ? palette.tintSoft : palette.fill2, borderColor: active ? palette.tint : palette.hairline },
-                        ]}
-                        onPress={() => setSelectedGift(gift)}
-                        activeOpacity={0.85}
-                      >
-                        {giftImage(gift) ? <Image source={{ uri: giftImage(gift) }} style={styles.giftImage} /> : <View style={[styles.giftImage, { backgroundColor: palette.fill3 }]} />}
-                        <Text style={[styles.giftName, { color: palette.label }]} numberOfLines={1}>{giftName(gift)}</Text>
-                        <Text style={[styles.giftCost, { color: palette.tint }]}>{t('{count} 鸡腿', { count: giftCost(gift) })}</Text>
-                      </TouchableOpacity>
-                    );
-                  })}
-                </View>
-              </ScrollView>
-              <View style={styles.giftFooter}>
-                <TextInput
-                  style={[styles.giftNum, { color: palette.label, borderColor: palette.hairline, backgroundColor: palette.fill2 }]}
-                  keyboardType="numeric"
-                  value={giftNum}
-                  onChangeText={setGiftNum}
-                />
-                <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: palette.tint }]} onPress={sendGift} activeOpacity={0.85}>
-                  <Text style={[styles.sendGiftText, { color: palette.onTint }]}>
-                    {selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
-                  </Text>
-                </TouchableOpacity>
-              </View>
-              <TouchableOpacity
-                style={styles.rechargeBtn}
-                onPress={() => {
-                  setGiftVisible(false);
-                  (navigation as any).navigate('RechargeScreen');
+        {/* 统一播放宿主（用户 2026-10-02）：解析（含解析中/失败 shell）、续播与进度、
+            弹幕（云信飘屏/输入条/弹幕列表/LRC）、在线人数、公告、小窗交棒全部由它完成。
+            本页只保留主直播页特有内容：
+              · 礼物 / 贡献榜 / 弹幕资料卡（afterPlayer）
+              · 控制坞按钮（extraActions：进入房间 / 礼物 / 贡献榜） */}
+        <MediaPlaybackHost
+          ref={playbackHostRef}
+          media={media}
+          /* 点标题进房间：成员库反查到的 id 比 media.ownerId 更可靠（未登录/旧数据也能进） */
+          roomMemberId={playingMember ? String(playingMember.id) : undefined}
+          onClose={() => { setPipPlaying(false); closePlayer(); }}
+          /* 直播间公告（含录播）：宿主统一拉取 + 面板 + 顶栏/控制坞按钮 + 展开态持久化 */
+          announcement
+          initialPosition={pendingResumeAt}
+          /* 与历史行为一致：直播弹幕 HTTP 轮询兜底（5s）+ 回放弹幕到达 toast */
+          danmakuLivePollMs={5000}
+          danmakuVodNotice
+          onOpenDanmakuProfile={(entry) => setDanmakuProfile({ nick: entry.nick, avatar: entry.avatar, userId: entry.userId != null ? String(entry.userId) : undefined })}
+          onVideoSize={onVideoSize}
+          /* 系统 PiP：快照会拍进浮层 → 隐藏弹幕列表/设置面板/公告面板（宿主统一判断） */
+          hideSheets={inSystemPip}
+          extraActions={mediaExtraActions}
+          afterPlayer={(
+            <>
+              {/* 弹幕列表点发送者 → 用户资料卡（含关注/取消关注 + 私信） */}
+              <UserProfileSheet
+                visible={!!danmakuProfile}
+                target={danmakuProfile}
+                onClose={() => setDanmakuProfile(null)}
+                onOpenChat={({ id, name }) => {
+                  setDanmakuProfile(null);
+                  navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
                 }}
-                activeOpacity={0.8}
-              >
-                <Text style={[styles.rechargeText, { color: palette.tint }]}>{t('余额不足？去充值鸡腿')}</Text>
-              </TouchableOpacity>
-            </GlassSurface>
-          </View>
-        </Modal>
-        <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
-          <View style={styles.modalShade}>
-            <GlassSurface radius={20} role="card" style={[styles.giftPanel, isPlayerLandscape ? styles.giftPanelLandscape : null, { backgroundColor: 'transparent' }]}>
-              <View style={styles.giftHeader}>
-                <Text style={[styles.giftTitle, { color: palette.label }]}>{t('贡献榜')}</Text>
-                <TouchableOpacity onPress={() => setRankVisible(false)} activeOpacity={0.8}>
-                  <Text style={[styles.backBtnText, { color: palette.tint }]}>{t('关闭')}</Text>
-                </TouchableOpacity>
-              </View>
-              <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>{rankStatus}</Text>
-              <ScrollView style={[styles.rankList, isPlayerLandscape ? styles.rankListLandscape : null]}>
-                {rankRows.map((row, index) => (
-                  <View key={String(row.userId || row.id || index)} style={[styles.rankRow, { borderBottomColor: palette.hairline }]}>
-                    <Text style={[styles.rankNo, { color: palette.tint }]}>{row.rank || index + 1}</Text>
-                    {row.avatar ? <Image source={{ uri: row.avatar }} style={[styles.rankAvatar, { backgroundColor: palette.fill3 }]} /> : <View style={[styles.rankAvatar, { backgroundColor: palette.fill3 }]} />}
-                    <View style={styles.rankInfo}>
-                      <Text style={[styles.rankName, { color: palette.label }]} numberOfLines={1}>{row.name}</Text>
-                      <Text style={[styles.rankValue, { color: palette.labelSecondary }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
+              />
+
+              <Modal visible={giftVisible} transparent animationType="slide" onRequestClose={() => setGiftVisible(false)}>
+                <View style={styles.modalShade}>
+                  <GlassSurface radius={20} role="card" style={[styles.giftPanel, isPlayerLandscape ? styles.giftPanelLandscape : null, { backgroundColor: 'transparent' }]}>
+                    <View style={styles.giftHeader}>
+                      <Text style={[styles.giftTitle, { color: palette.label }]}>{t('直播送礼')}</Text>
+                      <TouchableOpacity onPress={() => setGiftVisible(false)} activeOpacity={0.8}>
+                        <Text style={[styles.backBtnText, { color: palette.tint }]}>{t('关闭')}</Text>
+                      </TouchableOpacity>
                     </View>
+                    <Text style={[styles.giftTip, { color: palette.danger }]}>{t('直播送礼主播看不到赠送，仅能统计贡献值')}</Text>
+                    <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>
+                      {balance ? `${t('余额：{balance} 鸡腿', { balance })} · ` : ''}{giftStatus}
+                    </Text>
+                    <ScrollView style={[styles.giftGrid, isPlayerLandscape ? styles.giftGridLandscape : null]}>
+                      <View style={styles.giftGridInner}>
+                        {gifts.map((gift) => {
+                          const active = String(selectedGift?.giftId || selectedGift?.id) === String(gift.giftId || gift.id);
+                          return (
+                            <TouchableOpacity
+                              key={String(gift.giftId || gift.id)}
+                              style={[
+                                styles.giftItem,
+                                active && styles.giftItemActive,
+                                { backgroundColor: active ? palette.tintSoft : palette.fill2, borderColor: active ? palette.tint : palette.hairline },
+                              ]}
+                              onPress={() => setSelectedGift(gift)}
+                              activeOpacity={0.85}
+                            >
+                              {giftImage(gift) ? <Image source={{ uri: giftImage(gift) }} style={styles.giftImage} /> : <View style={[styles.giftImage, { backgroundColor: palette.fill3 }]} />}
+                              <Text style={[styles.giftName, { color: palette.label }]} numberOfLines={1}>{giftName(gift)}</Text>
+                              <Text style={[styles.giftCost, { color: palette.tint }]}>{t('{count} 鸡腿', { count: giftCost(gift) })}</Text>
+                            </TouchableOpacity>
+                          );
+                        })}
+                      </View>
+                    </ScrollView>
+                    <View style={styles.giftFooter}>
+                      <TextInput
+                        style={[styles.giftNum, { color: palette.label, borderColor: palette.hairline, backgroundColor: palette.fill2 }]}
+                        keyboardType="numeric"
+                        value={giftNum}
+                        onChangeText={setGiftNum}
+                      />
+                      <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: palette.tint }]} onPress={sendGift} activeOpacity={0.85}>
+                        <Text style={[styles.sendGiftText, { color: palette.onTint }]}>
+                          {selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
+                        </Text>
+                      </TouchableOpacity>
+                    </View>
+                    <TouchableOpacity
+                      style={styles.rechargeBtn}
+                      onPress={() => {
+                        setGiftVisible(false);
+                        (navigation as any).navigate('RechargeScreen');
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <Text style={[styles.rechargeText, { color: palette.tint }]}>{t('余额不足？去充值鸡腿')}</Text>
+                    </TouchableOpacity>
+                  </GlassSurface>
+                </View>
+              </Modal>
+              <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
+                {/* 横屏贴右 + 实心黑底（与弹幕列表同风格，用户 2026-11-09） */}
+                <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
+                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(15,15,18,0.98)' }]}>
+                    <View style={styles.giftHeader}>
+                      <Text style={[styles.giftTitle, { color: 'rgba(255,255,255,0.94)' }]}>{t('贡献榜')}</Text>
+                      <TouchableOpacity onPress={() => setRankVisible(false)} activeOpacity={0.8}>
+                        <Text style={[styles.backBtnText, { color: 'rgba(255,255,255,0.75)' }]}>{t('关闭')}</Text>
+                      </TouchableOpacity>
+                    </View>
+                    <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.6)' }]}>{rankStatus}</Text>
+                    <ScrollView style={[styles.rankList, isPlayerLandscape ? styles.rankListLandscape : null]}>
+                      {rankRows.map((row, index) => (
+                        <View key={String(row.userId || row.id || index)} style={[styles.rankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}>
+                          {/* 黑白榜（用户 2026-11-09）：名次不用主题色，前三名白 0.95、其余白 0.5 */}
+                          <Text style={[styles.rankNo, { color: index < 3 ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)' }]}>{row.rank || index + 1}</Text>
+                          {row.avatar ? <Image source={{ uri: row.avatar }} style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} /> : <View style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
+                          <View style={styles.rankInfo}>
+                            <Text style={[styles.rankName, { color: 'rgba(255,255,255,0.94)' }]} numberOfLines={1}>{row.name}</Text>
+                            <Text style={[styles.rankValue, { color: 'rgba(255,255,255,0.6)' }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
+                          </View>
+                        </View>
+                      ))}
+                    </ScrollView>
                   </View>
-                ))}
-              </ScrollView>
-            </GlassSurface>
-          </View>
-        </Modal>
-        <DanmakuSettingsSheet visible={showDanmakuSettings} onClose={() => setShowDanmakuSettings(false)} />
+                </View>
+              </Modal>
+            </>
+          )}
+        />
       </View>
     );
   }
@@ -2098,6 +1658,7 @@ export default function MediaScreen() {
 
       <View style={{ flex: 1 }}>
         <PerfFlatList
+          {...chromeScrollProps}
           key={tab === 'vod' ? 'vod-1col' : 'live-4col'}
           // 直播页统一四列小卡网格（用户要求「一行能显示四个」，与首页成员直播一致）；录播保持单列分组
           data={tab === 'vod' ? (vodRows ?? []) as any : list}
@@ -2364,26 +1925,9 @@ const styles = StyleSheet.create({
   giftBtnText: { color: '#fff', fontSize: 11, fontWeight: '800' },
   switchPlayerBtn: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 14, backgroundColor: '#222', marginLeft: 4 },
   retryPlayerText: { color: '#fff' },
-  announceHeaderBtn: { backgroundColor: 'rgba(251,114,153,0.25)' },
-  announceHeaderText: { color: '#fb7299' },
+  // 旧公告按钮/胶囊样式已删除：公告统一由 MediaPlaybackHost 渲染并用 palette.tint 上色
   exitFullscreenBtn: { position: 'absolute', top: 28, right: 16, zIndex: 1001, paddingHorizontal: 12, paddingVertical: 8, borderRadius: 18, backgroundColor: 'rgba(0,0,0,0.62)' },
   exitFullscreenText: { color: '#fff', fontSize: 12, fontWeight: '800' },
-  announcePill: { alignSelf: 'center', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 14, backgroundColor: 'rgba(251,114,153,0.20)', borderWidth: 1, borderColor: 'rgba(251,114,153,0.3)', marginVertical: 4 },
-  announcePillText: { color: '#fb7299', fontSize: 11, fontWeight: '700' },
-  // zIndex 必须**高于**播放器控制层（PlayerChrome 顶栏 30 / 底坞 31）：
-  // 它已经被 translateY 抬到顶栏下方，这里再高一层保证「刷新/收起」永远点得到
-  //（历史 bug：zIndex 29 < 30 → 「收起」被「…」压住且触摸被顶栏抢走）。
-  announcePanel: { position: 'absolute', top: 0, left: 10, right: 10, zIndex: 45, borderRadius: radiiAlias.card, backgroundColor: 'rgba(18,18,20,0.92)', borderWidth: 1, borderColor: 'rgba(251,114,153,0.32)', marginHorizontal: 0, overflow: 'hidden', shadowColor: '#000', shadowOpacity: 0.28, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 6 },
-  announcePanelTop: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: 'rgba(251,114,153,0.18)' },
-  /** 标题组：占据剩余宽度并允许收缩（配合 title 的 numberOfLines=1 出省略号），按钮永远留在屏内 */
-  announcePanelTitleRow: { flexDirection: 'row', alignItems: 'center', flex: 1, minWidth: 0, marginRight: 8 },
-  announcePanelTitle: { color: '#fff', fontSize: 13, fontWeight: '800', flexShrink: 1 },
-  /** 按钮组：不参与收缩，保证「刷新/收起」始终完整可见 */
-  announcePanelBtns: { flexDirection: 'row', gap: 8, flexShrink: 0 },
-  announceSmallBtn: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 14, backgroundColor: 'rgba(251,114,153,0.16)' },
-  announceSmallBtnText: { color: '#fb7299', fontSize: 11, fontWeight: '700' },
-  announcePanelBody: { paddingHorizontal: 14, paddingVertical: 10, maxHeight: 150 },
-  announcePanelText: { color: '#f2f2f2', fontSize: 12.5, lineHeight: 21 },
   player: { flex: 1, backgroundColor: '#000' },
   nativeVideo: { flex: 1, backgroundColor: '#000' },
   vlcGate: { flex: 1, backgroundColor: '#050505', justifyContent: 'center', padding: 22 },
@@ -2427,11 +1971,7 @@ const styles = StyleSheet.create({
     marginVertical: 6,
     borderRadius: 20,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.08,
-    shadowRadius: 8,
-    elevation: 3,
+    // 扁平化：卡片不再投影（层次靠底色与圆角）
   },
   v2Cover: { height: 208, overflow: 'hidden' },
   v2CoverImg: { width: '100%', height: '100%' },
@@ -2451,11 +1991,6 @@ const styles = StyleSheet.create({
     flex: 1,
     borderRadius: 14,
     overflow: 'hidden',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.06,
-    shadowRadius: 6,
-    elevation: 2,
   },
   vodGridCover: { width: '100%', aspectRatio: 1, overflow: 'hidden' },
   vodGridCoverImg: { width: '100%', height: '100%' },
@@ -2477,11 +2012,6 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     overflow: 'hidden',
     borderWidth: StyleSheet.hairlineWidth,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.12,
-    shadowRadius: 10,
-    elevation: 3,
   },
   liveBannerCover: { width: '100%', height: 200, overflow: 'hidden' },
   liveBannerImg: { width: '100%', height: '100%' },
@@ -2516,13 +2046,20 @@ const styles = StyleSheet.create({
   memberHitText: { fontSize: 12, fontWeight: '700' },
   memberHitTeam: { fontSize: 9, marginLeft: 6, opacity: 0.85 },
   modalShade: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.72)' },
+  /** 横屏：底板横排、面板贴右（贡献榜/礼物面板共用） */
+  modalShadeLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
   giftPanel: { maxHeight: '82%', borderTopLeftRadius: radii.sheet, borderTopRightRadius: radii.sheet, padding: 14 },
   /**
    * 横屏：底部抽屉可用高度只有 ~400dp 的 82% ≈ 330dp，再叠加内部固定 maxHeight 的
    * 滚动区（360/430）会把「送出 / 去充值」挤出屏幕（RN 默认 flexShrink:0，不会自动让位）。
    * 放宽面板上限 + 配合内部滚动区收窄（见 giftGridLandscape / rankListLandscape）。
    */
-  giftPanelLandscape: { maxHeight: '94%' },
+  /** 横屏：贡献榜/礼物面板贴右整列（与弹幕列表同一套抽屉，用户 2026-11-09） */
+  giftPanelLandscape: {
+    maxHeight: '100%', height: '100%', width: 380,
+    borderTopRightRadius: 0, borderBottomRightRadius: 0,
+    borderBottomLeftRadius: radii.sheet, paddingTop: 18,
+  },
   giftHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   giftTitle: { fontSize: 18, fontWeight: '800' },
   giftStatus: { fontSize: 12, marginBottom: 10 },
@@ -2559,7 +2096,7 @@ const styles = StyleSheet.create({
   dateChipText: { fontSize: 12, fontWeight: '700' },
   dateChipClear: { marginLeft: 6 },
   calMask: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'center', alignItems: 'center' },
-  calSheet: { width: '88%', maxWidth: 360, borderRadius: radiiAlias.input, padding: 16, elevation: 8 },
+  calSheet: { width: '88%', maxWidth: 360, borderRadius: radiiAlias.input, padding: 16 },
   calHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 },
   calTitle: { fontSize: 17, fontWeight: '800' },
   calWeekRow: { flexDirection: 'row', marginBottom: 6 },

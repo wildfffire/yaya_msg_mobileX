@@ -7,120 +7,189 @@
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-GPL--3.0-ff6f91" alt="license" /></a>
-  <a href="https://github.com/xuqinghhh/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v2.7.5--X1-ff6f91" alt="release" /></a>
+  <a href="https://github.com/wildfffire/yaya_msg_mobile/releases"><img src="https://img.shields.io/badge/release-v3.0.0-ff6f91" alt="release" /></a>
   <img src="https://img.shields.io/badge/platform-Android-3DDC84?logo=android" alt="Android" />
+  <img src="https://img.shields.io/badge/React%20Native-0.83-61dafb?logo=react" alt="React Native" />
 </p>
 
 # 牙牙消息 X
 
-口袋48 第三方移动客户端（React Native）。
+口袋48 / SNH48 Group 的**第三方 Android 客户端**，用 React Native 编写：进入成员房间看消息、看直播与回放、听歌看视频、翻牌私信。**横屏平板 / 大屏优先**，持续优化房间与直播体验。
 
-**牙牙消息 X** 是牙牙消息的独立衍生分支：上游为 [Xenia0922/yaya_msg_mobile](https://github.com/Xenia0922/yaya_msg_mobile)（源头 [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg)），自 v2.7.5 起由 [@xuqinghhh](https://github.com/xuqinghhh) 独立维护，更新路线与上游分离。
+- 上游基础：[Xenia0922/yaya_msg_mobile](https://github.com/Xenia0922/yaya_msg_mobile)，再往上溯源去 [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg)
+- 自 v2.7.5 起由 [@wildfffire](https://github.com/wildfffire) 独立维护，更新路线与上游分离
+- 仅支持 Android（原生工程已入库，不做 iOS 适配）
 
-> **⚠️ 重要：由于版本更新较大，建议每一位用户卸载后重新安装软件！**
+## 项目定位
 
-## 牙牙消息 X 更新内容（相对上游 v2.7.5）
+- **不定期与上游同步功能**：上游（[yk1z/yaya_msg](https://github.com/yk1z/yaya_msg) 等）新增的能力会**按需择期回移**，不做逐版本跟随，也不承诺与上游功能完全对齐
+- **主要面向横屏的平板 / 大屏场景**：布局、控制坞、弹幕与多列信息都按横屏优先设计，手机竖屏可用但不是主要目标
+- **主要优化房间与直播体验**：房间消息、未读、房间内直播与回放、播放器与弹幕是持续投入的方向
+- **翻牌、礼物等功能：具体情况未知**：这部分**尽可能复用了上游已有的优化实现，但未做测试** —— 是否可用、行为是否与上游一致都无法保证，遇到问题欢迎反馈
 
-### 新功能
+## 接下来的开发目标
 
-**全局横屏**
-- 解除全应用竖屏锁：Android `screenOrientation` 交还系统，横竖屏跟随用户旋转
-- 旋转不重建 Activity：`configChanges` 补齐 `smallestScreenSize`，系统自由窗口/侧边条小窗下不再触发 JS 重启导致播放器退出
-- 播放器横屏专用布局：视频铺满，顶栏 / 底栏 / 右侧快捷栏按横屏重新分组
-- 弹幕改全屏飘屏覆盖层，可随时开关（设置持久化，重启保留）
-- 登录页之外全场景横屏；账号设置页横屏下表单限宽 560 居中，不再被拉伸
+- **更多个性化选择**：把「能调的都做成可选项」——头像来源（房间内 / 房间外）、播放器行为、界面信息密度、列表与弹幕展示等会继续拆成独立开关，优先满足「按自己的习惯用」
+- **更多主题颜色**：在现有的深色 / 浅色两套主题之上，增加可选的配色方案（主题色 / 强调色），并保证房间、播放器、弹幕在每套配色下都保持可读
+- 主线不变：仍以横屏平板场景下的**房间与直播体验**为优化重点（见上方「项目定位」）
 
-**播放器 / 直播**
-- 在线人数：顶栏显示「N 人在线」，取官方 `getLiveOne.content.onlineNum`，直播 30s 轮询、录播显示该场结束时的数值
-- 直播公告按钮：顶栏左上新增喇叭按钮，公告收起后可随时重看；无公告文本时按钮触发刷新拉取
-- 成员回放面板：房间内新增「直播回放」入口，按成员过滤口袋回放接口（兼容 `next=0` 带 `userId` 查不到数据的官方行为），列表 + 分页
-- 回放进度记忆：每场回放每 5s 记录进度，重进同一场超过 15s 自动 seek 续播并有 toast 提示（上限 200 条 LRU 淘汰）
-- B站直播：进直播间自动横屏 + 全屏沉浸真正生效（上游实现写入的是从不参与渲染的本地状态）；解析直播流期间改为纯黑占位，不再闪加载圈
+## 相对上游的主要变化
 
-**房间**
-- 房间未读角标：官方没有房间级未读接口，采用本地累计方案，三条通道互补（云信实时消息累计 / 最新消息时间比对 / 内容指纹比对），任一命中即亮，避免「有新消息却看不到标注」
-- 首页「正在直播」改为一行四张小卡网格（总高不超过屏高 1/3），替代原来的全宽 banner 轮播；卡片显示队伍徽章
-- 「最近播放」卡支持 ❌ 关闭单曲，且持久化——重启后不再冒出来
-
-**公演**
-- 「即将开演」横向公演卡条：公演记录页与首页「公演直播」区块共用同一组件（数据同源、行为一致）
-- 数据源为 Seine 互动列表公演排期（无需 token），可覆盖未来 10 天场次
-- 60s 心跳：到点自动把时间徽标翻成「直播中」，点击已开演场次直接进对应团的 B站直播间
-- 队徽文件名反推「团 + 队」，队伍主色自动着色；排期 10 分钟缓存、B站房间配置 5 分钟缓存
-
-### 问题修复
-
-- **直播公告串场**：切换到没有公告的直播间时，不再显示上一个直播间的旧公告（解析新直播前先清空公告状态）
-- **弹幕「关了还飘」**：弹幕总开关改用持久化的弹幕设置——上游实现里开关存在 `playerStore.danmakuOn`，每次打开播放器都被强制重置为开
-- **弹幕串台**：切换直播间时清空上一间残留的弹幕列表与飘屏
-- **系统小窗（PiP）中断直播**：进 PiP 时 Android 的 AppState 会报 `background`，导致「释放横屏锁、停弹幕/聊天轮询」等后台分支误触发、与转场竞争——PiP 事件改为同步发出并用 `isPipActive()` 豁免
-- **PiP 进入不平滑**：Android 12+ 启用 `setAutoEnterEnabled`，播放中上滑/Home 直接无缝缩放进画中画
-- **首页关注成员只显示 2 个**：列表截断（slice 8 个）发生在「关注优先」排序之前，排在接口原始顺序后面的关注成员被直接丢掉
-- **B站返回误现加载圈**：返回转场期间组件仍挂载且候选流已清空，误渲染「正在进入直播间…」全屏分支——返回前先清掉路由参数
-- **房间未读时间基线**：改用服务器消息时间做「已读到哪」基线——上游时代用设备时钟 `Date.now()`，设备时钟比服务器快几秒角标就永不出现，且重启也无法恢复
-- **夜间房间背景蒙黑纱**：深色主题下房间背景图不再叠加 50% 黑色遮罩、直接显示原图（浅色主题保留白雾，保证文字可读）
-- **夜间消息列表黑底盖住房间背景**：聊天库内部自行读取系统深浅色，系统深色而 App 用浅色主题时库走深色分支、丢弃透明背景配置——`colorScheme` 改为跟随 App 实际主题（`resolvedTheme`），房间页与私信页同步修复
-- **死代码清理**：删除全仓零调用的 `enterPipMode()` 与未使用样式，修正与实现不符的注释
-
-### 性能优化
-
-- 直播/录播封面缩略图请求从 700px 降到 400px（四列网格单卡仅 ~300px 宽，原图 oversized 约 2.3 倍）；首页直播卡 1080 → 300
-- 房间列表轮询瘦身：30s 一轮的 `loadFollowed` 里，最重的直播状态请求（`getLiveList size:100`，仅为点亮「直播中」标）改为 2.5 分钟节流；驱动未读的消息请求保持 30s
-- 内存防膨胀：回放进度 200 条 LRU、未读计数单房间上限 999、指纹长度上限 2KB、旧版本存储键自动清理
-
-### 品牌 / 构建
-
-- 应用更名「牙牙消息 X」，全套新图标 / 启动图 / logo（资源体积压缩约 60%）
-- Gradle Wrapper 与构建脚本更新；versionCode 2075023
-- 英 / 日 / 韩 / 繁四语言文案同步
-
-> **已知限制**：B站直播不显示在线人数——实测 `room/v1/Room/get_info` 的 `online` 恒为 0，`getInfoByRoom` 未登录时被风控返回 -352，实时数据源不存在；房间未读为本地累计方案，App 未运行期间的消息不计入。
+- **播放器统一**：主直播页、房间内、观看历史、稍后再看共用一套会话层（解析 / 续播 / 在线人数 / 弹幕 / 公告 / 小窗），一套 UI 覆盖直播、回放、录播视频、公演直播、电台与直链播放
+- **房间**：关注成员房间（大房间 / 小房间分侧未读角标）、引用回复与翻牌渲染、房间公告、礼物特效与公屏、房间内直播与回放、点封面直接进房间内直播
+- **公演**：公演排期卡条（未来 10 天），已开演场次 **B站优先**，B站未开播才走应用内信号
+- **成员**：自建成员库镜像（每日同步 + 人工修正）、成员档案就地内嵌、成员动态、鸡腿榜
+- **观看历史 / 稍后再看**：同一直播只留一条记录，退出播放回到来源列表页
+- **体验**：全局横竖屏、深色模式、中 / 繁 / 英 / 日 / 韩五语言、画中画与小窗
+- **工程**：出包脚本化（默认仅 arm64-v8a）、版本号三处一致性校验、纯 Node 回归测试
 
 ## 功能
 
-- 房间消息 / 私信 / 翻牌
-- 口袋直播与回放
-- 公演主播（B站直播）
-- 官方音乐库
-- 翻牌统计、成员数据库、鸡腿充值
+| 模块 | 内容 |
+|:--|:--|
+| 房间 | 关注成员房间、实时消息、未读角标、引用回复与翻牌、房间公告、礼物特效、房间内直播 / 回放、房间电台 |
+| 直播 | 口袋直播与回放、B站直播间、公演排期直播、弹幕（飘屏 / 抽屉 / 发送 / 设置）、在线人数、续播定位、小窗与画中画 |
+| 媒体 | 官方音乐库、视频库、电台节目、观看历史、稍后再看、下载管理 |
+| 成员 | 成员库、成员档案、成员动态、鸡腿榜、公演记录 |
+| 账号 | 验证码登录、Token 登录与校验、大小号切换、私信、翻牌统计、充值、开发票 |
+| 其他 | 深色模式、横竖屏、五语言、图片查看器、运行时日志 |
 
 ## 安装
-从 [Releases](https://github.com/xuqinghhh/yaya_msg_mobile/releases) 下载：
 
-- `yaya-msg-x-universal.apk`：通用包（全 ABI，体积最大）
-- `yaya-msg-x-x64.apk`：x86_64 模拟器专用
-- `yaya-msg-x-v8a.apk` / `-v7a.apk`：真机包（**推荐真机使用**，比通用包小约 40%）
+从 [Releases](https://github.com/wildfffire/yaya_msg_mobile/releases) 下载 APK。
 
-模拟器请用 x64 包，否则无法启动。App 内「检查更新」始终提供通用包直链，真机如需最小体积请在 Release 页面按架构下载。
+文件名为 `yaya-msg-mobile-v<版本>-b<小版本>-<abi>.apk`，例如 `yaya-msg-mobile-v3.0.0-b3000002-v8a.apk`：
 
-## 构建
+- **v8a**（arm64-v8a）：真机使用，默认只提供这一个
+- **x86_64**：模拟器专用，需要时自行构建
 
-```sh
-npm install --legacy-peer-deps
-node scripts/build-apk.js
-```
+文件名只用于区分，不影响安装 —— Android 只校验 APK 内的 versionCode 与签名。
 
 ## 兼容
 
-Android 8.0+（minSdk 26）。
+- Android 8.0+（minSdk 26）
+- HarmonyOS 2 / 3 / 4 可安装（Android 基座为 8–10）
+- 模拟器需安装 x86_64 包，否则无法启动
 
-## 已知问题
+## 构建
 
--
+### 环境
+
+- Node.js 20+（CI 使用 22）
+- JDK 17+
+- Android SDK / NDK（版本见 `android/build.gradle`）
+
+### 命令
+
+```sh
+npm install --legacy-peer-deps
+
+npm run typecheck     # tsc + 版本号一致性校验
+npm run test:core     # 纯 Node 回归测试（不依赖 jest）
+
+node scripts/build-apk.js
+```
+
+默认只构建 **arm64-v8a**，产物复制到 `~/yaya-apk/yaya-msg-mobile-v<版本>-b<小版本>-v8a.apk`。
+
+按需调整：
+
+```sh
+node scripts/build-apk.js                        # arm64-v8a（默认）
+YAYA_ABIS=x86_64 node scripts/build-apk.js       # 模拟器
+YAYA_ABIS=arm64-v8a,x86_64 node scripts/build-apk.js
+YAYA_UNIVERSAL=true node scripts/build-apk.js    # universal
+YAYA_APK_OUT_DIR=D:/out node scripts/build-apk.js # 自定义输出目录
+```
+
+### 签名
+
+正式出包需要在 `~/.gradle/gradle.properties` 或环境变量中提供：
+
+```
+RELEASE_STORE_FILE
+RELEASE_STORE_PASSWORD
+RELEASE_KEY_ALIAS
+RELEASE_KEY_PASSWORD
+```
+
+未提供时 release 包会回落到 debug 签名（脚本会打印警告）。仓库内**不含任何密钥**，`android/local.properties` 也不入库。
+
+### 开发调试
+
+```sh
+npm start          # Metro
+npm run android    # expo run:android
+```
+
+## 版本号约定
+
+三处必须同步，否则 `npm run verify:version`（已并入 `npm run typecheck`）会失败：
+
+| 位置 | 字段 |
+|:--|:--|
+| `app.json` | `expo.version` / `expo.android.versionCode` |
+| `android/app/build.gradle` | `versionName` / `versionCode` |
+| `src/constants/index.ts` | `APP_VERSION` / `APP_BUILD` |
+
+`APP_BUILD` 即 Android versionCode（设置页显示为 `Build {n}`）。
+
+## 项目结构
+
+```
+android/     原生工程，含自定义 Kotlin 模块（云信 IM / 聊天室 / 圈组、播放器控制）
+assets/      图标、启动图、成员库离线快照
+docs/        接口映射、设计系统、重构方案等内部文档
+member-db/   成员库同步脚本与产物（App 通过 jsDelivr 拉取 dist/members.json）
+modules/     本地原生模块（liquid-glass-native）
+scripts/     出包、版本校验、回归测试
+src/
+  api/         口袋48 / B站 / 官方媒体接口
+  auth/        pa 签名（WASM）
+  components/  通用组件
+  hooks/       通用 hooks
+  i18n/        多语言
+  native/      原生桥接
+  navigation/  导航与 Tab
+  player/      统一播放器（core / chrome / resolve / session / store）
+  screens/     页面（含 room/ 房间、watch/ 历史与稍后再看）
+  services/    业务服务（成员库、未读、历史、设置、云信等）
+  store/       全局状态（zustand）
+  theme/       主题与设计 token
+  utils/       纯函数与规则
+```
+
+## 技术栈
+
+React Native 0.83.10 · Expo 55 · TypeScript 5.9 · zustand · react-native-video · react-native-reanimated 4 · @kesha-antonov/react-native-chat · react-native-webview · 自研 Kotlin 原生模块
+
+## 已知限制
+
+- B站直播间**没有实时在线人数**：`room/v1/Room/get_info` 的 `online` 恒为 0，`getInfoByRoom` 被风控拒绝，页面只能显示关注数
+- 房间未读为**本地累计**方案，App 未运行期间的消息不计入
+- 只维护 Android，不提供 v7a / universal 预编译包
+
+## 反馈
+
+- 问题与建议：[Issues](https://github.com/wildfffire/yaya_msg_mobile/issues)
+- 提交代码前请确保 `npm run typecheck` 与 `npm run test:core` 全绿
 
 ## 致谢
 
-- [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg)：本项目最初的源头，感谢原作者的开发与贡献；
-- [Xenia0922/yaya_msg_mobile](https://github.com/Xenia0922/yaya_msg_mobile)：本项目的直接上游基础，感谢其二次开发工作。
-
-本项目按 GPL-3.0 协议开源，在上述项目基础上继续开发。
+- [yk1z/yaya_msg](https://github.com/yk1z/yaya_msg)：项目最初的源头
+- [Xenia0922/yaya_msg_mobile](https://github.com/Xenia0922/yaya_msg_mobile)：本项目的直接上游基础
+- 以及所有开源依赖的作者
 
 ## 免责声明
 
-本应用为**非官方第三方客户端**，与丝芭传媒（SNH48 Group）及口袋48官方无任何关联，未获得其授权或认可，请以官方客户端为准。
+本应用为**非官方第三方客户端**，与丝芭传媒（SNH48 Group）及口袋48 官方无任何关联，未获得其授权或认可，请以官方客户端为准。
 
-- 应用展示的直播、视频、音乐、图片、文本等内容的版权归原权利人所有；
-- 本应用仅为个人技术学习与交流目的开发，不代表任何官方立场，不保证内容持续可用；
-- 请勿将本应用及其中内容用于商业用途或任何盈利活动；
-- 使用本应用可能产生的任何风险（含账号安全风险）由使用者自行承担；
-- 如内容涉及侵权或您认为不妥，请与仓库维护者联系处理。
+- 应用展示的直播、视频、音乐、图片、文本等内容版权归原权利人所有
+- 本项目仅用于个人技术学习与交流，不代表任何官方立场，不保证内容持续可用
+- 请勿将本应用及其内容用于商业用途或任何盈利活动
+- 使用本应用可能产生的风险（含账号安全风险）由使用者自行承担
+- 如内容涉及侵权或您认为不妥，请联系仓库维护者处理
+
+## 许可
+
+[GPL-3.0](LICENSE)

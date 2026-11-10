@@ -1,5 +1,5 @@
 import React, { forwardRef, useImperativeHandle, useMemo, useRef } from 'react';
-import { Platform, StyleSheet } from 'react-native';
+import { StyleSheet } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { getPlayerHtml } from '../../components/media/player';
 import { setPipAspect } from '../../utils/pip';
@@ -26,7 +26,7 @@ export interface WebKernelHandle {
  * 与 RN 控制层经 postMessage 双向通信：进度上报/结束/错误；
  * 控制层经 forwardRef 下发 seek / 倍速（网页内核录播也能拖动与变速）。
  */
-export const WebKernel = forwardRef<WebKernelHandle, Props>(function WebKernel(
+const WebKernelInner = forwardRef<WebKernelHandle, Props>(function WebKernel(
   { source, resumeAt, onProgress, onEnded, onError, onFirstFrame },
   ref,
 ) {
@@ -91,5 +91,14 @@ export const WebKernel = forwardRef<WebKernelHandle, Props>(function WebKernel(
     />
   );
 });
+
+/**
+ * 包 memo：props 未变时不再重渲染 <WebView>（与 NativeKernel 的写法保持一致）。
+ *
+ * ⚠️ 前提：**调用方传进来的回调必须是稳定引用**。
+ * 只要 PlayerCore 里还有一处内联箭头（如 `onEnded={() => …}`），浅比较就永远失败，
+ * 这个 memo 等于白加 —— 所以本次同时把 web 分支的 onEnded / onError 提成了 useCallback。
+ */
+export const WebKernel = React.memo(WebKernelInner);
 
 export default WebKernel;
