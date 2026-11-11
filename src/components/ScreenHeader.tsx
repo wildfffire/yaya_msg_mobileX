@@ -4,6 +4,7 @@ import { useNavigation } from '@react-navigation/native';
 import { useI18n } from '../i18n';
 import { screenTitle, usePalette } from '../theme';
 import { useUiStore } from '../store';
+import { useSidebarMode } from '../hooks/useSidebarMode';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { ScalePressable } from './Motion';
 import { GlassSurface } from './GlassSurface';
@@ -34,6 +35,8 @@ export default function ScreenHeader({ title, onBack, right, style, overlay, hid
   const palette = usePalette();
   const goBack = useCallback(onBack || (() => navigation.goBack()), [onBack, navigation]);
   const topPad = Platform.OS === 'ios' ? 54 : (StatusBar.currentHeight || 24) + 10;
+  /** 侧栏模式顶部压紧：只留状态栏高度，不再叠大标题的额外 10dp 呼吸位 */
+  const sidebarTopPad = Platform.OS === 'ios' ? 44 : (StatusBar.currentHeight || 24);
 
   /**
    * 滚动收起（用户要求：主页面向上滚动时顶栏与底栏一起收起，向下滚回再出现）。
@@ -56,9 +59,21 @@ export default function ScreenHeader({ title, onBack, right, style, overlay, hid
    */
   const chromeHiddenByScroll = useUiStore((s) => s.chromeHiddenByScroll);
   const collapsed = chromeHiddenByScroll && !overlay;
+  /** 横屏侧栏模式：全站页面标题统一在这里收口（32 个调用点无需逐个改） */
+  const sidebarMode = useSidebarMode();
+  /** 收起态不能被 minHeight 顶回来：滚动收起仍要保持 height:0 */
+  const compact = sidebarMode && !collapsed ? styles.headerCompact : null;
 
   return (
-    <View style={[styles.header, { paddingTop: topPad }, style, collapsed && styles.collapsed]}>
+    <View
+      style={[
+        styles.header,
+        { paddingTop: sidebarMode ? sidebarTopPad : topPad },
+        style,
+        compact,
+        collapsed && styles.collapsed,
+      ]}
+    >
       {!hideBack ? (
         <ScalePressable
           onPress={goBack}
@@ -72,12 +87,15 @@ export default function ScreenHeader({ title, onBack, right, style, overlay, hid
           </GlassSurface>
         </ScalePressable>
       ) : null}
-      <Text
-        numberOfLines={1}
-        style={[styles.title, { color: palette.label }]}
-      >
-        {title}
-      </Text>
+      {/* 侧栏模式：大标题整块换成零高度占位，顶栏只留状态栏 + 返回键/右侧按钮，
+          不再叠 34dp 大标题行 + 12dp 下留白（用户反馈「顶上空太多」） */}
+      {sidebarMode ? (
+        <View style={styles.titleSpacer} />
+      ) : (
+        <Text numberOfLines={1} style={[styles.title, { color: palette.label }]}>
+          {title}
+        </Text>
+      )}
       <View style={styles.sideRight}>{right}</View>
     </View>
   );
@@ -90,6 +108,11 @@ const styles = StyleSheet.create({
    *    布局属性一律不进 worklet，否则会出现「收起后回不来」。
    */
   collapsed: { height: COLLAPSE_TO, opacity: 0, overflow: 'hidden', marginBottom: 0 },
+  /** 侧栏模式紧凑页头：去掉大标题行后只留状态栏 + 50dp 的最小呼吸高度。
+   *  从 40 提到 50 是用户 2026-11-11 的「四个界面太靠上，微微下来一点」 */
+  headerCompact: { paddingBottom: 6, marginBottom: 0, minHeight: 50 },
+  /** 标题隐藏后仍占住中间 flex，保证右侧操作位贴右、三栏不塌 */
+  titleSpacer: { flex: 1, minWidth: 0 },
   header: {
     position: 'relative',
     flexDirection: 'row',

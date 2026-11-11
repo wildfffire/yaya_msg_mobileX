@@ -29,6 +29,8 @@ import { ensureMemberData } from '../services/memberData';
 import { RootStackParamList, TabParamList } from './types';
 import { resetChromeScroll } from './chromeScroll';
 import { AppTabBar, MCI } from '../components/AppTabBar';
+import { AppSideBar } from '../components/AppSideBar';
+import { useSidebarMode, useSidebarMetrics } from '../hooks/useSidebarMode';
 import { PageBackdrop } from '../components/PageBackdrop';
 import { MiniPlayer } from '../components/MiniPlayer';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
@@ -264,6 +266,8 @@ function MainTabBar({
 }: BottomTabBarProps & { hidden: boolean }) {
   const { t } = useI18n();
   const palette = usePalette();
+  /** 横屏 + 设置开关同时成立时才切左侧栏；hook 必须放在任何 early return 之前 */
+  const sidebarMode = useSidebarMode();
   // 房间 tab 未读总数：本地累计的各房间**大 + 小两侧**未读之和
   // （房间列表有新消息时在 tab 右上角显示数量；求和统一走 utils/roomUnreadRules，别再自己遍历）
   const roomUnreadTotal = useRoomUnreadStore((s) => sumRoomUnread(s.counts));
@@ -309,6 +313,29 @@ function MainTabBar({
   });
 
   const activeKey = state.routes[state.index]?.name || 'Home';
+  const selectTab = (key: string) => {
+    const target = items.find((it) => it.key === key);
+    target?.onPress();
+  };
+  /**
+   * 横屏侧栏模式：常驻左侧，不套底栏那套 translateY 滑出动画
+   *（DOCK_TRAVEL=160 是为底部胶囊设计的，套上去会把整条左侧栏推离屏幕）。
+   * hidden（进二级页 / 进房 / 播放）仍走上面的 early return，与原逻辑一致。
+   */
+  if (sidebarMode) {
+    return (
+      <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+        <AppSideBar
+          items={items}
+          activeKey={activeKey}
+          onSelect={selectTab}
+          onOpenChat={({ id, name }) => {
+            navigationRef.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
+          }}
+        />
+      </View>
+    );
+  }
   // 自制玻璃底栏（LiquidGlassView 真折射），透光可调
   return (
     // absoluteFill 包一层只为拿住 transform；AppTabBar 自身仍是 bottom:0 的绝对定位，
@@ -320,10 +347,7 @@ function MainTabBar({
       <AppTabBar
         items={items}
         activeKey={activeKey}
-        onSelect={(key) => {
-          const target = items.find((it) => it.key === key);
-          target?.onPress();
-        }}
+        onSelect={selectTab}
       />
     </Reanimated.View>
   );
@@ -331,6 +355,10 @@ function MainTabBar({
 
 function MainTabs() {
   const tabBarHidden = useUiStore((state) => state.tabBarHidden);
+  const sidebarMode = useSidebarMode();
+  const { totalW: sidebarWidth } = useSidebarMetrics();
+  /** 侧栏是绝对定位浮层：只有它真的可见时才让四个 tab 场景左移，避免进房/二级页留下空白 */
+  const sidebarActive = sidebarMode && !tabBarHidden;
 
   return (
     <Tab.Navigator
@@ -341,7 +369,10 @@ function MainTabs() {
       )}
       screenOptions={{
         headerShown: false,
-        sceneStyle: { backgroundColor: 'transparent' },
+        sceneStyle: {
+          backgroundColor: 'transparent',
+          paddingLeft: sidebarActive ? sidebarWidth : 0,
+        },
         // iPhone 26 底部 tab 切换无水平滑动（瞬切）；靠 TabCell spring pop 主导
         animation: 'none',
       }}

@@ -82,6 +82,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   // 背景遮罩/模糊：默认 34 = 旧版导航层写死的 0.34（保持老用户观感不变），模糊默认 0
   bg_dim: 34,
   bg_blur: 0,
+  // 横屏侧边栏：默认关，老用户读旧存档时 loadSettings 的 spread 会自动补 false，
+  // 无需一次性迁移 marker（避免碰到通知开关那套固化值纠正逻辑）。
+  landscape_sidebar_enabled: false,
 };
 
 export async function loadSettings(): Promise<AppSettings> {

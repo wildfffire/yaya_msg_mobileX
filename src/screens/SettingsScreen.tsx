@@ -427,6 +427,20 @@ export default function SettingsScreen() {
           </View>
           <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
 
+          {/* 横屏侧边栏（用户 2026-11-11）：默认关，仅横屏生效，竖屏完全保持原样 */}
+          <View style={styles.innerPad}>
+            <Text style={[styles.rowLabel, { color: palette.labelSecondary }]}>{t('横屏侧边栏')}</Text>
+            <ChipRow
+              options={[{ label: t('关闭'), value: false as any }, { label: t('开启'), value: true as any }]}
+              value={!!settings.landscape_sidebar_enabled as any}
+              onChange={(v) => update('landscape_sidebar_enabled', v)}
+            />
+            <Text style={[styles.note, { color: palette.labelTertiary, marginHorizontal: 0 }]}>
+              {t('开启后仅在横屏时把四个页面入口移到左侧图标栏，并隐藏页面标题与问候语')}
+            </Text>
+          </View>
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+
           <Row
             icon="image"
             title={t('背景图')}

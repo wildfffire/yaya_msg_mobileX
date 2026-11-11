@@ -18,6 +18,7 @@ import { CompositeNavigationProp } from '@react-navigation/native';
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
+import { useSidebarMode, useSidebarMetrics } from '../hooks/useSidebarMode';
 import { RootStackParamList, TabParamList } from '../navigation/types';
 import { useSettingsStore } from '../store';
 import { useMusicPlayerStore } from '../store/musicPlayerStore';
@@ -278,7 +279,11 @@ export default function HomeScreen() {
   // 屏幕宽度驱动快捷入口像素宽度：横竖屏切换（如 B 站直播自动横屏后返回）时立即重算，
   // 避免 flexBasis 百分比在旋转后残留横屏宽度（按钮被拉长不恢复）
   const { width: winW, height: winH } = useWindowDimensions();
-  const quickCellW = (winW - spacing.md * 2 - 24) / 4;
+  const sidebarMetrics = useSidebarMetrics();
+  /** 侧栏模式时场景被 sceneStyle.paddingLeft 挤窄，所有「按屏宽算格子」的区块都要扣掉它 */
+  const sidebarMode = useSidebarMode();
+  const contentInset = sidebarMode ? sidebarMetrics.totalW : 0;
+  const quickCellW = (winW - contentInset - spacing.md * 2 - 24) / 4;
 
   const [lives, setLives] = useState<LiveCardItem[]>([]);
   /**
@@ -331,7 +336,9 @@ export default function HomeScreen() {
   /** 边长夹取区间：过小看不清，过大又回到「图片太大」的老问题 */
   const LIVE_CELL_MIN = 90;
   const LIVE_CELL_MAX = 220;
-  const liveAvailW = winW - spacing.md * 2;
+  // ⚠️ 侧栏模式的 sceneStyle.paddingLeft 会挤窄内容区；不扣掉的话「一行小卡」
+  // 算出来的格子总宽大于实际可用宽度，最后一张就会被 flexWrap 挤到第二行（真机反馈）。
+  const liveAvailW = winW - contentInset - spacing.md * 2;
   const isLandscape = isLandscapeSize(winW, winH);
   // 横屏按目标边长反算列数（至少 3 列，否则宽屏上会出现 1~2 张巨卡）；竖屏固定 4 列
   const liveCols = isLandscape
@@ -343,8 +350,8 @@ export default function HomeScreen() {
         ),
       )
     : 4;
-  /** 1:1 方格：宽度算出来多少，高度就是多少（`HomeLiveCell` 内部 width/height 同值） */
-  const liveCellW = (liveAvailW - LIVE_CELL_GAP * (liveCols - 1)) / liveCols;
+  /** 1:1 方格：宽度算出来多少，高度就是多少；floor 保证整行不因浮点误差换行 */
+  const liveCellW = Math.floor((liveAvailW - LIVE_CELL_GAP * (liveCols - 1)) / liveCols);
   const gridLives = lives.slice(0, liveCols);
 
   /**
@@ -650,6 +657,7 @@ export default function HomeScreen() {
     handleStopMusic();
   }, [currentTrackKey, handleStopMusic]);
 
+  /** 侧栏模式下连时段问候语一起隐藏（sidebarMode 已在组件顶部统一计算） */
   const hour = new Date().getHours();
   const greeting =
     hour < 5 ? t('夜深了') : hour < 11 ? t('早上好') : hour < 14 ? t('中午好') : hour < 18 ? t('下午好') : t('晚上好');
@@ -719,10 +727,13 @@ export default function HomeScreen() {
       >
         {/* 问候区：一行问候 */}
         <View style={{ paddingHorizontal: spacing.md }}>
-          {/* 问候：随手机当前时间变化（v2.7 字号缩小） */}
-          <Text style={[typography.footnote, { color: palette.labelSecondary, marginBottom: spacing.md }]}>
-            {greeting}
-          </Text>
+          {/* 问候：随手机当前时间变化（v2.7 字号缩小）；侧栏模式整行不渲染，
+              只置空内容会残留 18 行高 + spacing.md 的空白 */}
+          {!sidebarMode ? (
+            <Text style={[typography.footnote, { color: palette.labelSecondary, marginBottom: spacing.md }]}>
+              {greeting}
+            </Text>
+          ) : null}
 
           {!token ? (
             <ScalePressable style={{ marginBottom: spacing.xl }} onPress={() => handleNav({ title: '', desc: '', route: 'LoginScreen', icon: '' })} pressedScale={0.98}>
@@ -782,7 +793,8 @@ export default function HomeScreen() {
           ) : livesOk ? (
             <FadeInView delay={0} duration={320}>
               {/* 一行小卡（1:1 方格）：竖屏 4 列一行；横屏按目标边长自动定列数（见 liveCols） */}
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: LIVE_CELL_GAP }}>
+              {/* nowrap 硬锁一行：gridLives 只取 liveCols 张，宽度已按可用宽度算满 */}
+              <View style={{ flexDirection: 'row', flexWrap: 'nowrap', gap: LIVE_CELL_GAP }}>
                 {gridLives.map((live) => (
                   <HomeLiveCell
                     key={live.liveId}

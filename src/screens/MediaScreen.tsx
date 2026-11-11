@@ -1544,15 +1544,9 @@ export default function MediaScreen() {
 
   return (
     <View style={[styles.container]}>
-      <ScreenHeader
-        title={tab === 'live' ? t('直播') : t('录播')}
-        hideBack
-        right={
-          <TouchableOpacity onPress={refreshList} hitSlop={{ top: 8, bottom: 8 }} activeOpacity={0.7}>
-            <MaterialCommunityIcons name="refresh" size={22} color={palette.label} />
-          </TouchableOpacity>
-        }
-      />
+      {/* 顶栏刷新按钮已去掉（用户 2026-11-11）：下拉 RefreshControl、60s 静默刷新、
+          错误条重试继续复用 refreshList / reloadList，不要连带删掉 */}
+      <ScreenHeader title={tab === 'live' ? t('直播') : t('录播')} hideBack />
       {/* 直播/录播分段控件：玻璃轨道 + 滑动玻璃选中胶囊（与底栏同一套） */}
       <GlassSegmented
         options={[
