@@ -61,8 +61,3 @@ export function isCountClaimed(id: string): boolean {
   if (!key) return false;
   return counted.has(key) || consumed.has(key);
 }
-
-/** 仅诊断用 */
-export function claimedCount(): number {
-  return counted.size;
-}

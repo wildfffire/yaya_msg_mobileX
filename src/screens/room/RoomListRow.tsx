@@ -86,6 +86,15 @@ type RoomListRowProps = {
   bigCount: number;
   /** 该房间「小房间侧」的未读条数（与大房间各自独立） */
   smallCount: number;
+  /**
+   * 该侧「最新一条消息」的正文（由 5s 轮询从**详情页**拿到的，优先于列表接口的 msgContent）。
+   *
+   * 为什么需要（用户 2026-11-11：应籽言的几条回复在列表里不显示，仍是之前那句）：
+   * `last/message/get` 对引用消息返回的是**被引用原文**，不是回复正文 ——
+   * 详情页才是真正的「最后一条消息」。父级用字符串传值（memo 友好），空串 = 用 item 里的预览。
+   */
+  bigPreviewText?: string;
+  smallPreviewText?: string;
   onOpenRoom: (member: Member) => void;
   /** 点封面右上角的「直播中」角标 → 直接开播（看直播）；点封面/整行仍是进房间 */
   onOpenLive?: (member: Member) => void;
@@ -104,6 +113,8 @@ export const RoomListRow = React.memo(function RoomListRow({
   isOnMic,
   bigCount,
   smallCount,
+  bigPreviewText,
+  smallPreviewText,
   onOpenRoom,
   onOpenLive,
   onTogglePin,
@@ -142,7 +153,9 @@ export const RoomListRow = React.memo(function RoomListRow({
     const name = shortName(item.member, item.memberId);
     const team = item.member?.team || item.member?.groupName || '';
     const teamBadge = toTeamBadge(team);
-    const lastText = item.lastMessage ? messageText(item.lastMessage) : '';
+    // 详情页拿到的最新正文优先（列表接口对「回复/引用」消息给的是被引用原文）
+    const lastText = String(bigPreviewText || '').trim()
+      || (item.lastMessage ? messageText(item.lastMessage) : '');
     /**
      * 未读展示（**分大/小房间两侧**，用户 2026-09-30 要求）：
      * 数字/「新」贴在该侧那一行的「大」/「小」标签旁边（房间名后面不再挂角标）。
@@ -267,7 +280,8 @@ export const RoomListRow = React.memo(function RoomListRow({
             {/* 小房间行：同上，未读数字贴在「小」标签旁（与大房间各自独立计数） */}
             {(() => {
               const sMsg = item.lastSmallMessage;
-              const sText = sMsg ? messageText(sMsg) : '';
+              const sText = String(smallPreviewText || '').trim()
+                || (sMsg ? messageText(sMsg) : '');
               const showText = !!sText && sText !== lastText;
               if (!showText && smallCount <= 0) return null;
               return (

@@ -170,9 +170,3 @@ export async function notifyMessage(input: NotifyMessageInput): Promise<NotifyOu
   );
   return 'sent';
 }
-
-/** 测试/调试用：清空去重与合并状态（设置里「恢复默认」时不需要，仅内部） */
-export function resetNotifyState() {
-  seenAt.clear();
-  bursts.clear();
-}

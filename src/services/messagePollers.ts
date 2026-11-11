@@ -37,12 +37,13 @@ import {
   roomSideServerUnread,
   type RoomMode,
 } from '../screens/room/roomIdentity';
-import { isIdolMessage, isOwnerMessageForNotify } from '../screens/room/messageRules';
+import { getNextTime, isOwnerMessageStrict, senderProfile } from '../screens/room/messageRules';
 import { isOwnerByServer, messageIdAliases, pickOwnerMessages } from '../utils/notifyOwnerRules';
 import { ROOM_UNREAD_SIDES, roomUnreadKey, type RoomUnreadSide } from '../utils/roomUnreadRules';
 import { shouldKeepMessageAlive, type RoomNotifyMode } from '../utils/notifyRules';
 import { logInfo, logWarn } from '../utils/runtimeLog';
 import { useRoomUnreadStore } from './roomUnread';
+import { useRoomPreviewTextStore } from './roomPreviewText';
 import { useRoomListAvatarStore } from './roomListAvatar';
 import { claimCountId, isCountClaimed, markCountConsumed } from './roomCountLedger';
 import {
@@ -52,6 +53,7 @@ import {
   emptyMessageCursor,
   findFreshMessages,
   freshBatchKey,
+  isCountableChatMessage,
   isDetailFromSide,
   messageId,
   messageIsSelf,
@@ -59,6 +61,9 @@ import {
   messageSenderId,
   messageTime,
   normalizeMessageTime,
+  MESSAGE_BACKFILL_MAX_PAGES,
+  backfillBoundary,
+  shouldBackfillOlder,
   type MessageCursor,
 } from '../utils/roomMessageCursor';
 import { notifyMessage, type NotifyOutcome } from './notificationCenter';
@@ -380,20 +385,26 @@ function memberOf(list: any[], id: string) {
   return list.find((m) => [m?.serverId, m?.channelId, m?.yklzId, m?.roomId].some(same));
 }
 
-/** 大房间「最新消息」：channelId / userId 不通时再按 serverId 认一次 */
+/** 大房间「最新消息」：channelId / userId / 同 server 消歧都不通时再按 serverId 认一次 */
 function findBigMessage(lastMsgs: any[], member: any) {
   const hit = findLastMessage(lastMsgs, member);
   if (hit) return hit;
   const serverId = String(member?.serverId || '');
   if (!serverId) return null;
-  return lastMsgs.find((msg) => String(msg?.channelId || msg?.serverId || '') === serverId) || null;
+  const smallId = String(member?.yklzId || '');
+  return lastMsgs.find((msg) => {
+    const channel = String(msg?.channelId || '');
+    // 小房间的条目不能冒充大房间（分侧数字串味）
+    if (smallId && channel === smallId) return false;
+    return channel === serverId || String(msg?.serverId || '') === serverId;
+  }) || null;
 }
 
-/** 详情消息的聊天类型判定（与 useRoomUnreadCounters 的正式口径一致） */
-function isChatFeedMessage(m: any): boolean {
-  const t = String(m?.bodys?.messageType || m?.msgType || m?.messageType || m?.type || 'TEXT').toUpperCase();
-  return /^(TEXT|REPLY|GIFTREPLY|EXPRESSIMAGE|IMAGE|AUDIO|VIDEO|BARRAGE_|FLIP)/.test(t);
-}
+/**
+ * 详情消息的聊天类型判定 = `utils/roomMessageCursor.isCountableChatMessage`。
+ * （实时 / 30s 精确计数 / 这里三处共用同一份实现，别再各写一份正则。）
+ */
+const isChatFeedMessage = isCountableChatMessage;
 
 interface RoomSideTarget {
   key: string;
@@ -401,6 +412,8 @@ interface RoomSideTarget {
   side: RoomUnreadSide;
   member: any;
   token: string;
+  /** 列表接口给的预览正文（`last/message/get.msgContent`；只用于「预览一致性」诊断与回退） */
+  previewText?: string;
   serverUnread: number;
   channelId: string;
   serverId: string;
@@ -421,15 +434,19 @@ const ROOM_DETAIL_LIST_KEYS = [
  * 据此识别串味；命中回退时**去掉 fallback 用本侧频道再试一次**，
  * 既保住小房间的可用性，又不引入串味数据。两次都拿不到本侧数据就整轮丢弃。
  */
+/** 详情单页条数（同时是「这一页是否满页」的判据） */
+const DETAIL_PAGE_LIMIT = 50;
+
 async function fetchSideDetail(
   s: RoomSideTarget,
   fetchAll: boolean,
-): Promise<{ list: any[] | null; crossSide: boolean }> {
+  nextTime = 0,
+): Promise<{ list: any[] | null; crossSide: boolean; res?: any }> {
   const base: any = {
     channelId: s.channelId,
     serverId: s.serverId,
-    nextTime: 0,
-    limit: 50,
+    nextTime,
+    limit: DETAIL_PAGE_LIMIT,
     fetchAll,
   };
   try {
@@ -450,11 +467,192 @@ async function fetchSideDetail(
       }
     }
     const list = unwrapList(res, ROOM_DETAIL_LIST_KEYS);
-    return { list: list.length ? list : null, crossSide: false };
+    return { list: list.length ? list : null, crossSide: false, res };
   } catch (e: any) {
     logDiag('room.detail', `[room] 详情失败 ${s.id}#${s.side}：${String(e?.message || e || '')}`);
     return { list: null, crossSide: false };
   }
+}
+
+/** 一页里「最新一条」（页首通常就是最新；时间缺失时取页首） */
+function newestMessage(list: any[] | null): any {
+  if (!list || !list.length) return null;
+  let best = list[0];
+  let bestTime = messageTime(best);
+  for (const m of list) {
+    const t = messageTime(m);
+    if (t > bestTime) { best = m; bestTime = t; }
+  }
+  return best;
+}
+
+/* ───────── homeowner 滞后实验（用户 2026-11-11 要求「持续进行」）─────────
+ * 目的：持续测量 `/list/homeowner`（服务端筛好的房主流）相对 `/list/all`（粉丝+偶像混合流）
+ * 到底滞后多少、覆盖率如何 —— 用来判断它能不能当「偶像消息」的主数据源（H2 方案）。
+ *
+ * 样本来源：
+ *   ① **免费样本**：本轮本来就要拉 homeowner 页（有 fresh 消息时），顺手比较，0 额外请求；
+ *   ② **探针**：没有新消息的时段也每 30s 轮转探一个侧（2 个请求），保证实验不停。
+ * 输出：每侧一行（60s 节流）+ 每 10 分钟一行汇总（样本数 / 平均滞后 / 最大滞后 / 覆盖率）。
+ */
+const OWNER_PROBE_GAP_MS = 30_000;
+const OWNER_SUMMARY_GAP_MS = 10 * 60_000;
+let ownerProbeAt = 0;
+let ownerProbeCursor = 0;
+let ownerSummaryAt = 0;
+const ownerLagStat = { samples: 0, lagSum: 0, lagMax: 0, hit: 0, total: 0 };
+/** 每侧上次计入统计的时间（60s 内重复样本不重复计数，避免热闹房间把样本刷爆） */
+const ownerLagSampledAt = new Map<string, number>();
+
+function hhmm(ms: number): string {
+  if (!ms) return '-';
+  const d = new Date(ms);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** 比较「混合流最新」与「服务端房主流最新」，并累计统计（不含消息正文，只打昵称/时间） */
+function logOwnerLag(s: RoomSideTarget, allList: any[], ownerList: any[], source: string) {
+  const allNewest = newestMessage(allList);
+  const ownerNewest = newestMessage(ownerList);
+  const allT = messageTime(allNewest);
+  const ownerT = messageTime(ownerNewest);
+  const lagSec = allT && ownerT ? Math.round((allT - ownerT) / 1000) : -1;
+  // 覆盖率：混合流这一页里，有多少条能在房主流里找到（服务端过滤的召回）
+  const ownerIds = new Set<string>();
+  for (const m of ownerList) {
+    for (const id of messageIdAliases(m)) ownerIds.add(id);
+  }
+  let hit = 0;
+  for (const m of allList) {
+    if (messageIdAliases(m).some((id) => ownerIds.has(id))) hit += 1;
+  }
+  const now = Date.now();
+  if (now - (ownerLagSampledAt.get(s.key) || 0) >= 60_000) {
+    ownerLagSampledAt.set(s.key, now);
+    if (lagSec >= 0) {
+      ownerLagStat.samples += 1;
+      ownerLagStat.lagSum += lagSec;
+      if (lagSec > ownerLagStat.lagMax) ownerLagStat.lagMax = lagSec;
+    }
+    ownerLagStat.hit += hit;
+    ownerLagStat.total += allList.length;
+  }
+  logDiag(
+    `room.homeowner.${s.key}`,
+    `[unread] homeowner 滞后实验 ${s.id}#${s.side} 源=${source}`
+    + ` all最新=${hhmm(allT)}(${allNewest ? senderProfile(allNewest, s.member).name : '-'})`
+    + ` homeowner最新=${hhmm(ownerT)}(${ownerNewest ? senderProfile(ownerNewest, s.member).name : '-'})`
+    + ` 滞后=${lagSec >= 0 ? `${lagSec}s` : '-'}`
+    + ` 覆盖率=${hit}/${allList.length}`,
+  );
+  if (now - ownerSummaryAt >= OWNER_SUMMARY_GAP_MS) {
+    ownerSummaryAt = now;
+    const avg = ownerLagStat.samples ? Math.round(ownerLagStat.lagSum / ownerLagStat.samples) : 0;
+    const rate = ownerLagStat.total ? Math.round((ownerLagStat.hit / ownerLagStat.total) * 100) : 0;
+    logInfo(
+      `[unread] homeowner 实验汇总 样本=${ownerLagStat.samples} 平均滞后=${avg}s`
+      + ` 最大滞后=${ownerLagStat.lagMax}s 覆盖率=${rate}%`
+      + `（${ownerLagStat.hit}/${ownerLagStat.total}）`,
+      'room.unread',
+    );
+  }
+}
+
+/** 一页消息里最早的时间（ms；全都没时间时 0） */
+function oldestMessageTime(list: any[]): number {
+  let oldest = 0;
+  for (const m of list) {
+    const t = messageTime(m);
+    if (t > 0 && (!oldest || t < oldest)) oldest = t;
+  }
+  return oldest;
+}
+
+/** 按消息 id 去重（回溯多页之间会有重叠） */
+function dedupeMessages(list: any[]): any[] {
+  const seen = new Set<string>();
+  const out: any[] = [];
+  for (const m of list) {
+    const id = messageId(m);
+    if (id && seen.has(id)) continue;
+    if (id) seen.add(id);
+    out.push(m);
+  }
+  return out;
+}
+
+/** 每轮最多为「回溯」打多少个额外页请求（全局预算：防长间隔后一次打几十个请求） */
+const BACKFILL_PAGES_PER_ROUND = 8;
+
+/**
+ * 还没翻到边界的侧：记录「下次从哪个游标继续翻」，下一轮接着翻（跨轮续翻）。
+ *
+ * 为什么需要（用户 2026-11-11：「只看三页太少了，能不能一直找到上次看到的地方为止」）：
+ * 晚上关通知时后台不轮询，早上回前台可能积压几百条 —— 一次翻完要几十个请求，
+ * 集中打出去就是风控/卡顿。所以改成「每轮最多 8 页，翻不完记下来，下轮继续」，
+ * 5s 一轮，几百条大约几轮就补齐，既不打爆接口也不会丢消息。
+ */
+const backfillPending = new Map<string, { nextTime: number; boundary: number; pages: number }>();
+let backfillBudgetLeft = BACKFILL_PAGES_PER_ROUND;
+
+/**
+ * ★ 向前回溯（用户 2026-11-11「覃柯蒙 15:45 的消息没有角标」）：
+ *
+ * 关通知时后台轮询是停的（用户明确要求省电），实时通道又可能整场 broken pipe；
+ * App 回到前台时积压的消息往往**超过一页**（热闹房间被粉丝刷满），房主那条
+ * 已经被挤出最新页 —— 以前就永远补不回来（两条 HTTP 通道都只看最新一页）。
+ *
+ * 这里按 `nextTime` 一直往前翻，直到「最早一条不晚于回溯边界」（= 上次轮询消费到的位置，
+ * 见 `backfillBoundary`）；单轮受 `BACKFILL_PAGES_PER_ROUND` 预算限制，
+ * 翻不完记进 `backfillPending`，下一轮从断点继续。
+ */
+async function backfillSideDetail(
+  s: RoomSideTarget,
+  cur: MessageCursor,
+  boundary: number,
+  first: { list: any[] | null; res?: any },
+): Promise<any[]> {
+  let acc = dedupeMessages(first.list || []);
+  let res = first.res;
+  let lastPage: any[] = first.list || [];
+  const pending = backfillPending.get(s.key);
+  let pages = pending?.pages || 0;
+  let cursor = pending?.nextTime || 0;
+  let finished = false;
+  while (pages < MESSAGE_BACKFILL_MAX_PAGES) {
+    if (lastPage.length < DETAIL_PAGE_LIMIT) { finished = true; break; } // 没有更早的了
+    const oldest = oldestMessageTime(acc);
+    if (oldest > 0 && oldest <= boundary) { finished = true; break; }    // 已翻到边界
+    if (!(cursor > 0)) {
+      cursor = getNextTime(res, acc) || oldestMessageTime(acc);
+      if (!(cursor > 0)) { finished = true; break; }
+    }
+    if (backfillBudgetLeft <= 0) break; // 本轮预算用完：留到下轮
+    backfillBudgetLeft -= 1;
+    const page = await fetchSideDetail(s, true, cursor);
+    if (!page.list || page.crossSide) { finished = true; break; }
+    const before = acc.length;
+    acc = dedupeMessages(acc.concat(page.list));
+    lastPage = page.list;
+    res = page.res;
+    pages += 1;
+    const nextCursor = getNextTime(page.res, page.list) || oldestMessageTime(acc);
+    // 游标必须前进，否则死循环（接口可能把同一个 nextTime 反复返回）
+    if (!(nextCursor > 0) || nextCursor >= cursor) { finished = true; break; }
+    cursor = nextCursor;
+    if (acc.length === before) { finished = true; break; }
+  }
+  if (finished || pages >= MESSAGE_BACKFILL_MAX_PAGES) backfillPending.delete(s.key);
+  else backfillPending.set(s.key, { nextTime: cursor, boundary, pages });
+  if (pages > 0) {
+    logInfo(
+      `[unread] 回溯 ${s.id}#${s.side} 共 ${pages} 页 → ${acc.length} 条`
+      + `（边界=${boundary}${finished ? ' 已到边界' : ' 下轮续翻'}）`,
+      'room.unread',
+    );
+  }
+  return acc;
 }
 
 async function pollRooms() {
@@ -559,6 +757,7 @@ async function pollRooms() {
           side,
           member,
           token,
+          previewText: String((msg as any)?.msgContent || ''),
           serverUnread: roomSideServerUnread(row, side as RoomMode),
           channelId,
           serverId: String(member.serverId || ''),
@@ -572,6 +771,8 @@ async function pollRooms() {
     }
     const sweep = roomRound % SWEEP_EVERY_ROUNDS === 0;
     let check = sides.filter((s) => {
+      // 上一轮没翻到边界的侧：本轮必须继续（哪怕预览没变化）
+      if (backfillPending.has(s.key)) return true;
       const cur = cursorOf(roomCursors, s.key);
       return cursorNeedsCheck(cur, s.token, s.serverUnread, sweep);
     });
@@ -583,11 +784,62 @@ async function pollRooms() {
       logDiag('room.capdetail', `[room] 本轮待查 ${sides.length} 侧，先查 ${check.length} 侧（其余下轮）`);
     }
 
-    const fetched = await mapLimit(check, DETAIL_CONCURRENCY, async (s) => ({
-      s,
-      ...(await fetchSideDetail(s, true)),
-    }));
-
+    /** 房间级已读基线快照（服务器消息时间 ms）：进房/退房/一键已读都会推进 */
+    const readBaselines = useRoomUnreadStore.getState().lastReadAt || {};
+    /** 每轮重置回溯页预算（跨轮续翻，见 backfillPending） */
+    backfillBudgetLeft = BACKFILL_PAGES_PER_ROUND;
+    /**
+     * 拉详情（必要时**向前回溯多页**）：积压超过一页时只看最新页会永远漏掉
+     * 房主那条（用户 2026-11-11 真机：覃柯蒙 15:45 的消息被粉丝刷出窗口）。
+     */
+    const fetched = await mapLimit(check, DETAIL_CONCURRENCY, async (s) => {
+      const first = await fetchSideDetail(s, true);
+      if (!first.list || first.crossSide) {
+        return { s, list: first.list, crossSide: first.crossSide, fromAll: false };
+      }
+      /**
+       * 只认 `/list/all` 的页：`owner` 回退页可能停在几小时前的房主消息，
+       * 拿它更新列表预览会把预览拽回过去。
+       */
+      const fromAll = String((first.res as any)?._request?.label || '').startsWith('all');
+      const cur = cursorOf(roomCursors, s.key);
+      const floor = Number(readBaselines[s.id]) || 0;
+      // 边界 = 上次轮询消费到的位置（没有才退回已读基线）；翻到它就停
+      const boundary = backfillBoundary(cur.time, floor);
+      const need = backfillPending.has(s.key) || shouldBackfillOlder({
+        pageLength: first.list.length,
+        limit: DETAIL_PAGE_LIMIT,
+        freshCount: findFreshMessages(first.list, cur).fresh.length,
+        primed: cur.primed,
+        boundary,
+        oldestTime: oldestMessageTime(first.list),
+      });
+      const list = need ? await backfillSideDetail(s, cur, boundary, first) : first.list;
+      /**
+       * 本轮做了回溯时，计数下限要降到**回溯边界**：
+       * 否则这一轮翻到的老页会被 `cur.time` 当成历史整页丢掉
+       *（续翻轮尤其明显：游标已经在上一轮推到最新了）。
+       */
+      const merged = dedupeMessages(list);
+      // 只有「本轮真的多翻到了更早的页」才降低计数下限；没翻到就沿用常规口径（防重算历史）
+      const backfilled = need && merged.length > first.list.length;
+      return {
+        s,
+        list: merged,
+        crossSide: false,
+        fromAll,
+        countFloorOverride: backfilled ? Math.max(floor, boundary) : 0,
+      };
+    });
+    /**
+     * ★ 新出现的侧 + 已知已读基线（用户 2026-11-11「有的成员有新消息不会计数也不显示」）：
+     * 某侧此前没进过 `last/message/get`（从未有消息 / 刚关注 / 接口这次才返回）时，
+     * `cur.primed === false`，旧版把它整页当「首轮基线」吞掉 → **这条新消息永远不计数也不通知**。
+     * 只要这个房间用户读过（`lastReadAt > 0`，服务器时间域），晚于它的消息就是真新消息，
+     * 与其它通道共用 id 总账去重，不会重复计数。
+     */
+    const isNewSideWithFloor = (s: RoomSideTarget, cur = cursorOf(roomCursors, s.key)): boolean =>
+      !cur.primed && (Number(readBaselines[s.id]) || 0) > 0;
     /**
      * ★ 服务端房主表（消除「按房间分化」的核心）。
      *
@@ -601,9 +853,22 @@ async function pollRooms() {
     const ownerChecks = fetched.filter(({ s, list, crossSide }) => {
       if (!list || crossSide) return false;
       const cur = cursorOf(roomCursors, s.key);
+      if (isNewSideWithFloor(s, cur)) {
+        const floor = Number(readBaselines[s.id]) || 0;
+        // 只有「时间明确晚于已读基线」的才值得拉房主表（时间缺失的旧消息不当新消息）
+        return list.some((m) => {
+          const t = messageTime(m);
+          return t > 0 && t > floor;
+        });
+      }
       return cur.primed && findFreshMessages(list, cur).fresh.length > 0;
     });
     const ownerIdSets = new Map<string, Set<string> | null>();
+    /**
+     * homeowner 页的原始列表（只用于「滞后实验」诊断：用户 2026-11-11 决定先测这个接口靠不靠谱）。
+     * 与 ownerIdSets 同一次请求，不额外增加网络调用。
+     */
+    const ownerPages = new Map<string, any[]>();
     if (ownerChecks.length) {
       await mapLimit(ownerChecks, OWNER_CHECK_CONCURRENCY, async ({ s }) => {
         // homeowner 同样走防串味拉取：回退到别的频道时那张表不能拿来判本侧房主
@@ -618,6 +883,7 @@ async function pollRooms() {
           for (const mid of messageIdAliases(m)) ids.add(mid);
         }
         ownerIdSets.set(s.key, ids);
+        ownerPages.set(s.key, list);
       });
     }
 
@@ -628,9 +894,8 @@ async function pollRooms() {
     let idolTotal = 0;
     let countedTotal = 0;
     let compensatedTotal = 0;
-    const readBaselines = useRoomUnreadStore.getState().lastReadAt || {};
     for (const item of fetched) {
-      const { s, list, crossSide } = item;
+      const { s, list, crossSide, fromAll, countFloorOverride } = item;
       // 串味结果：游标、计数、通知、房主表全部不动，下轮重试（不能拿它建基线）
       if (crossSide) continue;
       const cur = cursorOf(roomCursors, s.key);
@@ -647,19 +912,109 @@ async function pollRooms() {
         // 已建过基线的侧：详情失败不动游标，下轮重试（不能把新消息吞掉）
         continue;
       }
-      const { fresh, pageKeys, newest } = findFreshMessages(list, cur);
+      const freshResult = findFreshMessages(list, cur);
+      const pageKeys = freshResult.pageKeys;
+      const newest = freshResult.newest;
+      /**
+       * ★ 新出现的侧（此前没有游标）不能整页当基线吞掉（用户 2026-11-11
+       * 「有的成员有新消息不会计数也不显示」）：
+       * 只要这个房间读过（`readFloor > 0`，服务器时间域），晚于已读基线的消息就是真新消息。
+       * 时间缺失（0）的消息在这里**不算**：整页历史都没时间时会把老消息一次刷成未读。
+       * 与其它通道共用 id 总账去重，不会重复计数。
+       */
+      const newSideWithFloor = isNewSideWithFloor(s, cur);
+      /**
+       * ★ 本轮「算新消息」的时间下限（用户 2026-11-11「一直找到上次看到的地方」）：
+       *   · 正常轮 = 上次轮询消费到的位置（`cur.time`，与 findFreshMessages 同口径）；
+       *   · **续翻轮** = 回溯边界（`pendingBackfill.boundary`，早于当前游标）——
+       *     否则「续翻拉到的老页」会被当成历史整页丢掉：明明翻到了、却一条不算。
+       * 已消费过的 id（`cur.keys`）始终排除，配合 id 总账不会重复计数。
+       */
+      const pendingBackfill = backfillPending.get(s.key);
+      const countFloor = countFloorOverride
+        || (pendingBackfill ? Math.max(readFloor, pendingBackfill.boundary) : cur.time);
+      const seenBefore = new Set<string>(cur.keys);
+      const fresh = newSideWithFloor
+        ? list.filter((m) => {
+          const t = messageTime(m);
+          return t > 0 && t > readFloor;
+        })
+        : list.filter((m) => {
+          const mid = messageId(m);
+          if (!mid || seenBefore.has(mid)) return false;
+          const t = messageTime(m);
+          return !(t > 0 && countFloor > 0 && t < countFloor);
+        });
+      if (newSideWithFloor && fresh.length) {
+        logInfo(
+          `[unread] 新出现的侧 ${s.id}#${s.side} 按已读基线 ${readFloor} 判新 ${fresh.length} 条`,
+          'room.unread',
+        );
+      }
       freshTotal += fresh.length;
       /** 本侧的服务端房主 id 表；null = 接口失败，空表 = 服务端没返回房主消息 */
       const ownerIds = ownerIdSets.get(s.key) ?? null;
       const ownerHit = (m: any): boolean =>
         !!ownerIds && ownerIds.size > 0
         && messageIdAliases(m).some((mid) => ownerIds.has(mid));
-      const isOwnerForCount = (m: any): boolean =>
+      /**
+       * ★ **唯一**的房主判定（用户 2026-11-11「都走严格判定」）：
+       * 计数、预览、通知、诊断全部只认这一个谓词 ——
+       * 本地严格判定（id / 昵称必须明确命中）+ 服务端 homeowner 表作阳性补漏。
+       * 以前计数用宽松口径、通知用严格口径，会出现「算进角标但不弹通知」的不一致。
+       */
+      const isOwnerMessage = (m: any): boolean =>
         isChatFeedMessage(m)
-        && isOwnerByServer(ownerIds, messageIdAliases(m), () => isIdolMessage(m, s.member, false));
-      const isOwnerForNotice = (m: any): boolean =>
-        isChatFeedMessage(m)
-        && isOwnerByServer(ownerIds, messageIdAliases(m), () => isOwnerMessageForNotify(m, s.member));
+        && isOwnerByServer(ownerIds, messageIdAliases(m), () => isOwnerMessageStrict(m, s.member));
+      /**
+       * ★ **先把偶像消息筛出来，再统计**（用户 2026-11-11）。
+       *
+       * 官方 `/list/all` 是「粉丝 + 偶像」混在一条流里返回的（不是两个接口），
+       * 所以每页先过一遍房主判定，得到本页唯一的「偶像消息」集合，
+       * 之后的**预览 / 计数 / 诊断**全部只读这一份：
+       *   · 以前是「遍历 fresh 逐条判是不是偶像」，判定散在计数/通知/预览三处，
+       *     口径稍有出入就会出现「算了一条、显示另一条」；
+       *   · 现在筛一次、用三次，粉丝消息在计数前就被排除（不再进入计数分支）。
+       * 通知仍在这份集合上再做一次**严格**判定（宁可漏、不可误报）。
+       */
+      const idolMessages: any[] = list.filter((m: any) => isOwnerMessage(m));
+      const idolIds = new Set<string>();
+      for (const m of idolMessages) {
+        const mid = messageId(m);
+        if (mid) idolIds.add(mid);
+      }
+      /**
+       * homeowner 滞后实验（免费样本）：本轮本来就拉了 homeowner 页，顺手比较一次。
+       * 没有新消息的时段由轮询末尾的「探针」补样本，实验持续进行。
+       */
+      const ownerPage = ownerPages.get(s.key);
+      if (ownerPage && ownerPage.length) logOwnerLag(s, list, ownerPage, '轮询');
+      /**
+       * 列表预览只显示**偶像（房主）发言**：
+       * `last/message/get` 的 `msgContent` 连发送者都不给（引用消息只给被引用原文），
+       * 所以预览取「页内最新一条偶像发言」；本页没有偶像发言就不动
+       *（保留上一次的偶像文案，绝不拿粉丝发言顶上）。
+       */
+      if (fromAll) {
+        // 只扫最近 80 条（页是「新 → 老」排列）：更早的偶像发言不可能是「最新一条」
+        const newestOwner = newestMessage(idolMessages.slice(0, 80));
+        if (newestOwner) {
+          const detailText = messageText(newestOwner);
+          useRoomPreviewTextStore.getState().setPreview(s.id, s.side, {
+            text: detailText,
+            msgId: messageId(newestOwner),
+            msgTime: messageTime(newestOwner),
+          });
+          const previewText = String(s.previewText || '').trim();
+          if (detailText && previewText && detailText !== previewText) {
+            logDiag(
+              `room.preview.${s.key}`,
+              `[unread] 预览不一致 ${s.id}#${s.side} 列表="${previewText.slice(0, 24)}"`
+              + ` 偶像最新="${detailText.slice(0, 24)}"`,
+            );
+          }
+        }
+      }
       /**
        * ★ 用户 2026-11-10 定版：**房间通知只认房主本人**。
        * 旧版把 `fresh` 整批（含群聊里成员/粉丝的发言）都送进 notifyMessage，
@@ -667,7 +1022,7 @@ async function pollRooms() {
        * 这里用通知专用严格判定（不是「只看偶像」视图的宽松兜底）挑出偶像消息；
        * 非偶像消息照样被游标消费（不弹、不重放、不补弹）。
        */
-      const idolFresh = pickOwnerMessages(fresh, isOwnerForNotice).filter((m) => {
+      const idolFresh = pickOwnerMessages(fresh, isOwnerMessage).filter((m) => {
         // 已读基线之前的消息不能再弹横幅（与计数同口径），否则重启/退房后
         // 会出现「已经消除过的消息再次提示」
         const mt = messageTime(m);
@@ -685,8 +1040,14 @@ async function pollRooms() {
       if (seenHere) {
         for (const m of list) markCountConsumed(messageId(m));
       }
-      if (cur.primed && fresh.length) {
-        let counted = 0;
+      if ((cur.primed || newSideWithFloor) && fresh.length) {
+        /**
+         * ① 先按「已读语义」过一遍新消息（与是不是偶像无关）：
+         *    正在看的房间 / 早于已读基线的消息 → 标已读，不占计数名额。
+         * ② 再把「仍然是未读」的消息**与上面筛出的偶像 id 集合取交集**，
+         *    只对交集做统计（粉丝消息根本不进入计数这一步，用户 2026-11-11 的要求）。
+         */
+        const countableIdolIds: string[] = [];
         for (const m of fresh) {
           const mid = messageId(m);
           if (!mid) continue;
@@ -701,8 +1062,10 @@ async function pollRooms() {
             markCountConsumed(mid);
             continue;
           }
-          // 非偶像消息不占总账：交给别的通道判定，也不该被补偿扫描补计
-          if (!isOwnerForCount(m)) continue;
+          if (idolIds.has(mid)) countableIdolIds.push(mid);
+        }
+        let counted = 0;
+        for (const mid of countableIdolIds) {
           if (!claimCountId(mid)) continue; // 实时通道或 30s 指纹已经计过
           counted += 1;
         }
@@ -714,17 +1077,34 @@ async function pollRooms() {
         const sample = fresh.slice(0, 5).map((m) => {
           const mid = messageId(m);
           return `${String(mid).slice(-8)}:${isChatFeedMessage(m) ? 'chat' : 'other'}`
-            + `:${isOwnerForCount(m) ? 'idol' : 'fan'}`
+            + `:${idolIds.has(mid) ? 'idol' : 'fan'}`
             + `:${ownerHit(m) ? 'server' : 'local'}`
             + `:${isCountClaimed(mid) ? 'claimed' : 'new'}`;
         }).join(' ');
         logInfo(
-          `[unread] 判定 ${s.id}#${s.side} 新=${fresh.length} 偶像=${idolFresh.length}`
+          `[unread] 判定 ${s.id}#${s.side} 新=${fresh.length}`
+          + ` 本页偶像=${idolMessages.length} 新偶像=${countableIdolIds.length} 通知候选=${idolFresh.length}`
           + ` homeowner=${ownerIds === null ? 'fail' : ownerIds.size}`
           + ` 服务端命中=${fresh.filter(ownerHit).length}`
           + ` 已读基线=${readFloor} 已读=${seenHere ? 1 : 0} 计=${counted} 样本=${sample}`,
           'room.unread',
         );
+        /**
+         * ★ 一条都没认出时把**发送者是谁**打出来（用户 2026-11-11：
+         * 「覃柯蒙 15:45 的消息没有角标」）。此前只有 id 后缀 + fan/local 标签，
+         * 分不清「这真不是房主」和「是房主但 id/昵称对不上」，只能靠猜。
+         */
+        if (!counted) {
+          const senders = fresh.slice(0, 3).map((m) => {
+            const p = senderProfile(m, s.member);
+            return `${String(messageId(m)).slice(-8)} id=${p.id || '-'} nick=${p.name || '-'} t=${messageTime(m)}`;
+          }).join(' | ');
+          logDiag(
+            `room.noidol.${s.key}`,
+            `[unread] 房主未识别 ${s.id}#${s.side} 新=${fresh.length}`
+            + ` 服务端表=${ownerIds === null ? 'fail' : ownerIds.size} 样例=${senders}`,
+          );
+        }
       }
 
       /**
@@ -744,7 +1124,7 @@ async function pollRooms() {
         for (const m of list) {
           const t = messageTime(m);
           if (!canCompensateUnread(t, cur.time, readFloor)) continue;
-          if (!isOwnerForCount(m)) continue;
+          if (!idolIds.has(messageId(m))) continue; // 只补计偶像消息（严格判定，见上）
           const mid = messageId(m);
           if (!mid || isCountClaimed(mid)) continue;
           if (!claimCountId(mid)) continue;
@@ -805,6 +1185,31 @@ async function pollRooms() {
       logInfo(`[room] 消息游标已就绪 房间=${targets.length} 样本=${lastMsgs.length} 恢复=${roomCursors.size}`, LOG_TAG);
     }
     if (notifyAttempts.size > 1000) notifyAttempts.clear();
+    /**
+     * ★ homeowner 滞后实验「探针」（用户 2026-11-11 要求实验持续进行）：
+     * 没有新消息的时段本轮不会有免费样本，这里每 30s 轮转探一个侧，
+     * 同时拉 `/list/all` 与 `/list/homeowner` 各一页做对比（2 个请求/30s）。
+     * 失败绝不影响轮询本身。
+     */
+    if (sides.length && Date.now() - ownerProbeAt >= OWNER_PROBE_GAP_MS) {
+      ownerProbeAt = Date.now();
+      ownerProbeCursor = (ownerProbeCursor + 1) % sides.length;
+      const probe = sides[ownerProbeCursor];
+      // 本轮已经免费采样过的侧不重复探（省一个请求）
+      if (probe && !ownerIdSets.has(probe.key)) {
+        try {
+          const [allPage, ownerPageProbe] = await Promise.all([
+            fetchSideDetail(probe, true),
+            fetchSideDetail(probe, false),
+          ]);
+          if (allPage.list && ownerPageProbe.list && !allPage.crossSide && !ownerPageProbe.crossSide) {
+            logOwnerLag(probe, allPage.list, ownerPageProbe.list, '探针');
+          }
+        } catch {
+          /* 实验失败不影响轮询 */
+        }
+      }
+    }
     logInfo(
       `[room] 本轮 房间=${targets.length} 侧=${sides.length} 查详情=${fetched.length}`
       + ` 新消息=${freshTotal} 偶像=${idolTotal} 通知=${sent} 计数=${countedTotal}`
@@ -928,6 +1333,9 @@ function startAppStateWake() {
 
 export function stopMessagePollers() {
   stopPollingTimers();
+  // 回溯续翻状态随轮询一起清掉（切换账号/重新启动不应接着上一轮的断点翻）
+  backfillPending.clear();
+  backfillBudgetLeft = BACKFILL_PAGES_PER_ROUND;
   if (firstPollTimer) { clearTimeout(firstPollTimer); firstPollTimer = null; }
   if (appStateSub) { appStateSub.remove(); appStateSub = null; }
   if (pollTickSub) { pollTickSub.remove(); pollTickSub = null; }

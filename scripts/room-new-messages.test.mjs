@@ -173,9 +173,10 @@ try {
     assert.ok(rooms.includes('const CHAT_RETURN_BOTTOM_DP = 12;'));
     assert.ok(rooms.includes('wasBottom ? y <= CHAT_STICK_BOTTOM_DP : y <= CHAT_RETURN_BOTTOM_DP'));
   });
-  await check('计数数据源：默认用房间全部消息（只看偶像视图下群聊消息也计数）', () => {
-    assert.ok(rooms.includes('const PILL_COUNT_ALL_ROOM_MESSAGES = true;'));
-    assert.ok(rooms.includes('PILL_COUNT_ALL_ROOM_MESSAGES ? roomMessages : filteredRoomMessages'));
+  await check('计数数据源：用房间全部消息（只看偶像视图下群聊消息也计数）', () => {
+    // 旧版 PILL_COUNT_ALL_ROOM_MESSAGES 恒为 true（false 分支是死代码），已直接收敛为 roomMessages
+    assert.ok(!rooms.includes('PILL_COUNT_ALL_ROOM_MESSAGES'), '恒定开关已删除，不要再回来');
+    assert.ok(rooms.includes('const pillSource = roomMessages;'), '浮标计数数据源必须是房间全部消息');
     assert.ok(rooms.includes('messageRole(item, selectedRoom as Member, showFanMessages, selfIds, memberIdSet) === \'mine\''));
   });
   await check('清零必须带原因（日志里能看出是谁清的）', () => {

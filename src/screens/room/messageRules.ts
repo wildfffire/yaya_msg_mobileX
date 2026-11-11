@@ -178,18 +178,18 @@ export function isIdolMessage(item: any, room: Member, includeFans: boolean) {
 }
 
 /**
- * ★ 通知专用：严格房主判定（用户 2026-11-10「只有偶像消息和私信横幅通知」）。
+ * ★ **唯一**的严格房主判定（用户 2026-11-11 定版：「都走严格判定」）。
  *
- * 解析发送者资料与「只看偶像」视图**完全同源**（都走 `senderProfile`），
- * 但判定口径换成 `notifyOwnerRules.isOwnerSender`：
+ * 服务对象：横幅通知 + 房间列表角标计数 + 列表预览正文（三者必须同一口径，
+ * 否则会出现「算了一条、提示另一条」）。解析发送者与「只看偶像」视图同源（都走
+ * `senderProfile`），但判定用 `notifyOwnerRules.isOwnerSender`：
  *   · 明确匹配房主 id / 昵称 → true；
- *   · 认不出发送者（无 `ext.user`、昵称对不上） → **false**（不弹横幅）。
- * `isIdolMessage(..., false)` 那种「认不出就当偶像」的兜底绝不能用于通知，
- * 否则没带资料子树的成员/粉丝消息会被当成偶像弹出来。
+ *   · 认不出发送者（无 `ext.user`、昵称对不上） → **false**。
  *
- * 注意：这里只服务通知；房间角标计数与「只看偶像」视图仍用各自的既有口径，勿混改。
+ * ⚠️ `isIdolMessage(..., false)` 里「认不出就当偶像」的宽松兜底**只留给「只看偶像」视图**
+ *（那是宁可多显示的展示口径）；用于计数/通知/预览会把没带资料子树的粉丝消息算成偶像。
  */
-export function isOwnerMessageForNotify(item: any, room: Member): boolean {
+export function isOwnerMessageStrict(item: any, room: Member): boolean {
   if (!room || !item) return false;
   return isOwnerSender(senderProfile(item, room), {
     ids: [room.id, (room as any).userId, (room as any).memberId],

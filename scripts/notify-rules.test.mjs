@@ -254,11 +254,13 @@ try {
     // 正式口径（用户 2026-11-10「只计偶像的信息」）：临时全量口径必须关闭
     assert.ok(counters.includes('export const UNREAD_COUNT_ALL_TYPES = false;'), '测试期全量口径要关掉');
     assert.ok(counters.includes('if (UNREAD_COUNT_ALL_TYPES) return true;'), '开关结构保留，正式期走聊天类正则');
-    // ★ 只计偶像：实时路径与指纹/精确计数都要过严格房主判定
-    assert.ok(counters.includes('isIdolMessage'), '计数器要有严格偶像判定');
+    // ★ 只计偶像：实时 / 指纹 / 精确计数 / 通知 / 预览 **全部**走同一个严格判定
+    //（用户 2026-11-11：「都走严格判定」——宽松兜底只留给「只看偶像」视图）
+    assert.ok(counters.includes('isOwnerMessageStrict(msg, member)'), '精确计数要用严格房主判定');
+    assert.ok(!counters.includes('isIdolMessage(msg, member, false)'), '计数不能再用宽松兜底');
     assert.ok(counters.includes('isIdolOnly(msg, row.member)'), '指纹路径只计偶像');
     assert.ok(counters.includes('isIdolOnly(m, member)'), '精确计数只数偶像消息');
-    assert.ok(roomsSrc.includes('isIdolMessage(m as any, hit.member, false)'), '实时未读只计偶像发言');
+    assert.ok(roomsSrc.includes('isOwnerMessageStrict(m as any, hit.member)'), '实时未读只计偶像发言');
     // 实时未读订阅失败必须重试（冷启动时云信还没登录，以前一吞到底 → 整场会话收不到实时消息）
     assert.ok(rooms.includes('setTimeout(attach, 5000)'), '订阅失败要 5s 重试');
     assert.ok(rooms.includes('实时未读订阅已挂上'), '订阅成功要留日志');

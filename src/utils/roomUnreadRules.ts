@@ -103,3 +103,21 @@ export function roomUnreadBadge(count: number): RoomUnreadBadge {
 export function roomSideHasNew(count: number): boolean {
   return Number(count) > 0;
 }
+
+/**
+ * 列表预览正文取值（分侧）：详情页抓到的最新一条优先于列表接口的 msgContent。
+ *
+ * 为什么单独抽成纯函数（用户 2026-11-11「应籽言的几条回复不能在列表显示，
+ * 仍是之前那句」）：`last/message/get` 对**引用（回复）消息**返回的是被引用原文，
+ * 详情页才是真正的最后一条。渲染层只用这个函数按键取值（键与未读同一套），
+ * 保证大/小两侧不会串味、也不会因为某侧没抓到而显示另一侧。
+ */
+export function roomPreviewTextOf(
+  map: Record<string, { text?: string } | undefined> | undefined | null,
+  memberId: string | number | undefined | null,
+  side: RoomUnreadSide,
+): string {
+  const key = roomUnreadKey(memberId, side);
+  if (!key || !map) return '';
+  return String(map[key]?.text || '').trim();
+}

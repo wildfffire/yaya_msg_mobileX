@@ -164,6 +164,39 @@ try {
     assert.equal(c.canCompensateUnread(0, T, 0), false, '没有时间字段 → 交给 fresh 的 id 游标');
   });
 
+  await check('★ 角标时间门槛：已读基线严格排除、侧基线含等于、时间未知放行（用户 2026-11-11）', () => {
+    const T = 1700000100000;
+    // 已读基线（lastReadAt）是「用户看到的最新一条」→ 等于它的已读，不再计数
+    assert.equal(c.isCountableUnreadMessage(T, 0, T), false, '等于已读基线 = 已读');
+    assert.equal(c.isCountableUnreadMessage(T + 1, 0, T), true, '晚于已读基线 = 未读');
+    assert.equal(c.isCountableUnreadMessage(T - 1, 0, T), false);
+    // 侧基线（sideSeenAt）是「上次数到的最新一条」→ 同一毫秒连发不能漏
+    assert.equal(c.isCountableUnreadMessage(T, T, 0), true, '等于侧基线要计数（同秒连发）');
+    assert.equal(c.isCountableUnreadMessage(T - 1, T, 0), false, '早于侧基线不重复计');
+    // 时间未知：交给消息 id 总账去重，不能因为接口缺时间字段整条丢掉
+    assert.equal(c.isCountableUnreadMessage(0, T, T), true);
+    // 两个基线都没有（从未读过、也从没数过）→ 放行，由调用方决定是否建基线
+    assert.equal(c.isCountableUnreadMessage(T, 0, 0), true);
+  });
+
+  await check('★ 回溯翻页：整页新消息/首次建游标 才向前翻，翻到「上次消费位置」就停（用户 2026-11-11）', () => {
+    const T = 1700000200000;
+    const base = { pageLength: 50, limit: 50, freshCount: 50, primed: true, boundary: T, oldestTime: T + 1 };
+    assert.equal(c.shouldBackfillOlder(base), true, '满页 + 全是新消息 + 还没到边界 → 必须回溯');
+    assert.equal(c.shouldBackfillOlder({ ...base, pageLength: 49 }), false, '不满页说明已经到底');
+    assert.equal(c.shouldBackfillOlder({ ...base, boundary: 0 }), false, '不知道边界时不回溯（不知道翻到哪停）');
+    assert.equal(c.shouldBackfillOlder({ ...base, oldestTime: T - 1 }), false, '已翻到边界 → 停');
+    assert.equal(c.shouldBackfillOlder({ ...base, freshCount: 2 }), false, '正常增量（只有 2 条新消息）不回溯，避免每轮多打请求');
+    assert.equal(c.shouldBackfillOlder({ ...base, primed: false }), true, '首次建立该侧游标 → 回溯补齐积压');
+    assert.equal(c.shouldBackfillOlder({ ...base, limit: 0 }), false);
+    // 边界优先「上次轮询消费到的位置」，没有才退回房间已读基线
+    assert.equal(c.backfillBoundary(T, T - 999), T, '有游标时间时用它当边界');
+    assert.equal(c.backfillBoundary(0, T), T, '没有游标时间时退回 lastReadAt');
+    assert.equal(c.backfillBoundary(0, 0), 0);
+    // 跨轮续翻的硬上限（配合每轮页预算）
+    assert.ok(c.MESSAGE_BACKFILL_MAX_PAGES >= 10, '页数上限不能只有 3 页（积压可能几百条）');
+  });
+
   await check('私信：自己的消息可排除，对方（sender=targetId）保留', () => {
     assert.equal(c.messageIsSelf({ isSelf: true }), true);
     assert.equal(c.messageIsSelf({ messageId: '1', senderUserId: 'me' }, 'me'), true);
@@ -204,6 +237,19 @@ try {
     assert.ok(counters.includes('claimCountId('), '精确计数要用 id 总账');
     assert.ok(counters.includes('if (n === null) continue;'), '详情失败不能推进指纹/基线');
     assert.ok(!screen.includes('realtimeCountedRef'), '整数相减口径已删除');
+  });
+
+  await check('★ 角标积压回溯：一直翻到「上次消费位置」+ 跨轮续翻 + 0 命中要打样例', () => {
+    assert.ok(pollers.includes('shouldBackfillOlder('), '必须有「要不要继续往前翻」的判据');
+    assert.ok(pollers.includes('backfillSideDetail('), '必须真的继续翻页（accumulate 多页）');
+    assert.ok(pollers.includes('MESSAGE_BACKFILL_MAX_PAGES'), '回溯要有硬上限（防请求放大）');
+    assert.ok(pollers.includes('backfillBoundary(cur.time, floor)'), '边界必须是「上次轮询消费到的位置」');
+    assert.ok(pollers.includes('BACKFILL_PAGES_PER_ROUND'), '每轮页数预算（防一次打几十个请求）');
+    assert.ok(pollers.includes('backfillPending'), '翻不完要记断点，下一轮接着翻');
+    assert.ok(pollers.includes('下轮续翻'), '续翻要有日志');
+    assert.ok(pollers.includes('pendingBackfill.boundary'), '续翻轮不能被「游标时间」挡成历史消息');
+    assert.ok(pollers.includes('房主未识别'), '0 命中时必须打出 sender id/nick，否则只能猜');
+    assert.ok(counters.includes('房主未识别'), '30s 精确计数同样要留痕');
   });
 
   await check('★ 已读消息不再重复提示：小房间防串味 + 补偿扫描已读边界', () => {

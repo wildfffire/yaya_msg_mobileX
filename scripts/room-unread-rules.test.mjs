@@ -32,8 +32,8 @@ try {
     { cwd: root, stdio: 'inherit' },
   );
   const mod = await import(`file://${join(tmp, 'src', 'utils', 'roomUnreadRules.js')}`);
-  const { roomSideKey, roomUnreadKey, roomUnreadCount, roomUnreadTotal, roomUnreadBadge, roomSideHasNew, ROOM_UNREAD_SIDES } = mod;
-  for (const fn of ['roomSideKey', 'roomUnreadKey', 'roomUnreadCount', 'roomUnreadTotal', 'roomUnreadBadge', 'roomSideHasNew']) {
+  const { roomSideKey, roomUnreadKey, roomUnreadCount, roomUnreadTotal, roomUnreadBadge, roomSideHasNew, roomPreviewTextOf, ROOM_UNREAD_SIDES } = mod;
+  for (const fn of ['roomSideKey', 'roomUnreadKey', 'roomUnreadCount', 'roomUnreadTotal', 'roomUnreadBadge', 'roomSideHasNew', 'roomPreviewTextOf']) {
     if (typeof mod[fn] !== 'function') throw new Error(`编译产物里没有 ${fn} —— 拒绝以「通过」结束`);
   }
 
@@ -100,6 +100,58 @@ try {
     assert.equal(roomSideHasNew(1), true);
     assert.equal(roomSideHasNew('2'), true);
     assert.equal(roomSideHasNew(undefined), false);
+  });
+
+  await check('★ 列表预览正文：分侧取详情页最新一条，缺值/空串回退', () => {
+    const map = { '9#b': { text: ' 新回复 ' }, '9#s': { text: '小房间' }, '8#b': { text: '' } };
+    assert.equal(roomPreviewTextOf(map, '9', 'big'), '新回复');
+    assert.equal(roomPreviewTextOf(map, '9', 'small'), '小房间');
+    assert.equal(roomPreviewTextOf(map, '8', 'big'), '', '空串 → 回退到列表接口的 msgContent');
+    assert.equal(roomPreviewTextOf(map, '9', 'big') === roomPreviewTextOf(map, '9', 'small'), false, '两侧不能串味');
+    assert.equal(roomPreviewTextOf(undefined, '9', 'big'), '');
+    assert.equal(roomPreviewTextOf(map, '', 'big'), '');
+  });
+
+  await check('★ 接线：列表预览优先用详情页文本，且只写 /list/all 的页', () => {
+    const row = readFileSync(join(root, 'src', 'screens', 'room', 'RoomListRow.tsx'), 'utf8');
+    const screen = readFileSync(join(root, 'src', 'screens', 'FollowedRoomsScreen.tsx'), 'utf8');
+    const pollers = readFileSync(join(root, 'src', 'services', 'messagePollers.ts'), 'utf8');
+    assert.ok(row.includes('bigPreviewText') && row.includes('smallPreviewText'), '行要用详情页文本');
+    assert.ok(screen.includes('previewTextOf(roomPreviewMap'), '父级按侧取文本传进行');
+    assert.ok(pollers.includes("startsWith('all')"), '只认 /list/all 的页（owner 回退页会停在过去）');
+    assert.ok(pollers.includes('useRoomPreviewTextStore'), '轮询要写入预览文本');
+    assert.ok(
+      pollers.includes('const idolMessages: any[] = list.filter((m: any) => isOwnerMessage(m));'),
+      '★ 每页只能筛一次偶像消息（预览/计数/诊断共用这一份，用户 2026-11-11）',
+    );
+    assert.ok(pollers.includes('() => isOwnerMessageStrict(m, s.member)'),
+      '★ 计数/通知/预览共用严格房主判定（用户 2026-11-11「都走严格判定」）');
+    assert.ok(pollers.includes('homeowner 滞后实验'), '要有 homeowner 滞后实验诊断行');
+    assert.ok(pollers.includes('覆盖率='), '实验行要能看出房主流的召回覆盖率');
+    // 实验必须**持续**进行：没有新消息时也要有探针 + 定期汇总（用户 2026-11-11）
+    assert.ok(pollers.includes('OWNER_PROBE_GAP_MS'), '要有固定间隔探针');
+    assert.ok(pollers.includes("'探针'"), '探针样本要能区分来源');
+    assert.ok(pollers.includes('源=${source}'), '实验行要标明样本来源（轮询/探针）');
+    assert.ok(pollers.includes('homeowner 实验汇总'), '要定期输出统计（平均/最大滞后 + 覆盖率）');
+    assert.ok(pollers.includes('newestMessage(idolMessages.slice(0, 80))'),
+      '★ 预览必须只取偶像（房主）发言 —— /list/all 是粉丝+偶像混合流');
+    assert.ok(pollers.includes('if (idolIds.has(mid)) countableIdolIds.push(mid);'),
+      '★ 计数必须是「偶像 id 集合 ∩ 未读新消息」，粉丝消息不进统计');
+    assert.ok(pollers.includes('本页偶像='), '判定日志要能看出本页筛出多少条偶像发言');
+    assert.ok(pollers.includes('预览不一致'), '列表/详情正文不一致要留诊断（回复消息的 msgContent 是被引用原文）');
+  });
+
+  await check('★ 房间列表下拉刷新：独立 refreshing + 手动触发一次完整重拉', () => {
+    const src = readFileSync(join(root, 'src', 'screens', 'FollowedRoomsScreen.tsx'), 'utf8');
+    assert.ok(src.includes('refreshControl={('), '房间列表要挂 RefreshControl');
+    assert.ok(src.includes('onRefresh={handlePullRefresh}'), '下拉要触发刷新回调');
+    assert.ok(
+      src.includes('refreshing={roomsRefreshing}'),
+      '★ 必须用独立 refreshing —— 复用 followedLoading 会被 30s 轮询/自动重试点亮，转圈不灭',
+    );
+    assert.ok(src.includes('void loadFollowed(true).finally('), '下拉 = 一次静默完整重拉，且结束一定收圈');
+    assert.ok(src.includes('12_000'), '弱网悬挂要有收圈兜底');
+    assert.ok(src.includes('{ flexGrow: 1 }'), '空列表/报错态也要能下拉');
   });
 
   await check('★ 接线：角标 / 上浮 / tab 三处都不再读指纹与时间', () => {

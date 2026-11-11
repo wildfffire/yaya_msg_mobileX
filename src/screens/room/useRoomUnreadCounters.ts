@@ -19,9 +19,17 @@ import { unwrapList } from '../../utils/data';
 import { logInfo } from '../../utils/runtimeLog';
 import { useRoomUnreadStore } from '../../services/roomUnread';
 import { claimCountId } from '../../services/roomCountLedger';
-import { isDetailFromSide, messageId } from '../../utils/roomMessageCursor';
-import { roomChannelId, roomSideMessage, roomSideServerUnread, roomSideToken, type RoomMode } from './roomIdentity';
-import { getMessageTime, isIdolMessage } from './messageRules';
+import {
+  isCountableChatMessage,
+  isCountableMessageType,
+  isCountableUnreadMessage,
+  isDetailFromSide,
+  messageId,
+  messageTypeOf,
+} from '../../utils/roomMessageCursor';
+import { messageIdAliases } from '../../utils/notifyOwnerRules';
+import { roomChannelId, roomSideMessage, roomSideToken, type RoomMode } from './roomIdentity';
+import { getMessageTime, isOwnerMessageStrict, senderProfile } from './messageRules';
 import { ROOM_UNREAD_SIDES, roomUnreadKey } from '../../utils/roomUnreadRules';
 
 /**
@@ -32,19 +40,67 @@ import { ROOM_UNREAD_SIDES, roomUnreadKey } from '../../utils/roomUnreadRules';
 export const UNREAD_COUNT_ALL_TYPES = false;
 
 /**
- * ★ 只计偶像（房主）发言（用户 2026-11-10：「群聊里的消息也被列入计数了，
- * 应该只要偶像的信息」）。判定与「只看偶像」视图 / 「偶像无消息」同一套严格口径
- * isIdolMessage(member, includeFans=false)：id 匹配 + 昵称兜底；
+ * ★ 只计偶像（房主）发言，且**走严格判定**（用户 2026-11-10 定口径、2026-11-11 明确「都走严格」）：
+ * 与通知 / 列表预览同一个谓词 `isOwnerMessageStrict`（id 或昵称必须明确命中）。
+ *
+ * ⚠️ 不再用 `isIdolMessage(..., false)`：它在「拿不到发送者 id」时会 return true
+ *（那是「只看偶像」视图宁可多显示的兜底），用在计数上会把没带资料子树的粉丝消息算成偶像。
  * 普通成员的群聊消息只推进指纹、不进角标。
  */
 const isIdolOnly = (msg: any, member: any): boolean =>
-  !!msg && !!member && isIdolMessage(msg, member, false);
+  !!msg && !!member && isOwnerMessageStrict(msg, member);
 
-/** 模块级聊天类型判断（精确计数用；口径与下方 hook 内 isChatMessageType 一致） */
-const isChatTypeForCount = (m: any): boolean => {
-  const t = String(m?.bodys?.messageType || m?.msgType || m?.messageType || m?.messageType || 'TEXT').toUpperCase();
-  return /^(TEXT|REPLY|GIFTREPLY|EXPRESSIMAGE|IMAGE|AUDIO|VIDEO|BARRAGE_|FLIP)/.test(t);
-};
+/**
+ * 聊天类型判断：口径统一在 `utils/roomMessageCursor.isCountableChatMessage`
+ *（实时 / 5s 轮询 / 30s 精确计数共用同一份取值与正则，避免三处漂移）。
+ */
+const isChatTypeForCount = isCountableChatMessage;
+
+/**
+ * 服务端房主消息 id 表（按侧缓存，10 分钟）。
+ *
+ * 为什么需要（用户 2026-11-11「房间列表里有的成员有新消息不会计数也不显示」）：
+ * 本地房主判定靠成员库 `ownerName/nickname` 与消息里的 `ext.user` 比对 ——
+ * 不同房间的昵称形态（团体前缀 / 别名 / emoji / 空格）对不上时**一条都认不出**，
+ * 于是这一侧的角标永远数 0（用户此前反馈的「对和漏是在不同房间发生的」正是这个）。
+ * `/team/message/list/homeowner`（`getRoomMessages({fetchAll:false})`）是服务端按房主
+ * 过滤的权威数据源，用它的消息 id 集合作为**补充阳性信号**（绝不拿它做排除）。
+ *
+ * 成本控制：只有本轮「本地一条房主消息都没认出」才会请求，并按侧缓存 **60 秒** ——
+ * 群聊很热闹但房主没发言的房间不会每轮都多打一个请求；
+ * TTL 不能太长：缓存里是「已有的房主消息 id」，房主**刚发**的新消息不在表里，
+ * 缓存久了会把这批新消息一直判成「不是房主」（最多延迟到下一次刷新）。
+ */
+const OWNER_IDS_TTL_MS = 60_000;
+const ownerIdCache = new Map<string, { ids: Set<string>; at: number }>();
+
+async function fetchOwnerIdSet(member: any, side: RoomMode, channelId: string): Promise<Set<string> | null> {
+  try {
+    const params: any = {
+      channelId,
+      serverId: String(member?.serverId || ''),
+      nextTime: 0,
+      limit: 50,
+      fetchAll: false,
+    };
+    if (side === 'small' && member?.channelId) params.fallbackChannelId = String(member.channelId);
+    const res: any = await pocketApi.getRoomMessages(params);
+    // 小房间详情回退到大房间频道时这张表不能用来判本侧房主
+    if (!isDetailFromSide(res?._request?.payload?.channelId, channelId)) return null;
+    const list = unwrapList(res, [
+      'content.messageList', 'content.message', 'content.messages', 'content.list',
+      'data.messageList', 'data.message', 'messageList', 'message', 'messages', 'list',
+    ]);
+    if (!list.length) return null;
+    const ids = new Set<string>();
+    for (const m of list) {
+      for (const mid of messageIdAliases(m)) ids.add(mid);
+    }
+    return ids.size ? ids : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * ★ 只计偶像（用户 2026-11-10）：精确数出「某一侧从上次看到现在，**偶像（房主）**一共
@@ -54,10 +110,19 @@ const isChatTypeForCount = (m: any): boolean => {
  * 指纹只能告诉「有变化」。用户 2026-11-09 反馈「显示 1、实际发了很多」就是固定 +1 的锅。
  *
  * 返回 0 表示「没有偶像新消息」（按新口径，成员消息不算数）。
+ *
+ * ★ 2026-11-11 两条修正（用户「有的成员有新消息不会计数也不显示」）：
+ *   ① **基线不再只看 `sideSeenAt`**：它会在每次进房被清零（两侧），于是退房后新到的
+ *      消息只要先被 30s 路径撞上就被当「首次基线」整批吞掉（指纹却已推进）→ 永不计数。
+ *      现在把房间级已读基线 `lastReadAt` 也当作计数下限：读过这个房间（>0）就照常计数，
+ *      只有「既没侧基线也没读过」才建基线。
+ *   ② **房主认不出时问服务端**：本地判定 0 条房主消息时，用 homeowner 表（按侧缓存）
+ *      的 id 集合补一次 —— 与 5s 通知轮询同源，避免「不同房间有的对有的漏」。
  */
 async function countNewMessagesForSide(
   target: { key: string; id: string; side: RoomMode; member: any },
   prevAt: number,
+  readFloor: number,
   seenAtPatch: Record<string, number>,
 ): Promise<number | null> {
   try {
@@ -109,38 +174,77 @@ async function countNewMessagesForSide(
       const mt = getMessageTime(m);
       if (mt > newest) newest = mt;
     }
-    // ★ 只数偶像（房主）的消息；同时礼物/进房/公告等非聊天类型也不算
-    const idolMsgs = msgs.filter(
-      (m: any) => isChatTypeForCount(m) && isIdolOnly(m, member),
-    );
-    // ★ 首次基线（进房清 sideSeenAt 后必然走到）：只建立时间基线，**绝不占用计数总账**。
-    // 旧版在这里把整页 20 条 id 逐条认领掉（claimCountId 全页循环）
-    // 却返回 0，同时把 seenAt / seenTokens 推进 —— 三条通道此后都判「已处理」，
-    // 用户反馈的「第一次计数正确、之后有的新消息没有红点」就是这么来的。
-    // 真正的新消息交给 5s 轮询的按 id 补偿扫描补回（它有自己的消息游标，不依赖这里）。
-    if (!prevAt) {
+    const floor = Number(readFloor) || 0;
+    // ★ 首次基线：只有「侧基线未知 **且** 这个房间没读过」才建。
+    // 建基线时**绝不占用计数总账**（旧版把整页 id 认领掉又返回 0，
+    // 三条通道此后都判「已处理」→ 用户反馈的「第一次计数正确、之后有的新消息没有红点」）。
+    if (!(Number(prevAt) > 0) && !(floor > 0)) {
       if (newest > 0) seenAtPatch[target.key] = newest;
       logInfo(
         `[unread] 精确计数 ${target.id}#${target.side} 首次基线 页=${msgs.length}`
-        + ` 偶像=${idolMsgs.length} newest=${newest} 计=0 不占总账`,
+        + ` newest=${newest} 计=0 不占总账`,
         'room.unread',
       );
       return 0;
     }
+    // ★ 只数偶像（房主）的消息；同时礼物/进房/公告等非聊天类型也不算
+    const hasSideBaseline = Number(prevAt) > 0;
+    const candidates = msgs.filter((m: any) => {
+      if (!isChatTypeForCount(m)) return false;
+      const mt = getMessageTime(m);
+      // 只靠「房间已读基线」判新（侧基线为 0）时，时间不明的消息不当新消息 ——
+      // 否则一页没有 msgTime 字段的历史消息会被整页刷成未读（「5 条显示 13」的同类）
+      if (mt <= 0 && !hasSideBaseline) return false;
+      return isCountableUnreadMessage(mt, prevAt, floor);
+    });
+    let idolMsgs = candidates.filter((m: any) => isIdolOnly(m, member));
+    /** 本地认不出房主时的服务端补充（诊断用） */
+    let serverOwnerHits = 0;
+    if (!idolMsgs.length && candidates.length) {
+      const cached = ownerIdCache.get(target.key);
+      let ids: Set<string> | null = null;
+      if (cached && Date.now() - cached.at < OWNER_IDS_TTL_MS) {
+        ids = cached.ids;
+      } else {
+        ids = await fetchOwnerIdSet(member, target.side, channelId);
+        if (ids) ownerIdCache.set(target.key, { ids, at: Date.now() });
+      }
+      if (ids && ids.size) {
+        idolMsgs = candidates.filter((m: any) => messageIdAliases(m).some((mid) => ids!.has(mid)));
+        serverOwnerHits = idolMsgs.length;
+        logInfo(
+          `[unread] 精确计数 ${target.id}#${target.side} 本地认不出房主，`
+          + `服务端 homeowner 表命中 ${serverOwnerHits}/${candidates.length}`,
+          'room.unread',
+        );
+      }
+    }
+    /**
+     * ★ 仍是 0 条命中：把候选消息的**发送者**打出来（用户 2026-11-11
+     * 「覃柯蒙 15:45 的消息没有角标」）。没有这行就分不清
+     * 「真不是房主」和「是房主但 id/昵称对不上」。
+     */
+    if (!idolMsgs.length && candidates.length) {
+      const senders = candidates.slice(0, 3).map((m: any) => {
+        const p = senderProfile(m, member);
+        return `${String(messageId(m)).slice(-8)} id=${p.id || '-'} nick=${p.name || '-'} t=${getMessageTime(m)}`;
+      }).join(' | ');
+      logInfo(
+        `[unread] 精确计数 ${target.id}#${target.side} 房主未识别 候选=${candidates.length} 样例=${senders}`,
+        'room.unread',
+      );
+    }
     let n = 0;
     for (const m of idolMsgs) {
-      const mt = getMessageTime(m);
-      // ★ 同一毫秒 / 同一秒连发的多条消息时间相等：旧版 `<= prevAt` 会把除第一条外
-      // 全判成「旧消息」漏掉；改成严格小于，去重交给总账（已计过的一定 claim 失败）。
-      if (mt > 0 && mt < prevAt) continue;
       // ★ id 总账：实时通道 / 5s 通知轮询已计过的同一条消息不再重复
       if (!claimCountId(messageId(m))) continue;
       n += 1;
     }
     if (newest > 0) seenAtPatch[target.key] = newest;
     logInfo(
-      `[unread] 精确计数 ${target.id}#${target.side} prevAt=${prevAt} newest=${newest}`
-      + ` 页=${msgs.length} 偶像=${idolMsgs.length} 新=${n}`,
+      `[unread] 精确计数 ${target.id}#${target.side} prevAt=${prevAt} 已读=${floor} newest=${newest}`
+      + ` 页=${msgs.length} 候选=${candidates.length} 偶像=${idolMsgs.length}`
+      + ` 服务端=${serverOwnerHits} 新=${n}`,
       'room.unread',
     );
     return n;
@@ -169,24 +273,10 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
   const roundRef = useRef(0);
 
   /* ───────── 未读计数精准化（用户要求 2026-09-28）─────────
-   * ① uuid 去重：QChat 断线重连后会**重放最近一批消息**，不去重会把同一条消息反复计入；
-   * ② 类型过滤：礼物（PRESENT_*）、进房特效（EVENT_*_ENTER）、系统公告（LIVE_ANNOUNCE 等）
-   *    不是「消息」，计入会让数字虚高；
-   * ③ 自己发言不计：换房间瞬间 activeChannelRef 尚未切换时，自己消息的回声可能漏过 opened 跳过。
+   * 消息级去重不在本 hook 里做：实时 / 5s 轮询 / 30s 指纹三条通道统一认领
+   * `services/roomCountLedger` 的消息 id 总账（`claimCountId` / `markCountConsumed`），
+   * 以前这里额外维护一份 uuid 去重窗口，属于重复实现（且窗口一滑就会漏判）。
    */
-  const countedUuidsRef = useRef<Set<string>>(new Set());
-  const countedUuidOrderRef = useRef<string[]>([]);
-  const markCountedUuid = (uuid: string): boolean => {
-    if (!uuid) return false;
-    if (countedUuidsRef.current.has(uuid)) return false;
-    countedUuidsRef.current.add(uuid);
-    countedUuidOrderRef.current.push(uuid);
-    // 滑动窗口：只保留最近 800 条的去重记录（防长期挂机内存/集合膨胀）
-    if (countedUuidOrderRef.current.length > 800) {
-      for (const old of countedUuidOrderRef.current.splice(0, 200)) countedUuidsRef.current.delete(old);
-    }
-    return true;
-  };
 
   /**
    * 临时口径（用户 2026-11-09 要求，方便测试）：**所有群聊消息都进角标**。
@@ -195,10 +285,9 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
    */
   const isChatMessageType = (type: string): boolean => {
     if (UNREAD_COUNT_ALL_TYPES) return true;
-    const t = String(type || 'TEXT').toUpperCase();
     // FLIP* 也算聊天消息（用户 2026-09-30 反馈翻牌看不到；它不算「聊天」的话
     // 30s 指纹计数会把它当礼物/公告一样跳过 → 有翻牌也没有未读提示）
-    return /^(TEXT|REPLY|GIFTREPLY|EXPRESSIMAGE|IMAGE|AUDIO|VIDEO|BARRAGE_|FLIP)/.test(t);
+    return isCountableMessageType(type);
   };
 
   /**
@@ -227,8 +316,12 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
       const store = useRoomUnreadStore.getState();
       const seenNow = store.seenTokens;
       const seenAtNow = store.sideSeenAt || {};
+      /**
+       * 房间级已读基线（服务器消息时间 ms）：与 `sideSeenAt` 一起作为精确计数的下限。
+       * `sideSeenAt` 会在进房时被清零，只靠它会让「退房后新到的消息」被当成首次基线吞掉。
+       */
+      const readAtNow = store.lastReadAt || {};
       const seenPatch: Record<string, string> = {};
-      const floorPatch: Record<string, number> = {};
       const targets: Array<{ key: string; id: string; side: RoomMode; member: any; token: string }> = [];
       for (const row of rows) {
         const id = String(row.memberId || row.member?.id || '');
@@ -240,19 +333,13 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
           const key = roomUnreadKey(id, side);
           const prev = seenNow[key];
           if (!prev || prev === token) continue;
-          // 服务端未读数只用来维护「已读地板」（展示层取 max(本地计数, server-floor)），
-          // 不再作为旁路短路 / 整数补计：真机实测该字段长期缺失，且含成员消息口径不一致。
-          const serverUnread = roomSideServerUnread(row, mode);
-          if (serverUnread >= 0) floorPatch[key] = serverUnread;
           // 房间开着：进房已清零，本轮只对齐指纹
           if (String(selectedRoomRef.current?.id || '') === id) {
             seenPatch[key] = token;
             continue;
           }
           const msg = roomSideMessage(row, mode);
-          const anyChat = isChatMessageType(
-            String(msg?.bodys?.messageType || msg?.msgType || msg?.messageType || ''),
-          );
+          const anyChat = isChatMessageType(messageTypeOf(msg));
           if (!anyChat || !isIdolOnly(msg, row.member)) {
             // ★ 不再直接 continue：最新消息是成员/礼物时，详情页里可能还有偶像新消息
             logInfo(
@@ -274,7 +361,12 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
       const seenAtPatch: Record<string, number> = {};
       let counted = 0;
       for (const t of picked) {
-        const n = await countNewMessagesForSide(t, seenAtNow[t.key] || 0, seenAtPatch);
+        const n = await countNewMessagesForSide(
+          t,
+          seenAtNow[t.key] || 0,
+          Number(readAtNow[t.id]) || 0,
+          seenAtPatch,
+        );
         if (n === null) continue; // 详情失败：指纹/基线都不推进，下轮重试
         if (n > 0) { bumpPatch[t.key] = (bumpPatch[t.key] || 0) + n; counted += n; }
         seenPatch[t.key] = t.token;
@@ -284,7 +376,7 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
        * 逐次调用就是 2N 次全量序列化 + 2N 次列表重渲染。
        */
       useRoomUnreadStore.getState().applyUnread({
-        bump: bumpPatch, seen: seenPatch, seenAt: seenAtPatch, floor: floorPatch,
+        bump: bumpPatch, seen: seenPatch, seenAt: seenAtPatch,
       });
       logInfo(
         `[unread] 本轮 rows=${rows.length} targets=${picked.length} bump=${Object.keys(bumpPatch).length}`
@@ -298,9 +390,6 @@ export function useRoomUnreadCounters(selectedRoom: { id?: any } | null) {
   }, []);
 
   return {
-    countedUuidsRef,
-    countedUuidOrderRef,
-    markCountedUuid,
     isChatMessageType,
     applyFingerprintCounts,
   };

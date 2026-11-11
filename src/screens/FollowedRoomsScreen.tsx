@@ -16,7 +16,7 @@ import { resolveRoomLiveMedia, roomMedia } from './room/mediaResolve';
 import { RoomChatMessageRow } from './room/RoomChatMessageRow';
 import { RoomGiftSheet } from './room/RoomGiftSheet';
 import { RoomListRow } from './room/RoomListRow';
-import { Animated, AppState, Platform, useWindowDimensions } from 'react-native';
+import { Animated, AppState, RefreshControl, useWindowDimensions } from 'react-native';
 import Reanimated, { Easing as ReEasing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { PerfFlatList } from '../components/PerfFlatList';
 import { Chat } from '@kesha-antonov/react-native-chat';
@@ -57,6 +57,7 @@ import {
   getMessageTime,
   getNextTime,
   isIdolMessage,
+  isOwnerMessageStrict,
   mergeMessages,
   messageBody,
   messageKey,
@@ -78,7 +79,6 @@ import {
   messageToken,
   roomChannelId,
   roomLastActivity,
-  roomSideServerUnread,
   roomSideToken,
   sameLiveIndex,
   type LiveNowIndex,
@@ -129,7 +129,6 @@ import { useOnMicStore } from '../store/onMicStore';
 import {
   errorMessage,
   messageText,
-  normalizeUrl,
   unwrapList,
 } from '../utils/data';
 // 注：i18n 的 t 在组件内部经 useI18n() 取（顶层 import 的 t 已无用）
@@ -142,9 +141,10 @@ import ZoomImageModal from '../components/ZoomImageModal';
 // 成员档案内容（与「成员档案」页同一份实现）：点偶像头像后**就地**显示在资料卡里
 import { MemberArchiveContent, useMemberArchive } from '../components/MemberArchiveView';
 import { enqueueDownload } from '../services/downloads';
-import { giftCost, giftImage, giftName, normalizeGiftList } from '../utils/gift';
+import { giftImage, giftName, normalizeGiftList } from '../utils/gift';
 import { memberSearchText } from '../utils/members';
 import { getBgDisplayUri, ensureBgCached } from '../services/roomBgCache';
+import { previewTextOf, useRoomPreviewTextStore } from '../services/roomPreviewText';
 import { resolveLastSeenTarget } from '../utils/roomLastSeen';
 // 房间列表排序（用户 2026-11-09）：置顶 → 新消息在上（可关）→ 自定义/按队伍/按字母
 import { sortRooms, type RoomSortMode } from '../utils/roomListSort';
@@ -309,12 +309,7 @@ const CHAT_STICK_BOTTOM_DP = 48;
  */
 const CHAT_RETURN_BOTTOM_DP = 12;
 /**
- * 浮标计数数据源口径（用户 2026-11-09 要求，便于加速验证）：
- *   true  = 用**房间全部消息**计数（只看偶像视图下，群聊里的新消息也计入）；
- *   false = 只算当前视图可见的消息。
- * 桌面端（yk1z/yaya_msg）本来就是「房间所有消息」，所以 true 也是对齐口径。
- */
-const PILL_COUNT_ALL_ROOM_MESSAGES = true;
+
 /**
  * 房间内 HTTP 静默刷新间隔（毫秒）。
  * 这是**兜底**通道（实时走云信圈组推送）；15s 太慢（用户 2026-11-09：「单个房间里消息更新得太慢」），
@@ -775,6 +770,11 @@ const route = useRoute<any>();
   const EMPTY_UNREAD_MAP = useMemo(() => ({} as Record<string, any>), []);
   /** ★ 角标 / 上浮 / tab 的唯一数据源（用户 2026-11-10「只要一套」） */
   const roomUnreadCounts = useRoomUnreadStore((s) => (selectedRoom ? EMPTY_UNREAD_MAP : s.counts));
+  /**
+   * 列表预览正文（来自详情页，见 services/roomPreviewText.ts）：
+   * 只影响显示，不参与计数；用字符串传进行（memo 友好）。
+   */
+  const roomPreviewMap = useRoomPreviewTextStore((s) => s.map);
   // 「上次看到这里」与 30s 精确计数直接读 store（getState()），不需要订阅这两张表，
   // 否则每次 markSeen / 推进基线都会让整个列表重排一次。
   useEffect(() => { useRoomUnreadStore.getState().hydrate(); }, []);
@@ -828,11 +828,11 @@ const route = useRoute<any>();
    */
   const posUserScrolledRef = useRef(false);
   /**
-   * 未读计数精准化（uuid 去重 + 类型过滤 + 指纹计数）：实现见 ./room/useRoomUnreadCounters.ts。
-   * 返回值与原变量同名，loadFollowed / refreshLastMessages / 实时回调都不用改。
+   * 未读计数精准化（类型过滤 + 指纹计数）：实现见 ./room/useRoomUnreadCounters.ts。
+   * 消息级去重统一由 services/roomCountLedger 的 id 总账负责（实时/轮询/指纹共用），
+   * 这里不再维护第二份 uuid 去重窗口。
    */
   const {
-    markCountedUuid,
     isChatMessageType,
     applyFingerprintCounts,
   } = useRoomUnreadCounters(selectedRoom);
@@ -933,11 +933,10 @@ const route = useRoute<any>();
       /** 分侧键 → 该「房间 + 侧」本轮收到的条数（一次 setState 批量提交） */
       const deltas: Record<string, { id: string; side: RoomUnreadSide; n: number }> = {};
       for (const m of messages) {
-        // 精准化过滤先于 opened 跳过：当前房间收到的消息也要记入去重窗口，
-        // 否则重连重放时它们会被当成「新消息」误计
+        // 类型与自己发言的过滤先于 opened 跳过：当前房间收到的消息也要走后面的
+        // 「已读」标注（markCountConsumed），否则重连重放时它们会被当成新消息误计
         if (!isChatLiveMessage(m)) continue;
         if (isOwnLiveMessage(m)) continue;
-        if (!markCountedUuid(String(m.uuid || ''))) continue;
         /**
          * ⚠️ id 口径必须多路兜底（用户 2026-11-09：「房间列表显示 1，实际发了很多」）：
          * 圈组消息里的 channelId 到底是成员的 `channelId` 还是 `serverId`，官方没有文档
@@ -967,12 +966,13 @@ const route = useRoute<any>();
           continue;
         }
         /**
-         * ★ 只计偶像（房主）发言（用户 2026-11-10：「群聊里的消息也被列入计数了，
-         * 应该只要偶像的信息」）：普通成员的群聊消息不再进角标。
-         * 判定用严格房主口径 isIdolMessage（与「只看偶像」视图同一套，id 匹配 + 昵称兜底），
-         * 不认宽松的成员/角色口径 —— 与房间「偶像无消息」判定的教训一致。
+         * ★ 只计偶像（房主）发言，且**走严格判定**（用户 2026-11-10 定口径、
+         * 2026-11-11 明确「都走严格判定」）：与 5s 轮询 / 30s 精确计数 / 通知 / 预览
+         * 共用 `isOwnerMessageStrict`（id 或昵称必须明确命中）。
+         * ⚠️ 不要退回 `isIdolMessage(..., false)`：它在拿不到发送者 id 时会 return true，
+         * 那是「只看偶像」视图的展示兜底，用在计数上会把没带资料子树的粉丝消息算成偶像。
          */
-        if (hit.member && !isIdolMessage(m as any, hit.member, false)) {
+        if (hit.member && !isOwnerMessageStrict(m as any, hit.member)) {
           if (Date.now() - lastUnreadMissLogRef.current > 10000) {
             lastUnreadMissLogRef.current = Date.now();
             logInfo(
@@ -1775,6 +1775,31 @@ const route = useRoute<any>();
   }, [members, showToast, t, token, applyFingerprintCounts, scheduleFollowedRetry]);
   loadFollowedRef.current = loadFollowed;
 
+  /* ───────── 房间列表下拉刷新（用户 2026-11-11）─────────
+   * 一次「关注列表 + 最新消息 + 指纹计数」的完整重拉，不用干等 30s 定时轮询。
+   *
+   * ⚠️ refreshing 必须是**独立状态**，不能复用 followedLoading：
+   * 30s 轮询 / 失败自动重试也会翻动 followedLoading，复用会让转圈一直亮着
+   * （MediaScreen 踩过同一个坑，注释也留在那边）。
+   * ⚠️ 弱网悬挂兜底：12s 内一定收圈，否则下拉一次之后转圈永远挂在那里。
+   */
+  const roomsRefreshBusyRef = useRef(false);
+  const [roomsRefreshing, setRoomsRefreshing] = useState(false);
+  const handlePullRefresh = useCallback(() => {
+    if (roomsRefreshBusyRef.current) return; // 连拉两次只跑一轮
+    roomsRefreshBusyRef.current = true;
+    setRoomsRefreshing(true);
+    const timer = setTimeout(() => {
+      roomsRefreshBusyRef.current = false;
+      setRoomsRefreshing(false);
+    }, 12_000);
+    void loadFollowed(true).finally(() => {
+      clearTimeout(timer);
+      roomsRefreshBusyRef.current = false;
+      setRoomsRefreshing(false);
+    });
+  }, [loadFollowed]);
+
   /**
    * 直播页「进入房间」入口：Media 的直播/录播播放器带上 openMemberId 跳到本 tab 时，
    * 自动打开该成员的房间（已关注直接用列表行；未关注从全量成员库找，房间页本身不要求关注）。
@@ -2043,25 +2068,6 @@ const route = useRoute<any>();
         [roomUnreadKey(String(room.id || ''), 'small')]: 0,
       },
     });
-    /**
-     * 服务端未读「已读地板」（对齐上游桌面端口径）：
-     * 打开房间那一刻，把服务端 `unreadCount` 记下来。我们本地读了房间，服务端不一定
-     * 同步清零 —— 之后角标显示 `max(0, 服务端未读 - 地板)`，已读部分不会被重复算进来；
-     * 服务端自己清零（数值 < 地板）时地板跟着清（见 applyFingerprintCounts 的重置检测）。
-     */
-    const openRow = (followedRef.current || []).find((r: any) => (
-      String(r?.memberId || r?.member?.id || '') === String(room.id || '')
-    ));
-    if (openRow) {
-      const floors: Record<string, number> = {};
-      for (const side of ROOM_UNREAD_SIDES) {
-        const server = roomSideServerUnread(openRow, side as RoomMode);
-        if (server >= 0) floors[roomUnreadKey(String(room.id || ''), side)] = server;
-      }
-      if (Object.keys(floors).length) {
-        useRoomUnreadStore.getState().applyUnread({ floor: floors });
-      }
-    }
     roomMaxSeenRef.current = 0;
     const openSeq = ++roomSeqRef.current;
     const channelChanged = activeChannelRef.current !== channelId;
@@ -2875,7 +2881,6 @@ const route = useRoute<any>();
     const rows = (followedRef.current || []) as any[];
     const baselines: Record<string, number> = {};
     const tokens: Record<string, string> = {};
-    const floors: Record<string, number> = {};
     for (const row of rows) {
       const id = String(row?.memberId || row?.member?.id || '');
       if (!id) continue;
@@ -2884,15 +2889,9 @@ const route = useRoute<any>();
         const token = roomSideToken(row, side as RoomMode);
         const key = roomUnreadKey(id, side);
         if (token && key) tokens[key] = token;
-        // 服务端未读也记为「已读地板」：否则一键已读后服务端 unreadCount 又把数字顶回来
-        const server = roomSideServerUnread(row, side as RoomMode);
-        if (server >= 0 && key) floors[key] = server;
       }
     }
     useRoomUnreadStore.getState().markAllRead(baselines, tokens);
-    if (Object.keys(floors).length) {
-      useRoomUnreadStore.getState().applyUnread({ floor: floors });
-    }
     showToast(t('已全部标记为已读'));
   }, [showToast, t]);
 
@@ -3449,15 +3448,11 @@ const route = useRoute<any>();
   /** 离开底部那一刻的最新消息时间：用来识别「补历史页」 */
   const newMsgAnchorTimeRef = useRef(0);
   /**
-   * 浮标的计数数据源（**原始消息**，不是 IMessage）：
-   *   · `PILL_COUNT_ALL_ROOM_MESSAGES = true` → 房间全部消息（含当前视图看不见的群聊消息）；
-   *   · false → 只算当前视图可见的（只看偶像视图下只有房主发言）。
-   * id 用 messageKey，与 IMessage 的 `_id` 同一套，切换数据源不会污染 seen 集合。
+   * 浮标计数数据源 = **房间全部消息**（与桌面端 yk1z/yaya_msg 同口径：浮标语义是
+   * 「没看到的行数」，不是「当前过滤视图里的行数」；只看偶像视图下群聊新消息也算。
+   * ⚠️ 与房间列表角标口径不同（角标只计偶像发言），不要混改。
    */
-  const pillSource = useMemo(
-    () => (PILL_COUNT_ALL_ROOM_MESSAGES ? roomMessages : filteredRoomMessages),
-    [roomMessages, filteredRoomMessages],
-  );
+  const pillSource = roomMessages;
   const pillSourceRef = useRef<any[]>(pillSource);
   pillSourceRef.current = pillSource;
   /** 原始消息 → 计数用纯数据（id/时间/自己/聊天类），规则见 ./room/newMessagePill.ts */
@@ -4956,10 +4951,20 @@ const route = useRoute<any>();
             data={!searchDebounced.trim() && !filtered.length && followed.length ? followed : filtered}
             /* 滚动锚点（B6）：30s 静默刷新替换数据 / 置顶重排时保持用户当前可见位置，不被弹回顶部 */
             maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
+            /* 下拉刷新（用户 2026-11-11）：手动触发一次完整重拉，不必等 30s 轮询 */
+            refreshControl={(
+              <RefreshControl
+                refreshing={roomsRefreshing}
+                onRefresh={handlePullRefresh}
+                tintColor={palette.tint}
+                colors={[palette.tint]}
+              />
+            )}
           /* key 兜底：memberId 可能为空（少数关注条目没有 memberId），空 key 会生成重复键
              → 行错乱/丢行（列表"少了几行"的一种形态） */
           keyExtractor={(item: any, index) => String(item.memberId || item.member?.id || index)}
-          contentContainerStyle={styles.listContent}
+          /* flexGrow: 空列表/报错态也要能下拉（内容比屏幕短时，不加它拉不动 RefreshControl） */
+          contentContainerStyle={[styles.listContent, { flexGrow: 1 }]}
           renderItem={({ item }: any) => {
             /**
              * 未读徽标在**父级**算好，只把值（数字 / 布尔）传进这一行：
@@ -4971,6 +4976,9 @@ const route = useRoute<any>();
             // ★ 单一数据源：只把两侧的累计条数传进行；指纹/时间判据不再参与渲染
             const bigCount = roomSideCountOf(id, 'big');
             const smallCount = roomSideCountOf(id, 'small');
+            // 预览正文：详情页的最新一条优先（列表接口对「回复/引用」给的是被引用原文）
+            const bigPreviewText = previewTextOf(roomPreviewMap, id, 'big');
+            const smallPreviewText = previewTextOf(roomPreviewMap, id, 'small');
             /**
              * ★ 行状态在这里算成**基本类型**再传下去（用户 2026-10-01 性能优化）：
              * `liveNow` 每 30s、`onMicMap` 每次上麦扫描写回都会换新对象 ——
@@ -4994,6 +5002,8 @@ const route = useRoute<any>();
               isOnMic={!isLiveNow && !!onMicMap[mid]}
               bigCount={bigCount}
               smallCount={smallCount}
+              bigPreviewText={bigPreviewText}
+              smallPreviewText={smallPreviewText}
               onOpenRoom={openRoom}
               onOpenLive={openMemberLive}
               onTogglePin={togglePin}

@@ -14,6 +14,8 @@
  * 零 React / 零网络依赖，可直接编译进 `npm run test:core` 单测。
  */
 import { normMemberName } from './memberMatch';
+// 消息 id 字段别名：与游标/去重共用同一份键表（见 roomMessageCursor.MESSAGE_ID_KEYS）
+import { MESSAGE_ID_KEYS } from './roomMessageCursor';
 
 /** 先 trim 再走统一归一：接口昵称偶尔带首尾空格，带空格时团体前缀正则会失配 */
 function norm(raw: unknown): string {
@@ -89,12 +91,8 @@ export function isOwnerByServer(
  */
 export function messageIdAliases(msg: any): string[] {
   if (!msg || typeof msg !== 'object') return [];
-  const keys = [
-    'msgidClient', 'msgIdClient', 'msgIdServer', 'msgidServer',
-    'uuid', 'clientMsgId', 'messageId', 'msgId', 'messageid', 'id',
-  ];
   const out: string[] = [];
-  for (const key of keys) {
+  for (const key of MESSAGE_ID_KEYS) {
     const raw = msg[key];
     if (raw === null || raw === undefined) continue;
     const s = String(raw).trim();

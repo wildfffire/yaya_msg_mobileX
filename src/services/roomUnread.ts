@@ -32,7 +32,7 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
-import { ROOM_UNREAD_SIDES, roomUnreadKey, type RoomUnreadSide } from '../utils/roomUnreadRules';
+import { ROOM_UNREAD_SIDES, roomUnreadKey } from '../utils/roomUnreadRules';
 import { logInfo } from '../utils/runtimeLog';
 
 /**
@@ -66,12 +66,6 @@ interface Stored {
   seenTokens: Record<string, string>;
   /** 分侧键 → 该侧「最后看过的消息时间」（ms）。用于精确计数（见 useRoomUnreadCounters） */
   sideSeenAt?: Record<string, number>;
-  /**
-   * 分侧键 → 「打开房间那一刻的服务端未读数」（已读地板）。
-   * 服务端 unreadCount 不一定因为我们本地读了就清零 —— 打开房间时把它记下来，
-   * 角标显示 `max(0, 服务端未读 - 地板)`；服务端自己清零（数值 < 地板）时地板跟着清。
-   */
-  serverFloor?: Record<string, number>;
 }
 
 interface RoomUnreadState {
@@ -91,20 +85,15 @@ interface RoomUnreadState {
    * 30s 轮询在指纹变化时会拉一次该侧最新一页，用这个时间做基线数出**真实条数**。
    */
   sideSeenAt: Record<string, number>;
-  /** 键同上 → 「打开房间那一刻的服务端未读数」（见 Stored.serverFloor 的说明） */
-  serverFloor: Record<string, number>;
   /** 是否已从磁盘恢复（避免恢复前把空对象写回磁盘） */
   hydrated: boolean;
   hydrate: () => Promise<void>;
-  /** 某房间**某一侧** +n（默认 +1） */
-  bump: (memberId: string, side: RoomUnreadSide, n?: number) => void;
   /**
    * **批量提交**（30s 轮询 / 实时通道 / 进房退房收尾用）：一次 setState + 一次落盘。
    *
    * 为什么必须批量：分侧后一轮最多「N 个房间 × 2 侧」= 2N 次计数与指纹推进，
    * 逐次调用就是 2N 次全量 JSON 序列化 + 2N 次 store 通知（每次通知都让房间列表重渲染）——
    * 用户 2026-09-30 反馈的「30s 卡一下、列表闪烁、房间都被卡没了」正是这条。
-   * 单条改动（如用户手动操作）继续用 bump/markSeen 即可。
    */
   applyUnread: (patch: {
     /** 分侧键（roomUnreadKey 产物）→ 计数增量 */
@@ -113,8 +102,6 @@ interface RoomUnreadState {
     seen?: Record<string, string>;
     /** 分侧键 → 该侧「最后看过的消息时间」（ms，只前进不后退） */
     seenAt?: Record<string, number>;
-    /** 分侧键 → 服务端未读「已读地板」（打开房间那一刻的服务端未读数） */
-    floor?: Record<string, number>;
     /** memberId → 已读基线（服务器消息时间，**房间级**）；同时清零该房间两侧计数 */
     read?: Record<string, number>;
   }) => void;
@@ -130,8 +117,6 @@ interface RoomUnreadState {
    * ⚠️ 必须传服务器活动时间，不能传 `Date.now()`（见文件头「时间域铁律」）。
    */
   seedReadAt: (observed: Record<string, number>) => void;
-  /** 进入/离开房间：把**某一侧**的「已见指纹」更新为该侧当前指纹（传空串则不动） */
-  markSeen: (memberId: string, side: RoomUnreadSide, token: string) => void;
   /** 一次推进**两侧**指纹（进房/退房收尾用：两侧都算「看过」，空串那侧不动） */
   markSeenBoth: (memberId: string, bigToken: string, smallToken: string) => void;
   /**
@@ -143,8 +128,6 @@ interface RoomUnreadState {
   markAllRead: (baselines: Record<string, number>, tokens: Record<string, string>) => void;
   /** 首次基线：给「还没有指纹记录」的键写入当前指纹（只补缺失，不覆盖；键已是分侧键） */
   seedTokens: (observed: Record<string, string>) => void;
-  /** 全部清空（如退出登录/切换账号） */
-  clearAll: () => void;
 }
 
 /**
@@ -205,7 +188,6 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
   lastReadAt: {},
   seenTokens: {},
   sideSeenAt: {},
-  serverFloor: {},
   hydrated: false,
 
   hydrate: async () => {
@@ -245,32 +227,10 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
           if (k && Number.isFinite(n) && n > 0) sideSeenAt[String(k)] = n;
         }
       }
-      const serverFloor: Record<string, number> = {};
-      if (src.serverFloor && typeof src.serverFloor === 'object') {
-        for (const [k, v] of Object.entries(src.serverFloor)) {
-          const n = Number(v);
-          if (k && Number.isFinite(n) && n >= 0) serverFloor[String(k)] = n;
-        }
-      }
-      set({ counts, lastReadAt, seenTokens, sideSeenAt, serverFloor, hydrated: true });
+      set({ counts, lastReadAt, seenTokens, sideSeenAt, hydrated: true });
     } catch {
       set({ hydrated: true });
     }
-  },
-
-  bump: (memberId, side, n = 1) => {
-    const key = roomUnreadKey(memberId, side);
-    if (!key) return;
-    void ready().then(() => {
-      logInfo(`[unread] bump ${key} +${n}`, 'room.unread');
-      set((s) => {
-        const next = Math.min(MAX_PER_ROOM, (s.counts[key] || 0) + n);
-        if (next === s.counts[key]) return s;
-        const counts = { ...s.counts, [key]: next };
-        persist({ counts, lastReadAt: s.lastReadAt, seenTokens: s.seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
-        return { counts };
-      });
-    });
   },
 
   markRead: (memberId, activity) => {
@@ -314,21 +274,8 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
         changed = true;
       }
       if (!changed) return s;
-      persist({ counts: s.counts, lastReadAt, seenTokens: s.seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
+      persist({ counts: s.counts, lastReadAt, seenTokens: s.seenTokens, sideSeenAt: s.sideSeenAt });
       return { lastReadAt };
-    }));
-  },
-
-  markSeen: (memberId, side, token) => {
-    const key = roomUnreadKey(memberId, side);
-    const value = String(token || '').slice(0, MAX_TOKEN);
-    // 拿不到指纹（或是空 memberId）时不动原值：写空会让刚进过的房间立刻被判成有新消息
-    if (!key || !value) return;
-    void ready().then(() => set((s) => {
-      if (s.seenTokens[key] === value) return s;
-      const seenTokens = { ...s.seenTokens, [key]: value };
-      persist({ counts: s.counts, lastReadAt: s.lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
-      return { seenTokens };
     }));
   },
 
@@ -346,7 +293,7 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
       if (big && seenTokens[bigKey] !== big) { seenTokens[bigKey] = big; changed = true; }
       if (small && seenTokens[smallKey] !== small) { seenTokens[smallKey] = small; changed = true; }
       if (!changed) return s;
-      persist({ counts: s.counts, lastReadAt: s.lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
+      persist({ counts: s.counts, lastReadAt: s.lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt });
       return { seenTokens };
     }));
   },
@@ -355,21 +302,18 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
     const bumpPatch = patch?.bump || {};
     const seenPatch = patch?.seen || {};
     const seenAtPatch = patch?.seenAt || {};
-    const floorPatch = patch?.floor || {};
     const readPatch = patch?.read || {};
     if (
       !Object.keys(bumpPatch).length
       && !Object.keys(seenPatch).length
       && !Object.keys(seenAtPatch).length
-      && !Object.keys(floorPatch).length
       && !Object.keys(readPatch).length
     ) return;
     logInfo(
       `[unread] apply bump=${JSON.stringify(bumpPatch)}`
       + ` seen=[${Object.keys(seenPatch).join(',')}]`
       + ` read=[${Object.keys(readPatch).join(',')}]`
-      + ` seenAt=${JSON.stringify(seenAtPatch)}`
-      + ` floor=${JSON.stringify(floorPatch)}`,
+      + ` seenAt=${JSON.stringify(seenAtPatch)}`,
       'room.unread',
     );
     void ready().then(() => set((s) => {
@@ -377,7 +321,6 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
       const lastReadAt = { ...s.lastReadAt };
       const seenTokens = { ...s.seenTokens };
       const sideSeenAt = { ...s.sideSeenAt };
-      const serverFloor = { ...s.serverFloor };
       let changed = false;
 
       // ① 已读：清零该房间**两侧**计数 + 推进房间级基线（0 = 调用方不知道 → 不动基线）
@@ -425,17 +368,9 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
         if (at > (Number(sideSeenAt[key]) || 0)) { sideSeenAt[key] = at; changed = true; }
       }
 
-      // ⑤ 服务端未读「已读地板」：打开房间那一刻的服务端未读数（直接赋值，不做单调）
-      for (const [rawKey, value] of Object.entries(floorPatch)) {
-        const key = String(rawKey || '');
-        const n = Number(value) || 0;
-        if (!key || n < 0) continue;
-        if (serverFloor[key] !== n) { serverFloor[key] = n; changed = true; }
-      }
-
       if (!changed) return s;
-      persist({ counts, lastReadAt, seenTokens, sideSeenAt, serverFloor });
-      return { counts, lastReadAt, seenTokens, sideSeenAt, serverFloor };
+      persist({ counts, lastReadAt, seenTokens, sideSeenAt });
+      return { counts, lastReadAt, seenTokens, sideSeenAt };
     }));
   },
 
@@ -456,7 +391,7 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
       }
       // 计数**整体清空**：点「全部已读」的语义就是列表上不再有任何数字/「新」
       const counts: Record<string, number> = {};
-      persist({ counts, lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
+      persist({ counts, lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt });
       // 用户明确动作（点「全部已读」）→ 立即落盘，不等 800ms 防抖
       flushRoomUnreadPersist();
       return { counts, lastReadAt, seenTokens };
@@ -476,16 +411,9 @@ export const useRoomUnreadStore = create<RoomUnreadState>((set, get) => {
         changed = true;
       }
       if (!changed) return s;
-      persist({ counts: s.counts, lastReadAt: s.lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt, serverFloor: s.serverFloor });
+      persist({ counts: s.counts, lastReadAt: s.lastReadAt, seenTokens, sideSeenAt: s.sideSeenAt });
       return { seenTokens };
     }));
-  },
-
-  clearAll: () => {
-    set({ counts: {}, lastReadAt: {}, seenTokens: {}, sideSeenAt: {}, serverFloor: {} });
-    persist({ counts: {}, lastReadAt: {}, seenTokens: {}, sideSeenAt: {}, serverFloor: {} });
-    // 退出登录/切账号：必须立即落盘（否则下次启动会读到旧账号的未读）
-    flushRoomUnreadPersist();
   },
   };
 });

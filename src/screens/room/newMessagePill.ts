@@ -18,6 +18,7 @@
  *   · **非聊天类消息**（礼物 / 进房特效 / 系统公告）只记 seen、不计入数字 ——
  *     与房间列表角标的 `isChatMessageType` 同口径，否则有人刷礼物时数字会虚高。
  */
+import { isCountableMessageType } from '../../utils/roomMessageCursor';
 
 export interface NewMsgItem {
   id: string;
@@ -56,15 +57,13 @@ export function scrollOffsetY(event: any): number {
 }
 
 /**
- * 聊天类消息类型（与房间列表角标的 `isChatMessageType` 同口径）：
- * 文本/回复/表情/图片/语音/视频/直播弹幕/翻牌。
- * 礼物（PRESENT_*）、进房（EVENT_*_ENTER）、公告（LIVE_ANNOUNCE）等不算「消息」。
+ * 聊天类消息类型（文本/回复/表情/图片/语音/视频/直播弹幕/翻牌）。
+ *
+ * ⚠️ 实现在 `utils/roomMessageCursor.isCountableMessageType`：房间列表角标、5s 通知轮询、
+ * 30s 精确计数与这里一共四条链路共用同一份正则 —— 以前各写一份，
+ * 改类型口径时必然漏掉其中一处（表现就是「浮标算、角标不算」）。
  */
-export const COUNTABLE_ROOM_MESSAGE_RE = /^(TEXT|REPLY|GIFTREPLY|EXPRESSIMAGE|IMAGE|AUDIO|VIDEO|BARRAGE_|FLIP)/;
-
-export function isCountableRoomMessage(type: string): boolean {
-  return COUNTABLE_ROOM_MESSAGE_RE.test(String(type || 'TEXT').toUpperCase());
-}
+export const isCountableRoomMessage = isCountableMessageType;
 
 /** 挑出「没见过、且不早于锚点」的新消息：见 / 计入 两份结果（顺序保持列表顺序） */
 export function pickNewMessages(items: NewMsgItem[], seenIds: Iterable<string>, anchorTime: number): PickedNewMessages {

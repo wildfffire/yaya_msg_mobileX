@@ -70,11 +70,9 @@ export function useRoomActivityMirror(followed: any[]) {
 
   return {
     roomActivityRef,
-    roomTokenRef,
     pendingSeenRef,
     loggedLastMsgSampleRef,
     roomActivityOf,
-    roomSeenTokenOf,
     roomSeenPair,
   };
 }

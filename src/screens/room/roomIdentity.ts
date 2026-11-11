@@ -15,29 +15,34 @@ import { normalizeUrl, pickText, unwrapList } from '../../utils/data';
 import { t } from '../../i18n';
 import { getMessageTime, normMs } from './timeRules';
 import type { LiveEntry, LiveNowIndex } from './liveIndex';
+// 「最新消息」条目 ↔ 成员的匹配规则（纯函数，含同 server 内消歧的兜底）
+import { pickBigPreview, pickSmallPreview } from '../../utils/roomPreviewMatch';
 
 export type RoomMode = 'big' | 'small';
 
 /**
- * 大房间最新消息：只认 channelId===大房间 或 成员本人发言。
- * 注意不能按 serverId 兜底——小房间与大房间共用 serverId，兜底会把小房间消息冒充大房间预览。
+ * 大房间最新消息：精确 channelId 命中 → 条目自带发送者 id → **同 server 内消歧**。
+ *
+ * ⚠️ 为什么要有第三层（用户 2026-11-11「有的成员有新消息不会计数也不显示」）：
+ * 成员库是社区维护的，`channelId` 一旦与线上漂移，精确匹配就恒为 null → 列表没有预览、
+ * 指纹恒空 → 30s 指纹计数与 5s 轮询都跳过这个成员（既不计也不显示）。
+ * 同一 serverId 下的条目必然属于这位成员的两个频道，所以「排除小房间那条」就能认回大房间。
+ * 详见 utils/roomPreviewMatch.ts。
  */
 export function findLastMessage(messages: any[], member?: Member) {
   if (!member) return null;
-  const bigId = String(member.channelId || '');
-  return messages.find((msg) => (
-    (bigId && String(msg.channelId || '') === bigId)
-    || String(msg.userId || msg.ownerId || '') === String(member.id || '')
-  ));
+  return pickBigPreview(messages, member as any) || null;
 }
 
-/** 小房间（yklzId）最新消息：只认 channelId 精确匹配小房间 */
+/**
+ * 小房间（yklzId）最新消息：精确 yklzId → 同 server 内消歧（排除大房间那条）。
+ *
+ * ⚠️ 不能只按 serverId 兜底——小房间与大房间共用 serverId，错认会把大房间消息
+ * 冒充小房间预览（用户 2026-10-01「小房间被大房间消息取代」）。
+ */
 export function findSmallLastMessage(messages: any[], member?: Member) {
   if (!member) return null;
-  const ykid = String(member.yklzId || '');
-  if (!ykid || ykid === '0' || ykid === 'undefined') return null;
-  return messages.find((msg) => String(msg.channelId || '') === ykid)
-    || null;
+  return pickSmallPreview(messages, member as any) || null;
 }
 
 export function roomChannelId(member: Member, mode: RoomMode) {
@@ -71,11 +76,6 @@ export function roomLastActivity(item: any): number {
  */
 export function roomSideMessage(item: any, side: RoomMode): any {
   return side === 'small' ? item?.lastSmallMessage : item?.lastMessage;
-}
-
-/** 单侧「最后活动时间」（服务器消息时间 ms；0 = 该侧没有消息） */
-export function roomSideActivity(item: any, side: RoomMode): number {
-  return normMs(getMessageTime(roomSideMessage(item, side)));
 }
 
 /**

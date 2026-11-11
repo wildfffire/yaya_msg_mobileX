@@ -57,10 +57,18 @@ export function messageTime(msg: any): number {
   return 0;
 }
 
-const ID_KEYS = [
+/**
+ * 消息 id 字段别名（按优先级）。
+ *
+ * ⚠️ 唯一来源：`messageId`（游标/去重）与 `notifyOwnerRules.messageIdAliases`
+ *（服务端房主表比对）都从这里取 —— 以前两处各维护一份同样的键表，加字段时必漏一边。
+ */
+export const MESSAGE_ID_KEYS = [
   'msgidClient', 'msgIdClient', 'msgIdServer', 'msgidServer',
   'uuid', 'clientMsgId', 'messageId', 'msgId', 'messageid', 'id',
 ];
+
+const ID_KEYS = MESSAGE_ID_KEYS;
 
 function scalarPreview(value: any): string {
   if (value === null || value === undefined) return '';
@@ -95,6 +103,32 @@ export function messagePreview(msg: any): string {
     if (text) return text;
   }
   return '';
+}
+
+/**
+ * 消息类型（各链路字段名不同：`bodys.messageType` / `msgType` / `messageType` / `type`）。
+ *
+ * ⚠️ 统一入口的原因：以前实时通道、30s 精确计数、5s 轮询各写一份取值+正则，
+ * 三份一旦漂移就会出现「某个类型实时算、轮询不算」的角标漏计。
+ */
+export function messageTypeOf(msg: any): string {
+  return String(
+    msg?.bodys?.messageType || msg?.msgType || msg?.messageType || msg?.type || 'TEXT',
+  ).toUpperCase();
+}
+
+/**
+ * 哪些消息类型参与「未读角标 / 房间通知」判定（礼物 / 进房特效 / 系统公告不算）。
+ * `FLIP*`（翻牌）算聊天消息（用户 2026-09-30：翻牌也要有未读提示）。
+ */
+export function isCountableMessageType(type: unknown): boolean {
+  const t = String(type || 'TEXT').toUpperCase();
+  return /^(TEXT|REPLY|GIFTREPLY|EXPRESSIMAGE|IMAGE|AUDIO|VIDEO|BARRAGE_|FLIP)/.test(t);
+}
+
+/** 这条消息是否参与「未读角标 / 房间通知」判定（取值 + 正则的唯一实现） */
+export function isCountableChatMessage(msg: any): boolean {
+  return isCountableMessageType(messageTypeOf(msg));
 }
 
 /** 消息唯一键：优先稳定 id（含上游兼容别名），缺 id 才用「时间:正文」兜底 */
@@ -216,6 +250,96 @@ export function isDetailFromSide(usedChannelId: unknown, sideChannelId: string):
   const used = String(usedChannelId ?? '').trim();
   if (!used) return true;
   return used === String(sideChannelId ?? '').trim();
+}
+
+/**
+ * 一条消息能不能算进「未读角标」（时间维度的门槛）。
+ *
+ * @param time      本条消息的服务器时间（ms；0 = 该消息没有时间字段）
+ * @param sideSeenAt 该侧「上次数到哪」的基线（sideSeenAt；0 = 未知）
+ * @param readFloor 房间级已读基线（lastReadAt；0 = 还没读过这个房间）
+ *
+ * 两个门槛的边界语义不同，不能合并：
+ *   · `readFloor`：**严格晚于**才算未读 —— 进房/退房时它被写成「房间内看到的最新一条」，
+ *     时间恰好等于它的那条是**用户已经看过的**；
+ *   · `sideSeenAt`：**等于也算** —— 它是「上一次数过的页里最新一条」的时间，
+ *     同一毫秒/同一秒连发的多条不能因为时间相等被漏掉（去重交给消息 id 总账）。
+ *   · 时间未知（0）时放行：宁可让 id 总账去重，也不能因为接口缺时间字段就整条丢掉。
+ *
+ * ⚠️ 为什么需要它（用户 2026-11-11「有的成员有新消息不会计数也不显示」）：
+ * 旧版精确计数在 `prevAt === 0` 时一律走「首次基线」并返回 0 —— 而 `sideSeenAt` 会在
+ * **每次进房**被清零（两侧），于是「退房后新到的消息」只要先被 30s 指纹路径撞上，
+ * 就会被当成基线整批吞掉（不计数、指纹却已推进）。有了已读基线兜底，
+ * 只要这个房间用户读过（lastReadAt > 0），新消息就不会再被吞。
+ */
+export function isCountableUnreadMessage(time: number, sideSeenAt: number, readFloor: number): boolean {
+  const t = Number(time) || 0;
+  const floor = Number(readFloor) || 0;
+  const seen = Number(sideSeenAt) || 0;
+  if (t <= 0) return true;
+  if (floor > 0 && t <= floor) return false;
+  if (seen > 0 && t < seen) return false;
+  return true;
+}
+
+/**
+ * 回溯翻页硬上限（页）：真正翻多少由「上次消费到的位置」决定，这里只兜底防失控
+ *（20 页 ≈ 1000 条；配合每轮页数预算跨轮续翻，不会一次打几十个请求）。
+ */
+export const MESSAGE_BACKFILL_MAX_PAGES = 20;
+
+/**
+ * 回溯的停止边界：**「上次轮询消费到的位置」优先**，没有才退回房间级已读基线。
+ *
+ * 为什么优先 cursor.time（用户 2026-11-11「一直找到上次看到的地方为止」）：
+ * `cursor.time` 是上一次成功轮询那一页的最新时间 —— 它之前的消息都已经进过游标
+ *（见过 / 已读 / 已计数），再往前翻没有任何意义，只会白打请求。
+ * `lastReadAt` 只在进房/退房时推进，粒度更粗（可能比「上次轮询」早很多），
+ * 但房间里刚看完的消息它更准，所以作为没有游标时的兜底。
+ */
+export function backfillBoundary(cursorTime: number, readFloor: number): number {
+  const seen = Number(cursorTime) || 0;
+  if (seen > 0) return seen;
+  return Number(readFloor) || 0;
+}
+
+/**
+ * 拉到的这一页详情是否**必须继续往前翻**。
+ *
+ * 背景（用户 2026-11-11「覃柯蒙 15:45 的消息没有角标」，真机日志实证）：
+ * 关通知时后台轮询是停的（用户要求省电），实时通道又恰好 broken pipe，
+ * 于是 App 回到前台时这段时间的消息**全部积压**；最新一页 50 条被粉丝刷满，
+ * 房主那条已经被挤出窗口 —— 两条通道都数不到，必须一直往前翻到边界为止。
+ *
+ * 判定（缺一不可）：
+ *   · 这一页是**满的**（说明后面还有更早的消息）；
+ *   · 知道边界在哪（`boundary > 0`，见 backfillBoundary）；
+ *   · 还没翻到边界（`oldestTime > boundary`）；
+ *   · 这一页**全是没见过的新消息**、或该侧游标还没建立（`!primed`）——
+ *     正常增量（本次只有 1~2 条新消息）不回溯，避免每轮多打请求。
+ */
+export function shouldBackfillOlder(input: {
+  /** 本页条数 */
+  pageLength: number;
+  /** 单页请求上限 */
+  limit: number;
+  /** 本页里「游标没见过」的条数 */
+  freshCount: number;
+  /** 该侧游标是否已建立 */
+  primed: boolean;
+  /** 回溯停止边界（ms；0 = 不知道边界，不回溯） */
+  boundary: number;
+  /** 本页最早一条的时间（ms；0 = 都不知道） */
+  oldestTime: number;
+}): boolean {
+  const limit = Number(input.limit) || 0;
+  if (limit <= 0) return false;
+  if ((Number(input.pageLength) || 0) < limit) return false;
+  const boundary = Number(input.boundary) || 0;
+  if (boundary <= 0) return false;
+  const oldest = Number(input.oldestTime) || 0;
+  if (oldest > 0 && oldest <= boundary) return false;
+  return input.primed !== true || (Number(input.freshCount) || 0) >= limit;
 }
 
 /**

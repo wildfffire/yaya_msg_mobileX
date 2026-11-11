@@ -120,7 +120,7 @@ try {
   const screen = readFileSync(join(root, 'src', 'screens', 'FollowedRoomsScreen.tsx'), 'utf8');
 
   await check('房间通知接线：只有偶像消息能进 notifyMessage', () => {
-    assert.ok(pollers.includes('isOwnerMessageForNotify('), '必须用通知专用严格房主判定');
+    assert.ok(pollers.includes('isOwnerMessageStrict('), '必须用严格房主判定（通知/角标/预览同一口径）');
     assert.ok(pollers.includes('pickOwnerMessages('), '必须把整批新消息过滤成偶像子集');
     assert.ok(pollers.includes('if (cur.primed && idolFresh.length)'), '通知触发条件必须是偶像消息');
     assert.ok(pollers.includes('freshBatchKey(idolFresh)'), '去重键只基于偶像消息');
@@ -131,7 +131,7 @@ try {
   });
 
   await check('严格判定与「只看偶像」视图宽松兜底分离，发送者解析同源', () => {
-    assert.ok(messageRules.includes('export function isOwnerMessageForNotify('));
+    assert.ok(messageRules.includes('export function isOwnerMessageStrict('), '严格判定必须是唯一入口');
     assert.ok(messageRules.includes('isOwnerSender(senderProfile(item, room)'), '必须复用 senderProfile');
     assert.ok(messageRules.includes('if (!includeFans) return true;'), '旧宽松兜底仍留给「只看偶像」视图');
     assert.ok(!ownerRules.includes('if (!includeFans) return true'), '通知规则里不能沿用「认不出就当偶像」的兜底');
@@ -157,7 +157,10 @@ try {
   await check('★ 首次基线不抢总账 / 同秒消息不漏 / 补偿扫描兜底', () => {
     assert.ok(counters.includes('不占总账'), '首次基线不能再 claim 整页 id');
     assert.ok(!counters.includes('for (const m of msgs) claimCountId'), '整页认领代码必须删掉');
-    assert.ok(counters.includes('mt < prevAt'), '同毫秒/同秒连发不能被时间基线挡掉');
+    // 时间门槛已抽成纯函数（utils/roomMessageCursor.isCountableUnreadMessage），单测直接钉住边界
+    const cursorRules = readFileSync(join(root, 'src', 'utils', 'roomMessageCursor.ts'), 'utf8');
+    assert.ok(cursorRules.includes('t < seen'), '同毫秒/同秒连发不能被侧基线挡掉（只有严格早于才跳过）');
+    assert.ok(counters.includes('isCountableUnreadMessage('), '精确计数必须走统一时间门槛');
     assert.ok(pollers.includes('补偿计数'), '必须有按 id 的补偿扫描');
     assert.ok(pollers.includes('markCountConsumed(mid)'), '当前房间消息要标已读而不是占用计数名额');
     assert.ok(screen.includes('markCountConsumed(messageId(m))'), '实时通道同样用已读语义');
