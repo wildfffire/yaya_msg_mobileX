@@ -6,6 +6,8 @@ import { parseLooseJson, ALREADY_CHECKED_MESSAGE_RE } from '../utils/json';
 import { parseMaskWordsText } from '../utils/maskWords';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppState } from 'react-native';
+// 进房耗时诊断（tag room）：只打首屏那一次请求，轮询/上拉不打
+import { logInfo } from '../utils/runtimeLog';
 
 // E2 记录：移动端 API 方法数少于桌面端 v2.11 通道（100+）——未移植的桌面通道：
 // 选举计分（score-*）、花漾（pageantry-*）、QR 登录（login-*-qr）、部分 Area48 话题接口；
@@ -352,22 +354,48 @@ let lastPa = '';
 let lastPaAt = 0;
 let lastPaCacheLogAt = 0;
 const PA_CACHE_TTL_MS = 5 * 60_000;
+/**
+ * 前台签名复用窗口（用户 2026-11-12「进入房间的速度比较慢」）。
+ *
+ * `pa` 无参数（只与时间/随机有关、不与请求体绑定），服务端只看「签名是否有效」，
+ * 因此同一瞬间发出的多个请求共用一个签名是安全的 —— 后台路径复用 5 分钟早已验证可用。
+ *
+ * 为什么前台也要复用：Hermes 上没有原生 WebAssembly，签名实际走 **WebView 往返**
+ *（`generatePaAsync` → WebView signer），每次几十毫秒。而进房瞬间是并发的：
+ * 首屏消息 + 房间元数据 + 精华消息 + 上麦扫描 同时发 4 个请求 → 旧实现要签 4 次名，
+ * 全部串在同一段主线程/WebView 通信上，直接把首屏消息往后推。
+ * 800ms 是很保守的窗口（同一个交互手势内），跨手势/跨轮询仍会现签。
+ */
+const PA_FRONT_REUSE_MS = 800;
+/** 在途签名（并发合并用）：多个请求同时需要签名时只签一次 */
+let paInflight: Promise<string | null> | null = null;
 
 async function createSignedHeaders(token?: string, modern = false, patch: HeadersMap = {}) {
-  const cached = lastPa && Date.now() - lastPaAt < PA_CACHE_TTL_MS ? lastPa : '';
-  const useCache = AppState.currentState !== 'active' && !!cached;
+  const foreground = AppState.currentState === 'active';
+  const ttl = foreground ? PA_FRONT_REUSE_MS : PA_CACHE_TTL_MS;
+  const cached = lastPa && Date.now() - lastPaAt < ttl ? lastPa : '';
+  const useCache = !!cached;
   let pa: string | null = null;
   if (useCache) {
     pa = cached;
-    if (Date.now() - lastPaCacheLogAt > 60_000) {
+    if (!foreground && Date.now() - lastPaCacheLogAt > 60_000) {
       lastPaCacheLogAt = Date.now();
       console.debug('[notify] [bg] 后台复用最近一次签名（WebView JS 在后台被暂停）');
     }
   } else {
     await initWasm();
-    // 签名的超时同样依赖 JS setTimeout，后台会被 RN 暂停 → 用原生心跳看门狗兜底，
-    // 否则一次挂起的签名会把整条后台轮询链路永久卡死。
-    pa = await raceWithWatchdog(generatePaAsync(), '签名');
+    /**
+     * ★ 并发合并：进房瞬间多个请求会**同时**走到这里（此时 lastPa 还是空的），
+     * 旧实现各自现签一次 → WebView 上排队往返 N 次。共享同一个 in-flight Promise，
+     * 一次签名供所有并发请求使用（pa 与请求体无关，见上方 PA_FRONT_REUSE_MS）。
+     */
+    if (!paInflight) {
+      // 签名的超时同样依赖 JS setTimeout，后台会被 RN 暂停 → 用原生心跳看门狗兜底，
+      // 否则一次挂起的签名会把整条后台轮询链路永久卡死。
+      paInflight = raceWithWatchdog(generatePaAsync(), '签名')
+        .finally(() => { paInflight = null; });
+    }
+    pa = await paInflight;
     if (pa) { lastPa = pa; lastPaAt = Date.now(); }
   }
   if (!pa) {
@@ -485,9 +513,28 @@ async function resolveServerIds(channelId: string): Promise<string[]> {
   return ids;
 }
 
+/**
+ * serverId 解析结果缓存（进程内，channelId → serverId）。
+ *
+ * 为什么需要（用户 2026-11-12「进入房间的速度比较慢」）：`resolveServerIds` 会**串行**打两次
+ * 网络请求（`room/info` → `team/star/server/map/get`），而它只在成员库缺 serverId 时才被调用 ——
+ * 偏偏这种房间每次进房都要先白等这两个串行往返，才开始请求首屏消息（以及并行的房间元数据）。
+ * serverId 对同一个频道是恒定的，拿到就记住；没拿到（空串）不缓存，下次重试。
+ */
+const resolvedServerIdCache = new Map<string, string>();
+const RESOLVED_SERVER_ID_MAX = 500;
+
 async function resolveServerId(channelId: string): Promise<string> {
+  const key = String(channelId || '');
+  const hit = key ? resolvedServerIdCache.get(key) : '';
+  if (hit) return hit;
   const ids = await resolveServerIds(channelId);
-  return ids[0] || '';
+  const first = ids[0] || '';
+  if (key && first) {
+    if (resolvedServerIdCache.size > RESOLVED_SERVER_ID_MAX) resolvedServerIdCache.clear();
+    resolvedServerIdCache.set(key, first);
+  }
+  return first;
 }
 
 function rememberServerId(channelId: string, serverId: string) {
@@ -498,9 +545,12 @@ function rememberServerId(channelId: string, serverId: string) {
 async function tryPocketPost(
   attempts: Array<{ url: string; payload: any; modern?: boolean; tokenRequired?: boolean; signed?: boolean; headers?: HeadersMap; label: string }>,
   fallback: string,
+  /** 逐次尝试的耗时回调（性能诊断用；不传则零开销） */
+  onAttempt?: (info: { label: string; ms: number; ok: boolean }) => void,
 ) {
   const errors: string[] = [];
   for (const attempt of attempts) {
+    const at = Date.now();
     try {
       const res = await pocketPost(attempt.url, attempt.payload, {
         modern: attempt.modern,
@@ -509,6 +559,7 @@ async function tryPocketPost(
         headers: attempt.headers,
         fallback: `${fallback}: ${attempt.label}`,
       });
+      onAttempt?.({ label: attempt.label, ms: Date.now() - at, ok: true });
       return {
         ...res,
         _request: {
@@ -517,6 +568,7 @@ async function tryPocketPost(
         },
       };
     } catch (error: any) {
+      onAttempt?.({ label: attempt.label, ms: Date.now() - at, ok: false });
       errors.push(`${attempt.label}: ${error?.message || String(error)}`);
     }
   }
@@ -526,6 +578,29 @@ async function tryPocketPost(
 function safeNumber(value: any): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * 房间消息接口的**参数形态偏好**（用户 2026-11-12「进入房间的速度比较慢」）。
+ *
+ * 该接口对参数类型挑剔（数字/字符串/新版头三种形态，见 getRoomMessages 的 attempts），
+ * 而 `tryPocketPost` 是**串行** for 循环 —— 候选里排在前面的形态一旦不被接受，
+ * 每多一种就要多付一次完整网络往返。进房链路上这就是「点进去等好几秒」。
+ * 服务端挑哪种形态对所有房间是一致的，所以记住上次成功的形态并排到最前即可。
+ */
+const ROOM_MSG_SHAPES = ['num', 'str', 'mod'] as const;
+type RoomMsgShape = (typeof ROOM_MSG_SHAPES)[number];
+const roomMsgShapePref = new Map<string, RoomMsgShape>();
+
+/** 从成功响应的 `_request.label`（`<mode> <shape> ch=… srv=…`）反查通路并记住形态 */
+function rememberRoomMsgShape(res: any, urls: Array<{ url: string; mode: string }>) {
+  const label = String(res?._request?.label || '');
+  if (!label) return;
+  const [mode, shape] = label.split(' ');
+  if (!mode || !shape) return;
+  if (shape !== 'num' && shape !== 'str' && shape !== 'mod') return;
+  const hit = urls.find((item) => item.mode === mode);
+  if (hit && roomMsgShapePref.get(hit.url) !== shape) roomMsgShapePref.set(hit.url, shape);
 }
 
 export const pocketApi = {
@@ -808,27 +883,69 @@ export const pocketApi = {
         const sid = String(serverId || '');
         if (!sid || sid === '0') continue;
         for (const entry of urls) {
-          attempts.push({
-            url: entry.url,
-            payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime: next, limit },
-            label: `${entry.mode} num ch=${cid} srv=${sid}`,
-          });
-          attempts.push({
-            url: entry.url,
-            payload: { channelId: String(cid), serverId: String(sid), nextTime: next, limit },
-            label: `${entry.mode} str ch=${cid} srv=${sid}`,
-          });
-          attempts.push({
-            url: entry.url,
-            payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime: next, limit },
-            modern: true,
-            label: `${entry.mode} mod ch=${cid} srv=${sid}`,
-          });
+          /**
+           * ★ 参数形态**记忆化**（用户 2026-11-12「进入房间的速度比较慢」）：
+           * 三种形态（num 数字/str 字符串/mod 新版头）是**串行**尝试的，
+           * 而这里还会再乘 cid × serverId —— 最坏 12 个候选全部串行打完才报错/命中。
+           * 服务端挑哪种形态对所有房间是一致的，记住上次成功的那种并排到最前，
+           * 正常情况第一次就命中（进房少等 1~N 个 RTT）。
+           */
+          const pref = roomMsgShapePref.get(entry.url) || 'num';
+          const shapes = [pref, ...ROOM_MSG_SHAPES.filter((s) => s !== pref)];
+          for (const shape of shapes) {
+            if (shape === 'num') {
+              attempts.push({
+                url: entry.url,
+                payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime: next, limit },
+                label: `${entry.mode} num ch=${cid} srv=${sid}`,
+              });
+            } else if (shape === 'str') {
+              attempts.push({
+                url: entry.url,
+                payload: { channelId: String(cid), serverId: String(sid), nextTime: next, limit },
+                label: `${entry.mode} str ch=${cid} srv=${sid}`,
+              });
+            } else {
+              attempts.push({
+                url: entry.url,
+                payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime: next, limit },
+                modern: true,
+                label: `${entry.mode} mod ch=${cid} srv=${sid}`,
+              });
+            }
+          }
         }
       }
     }
     if (!attempts.length) throw new Error('missing serverId');
-    return tryPocketPost(attempts, 'get room messages failed');
+    /**
+     * 首屏（nextTime=0 且 limit≥50）打一条耗时诊断（tag room）：
+     * 「尝试=1/12」= 一次命中（理想）；「尝试=3/12 [num:860ms× str:420ms]」= 形态不对在串行回退，
+     * 那才是进房等 1 秒以上的元凶。轮询/上拉不打，避免刷日志。
+     */
+    const firstScreen = next === 0 && limit >= 50;
+    const reqAt = Date.now();
+    const trace: string[] = [];
+    const res: any = await tryPocketPost(attempts, 'get room messages failed', firstScreen
+      ? (info) => {
+        if (trace.length < 6) {
+          const [mode, shape] = info.label.split(' ');
+          trace.push(`${mode}/${shape}:${info.ms}ms${info.ok ? '' : '×'}`);
+        }
+      }
+      : undefined);
+    if (firstScreen) {
+      logInfo(
+        `[room.net] 首屏消息 ${Date.now() - reqAt}ms 尝试=${trace.length}/${attempts.length}`
+        + ` ch=${channelId} srv=${serverIds[0] || '-'}`
+        // 实际命中的频道：与本侧不同 = 服务端回退到了 fallbackChannelId（大小房间串味的判据）
+        + ` 实际ch=${String((res as any)?._request?.payload?.channelId ?? '-')}`
+        + ` [${trace.join(' ')}]`,
+        'room',
+      );
+    }
+    rememberRoomMsgShape(res, urls);
+    return res;
   },
 
   /**
@@ -870,11 +987,21 @@ export const pocketApi = {
     if (!sid || sid === '0') sid = await resolveServerId(cid);
     if (!sid || sid === '0') throw new Error('missing serverId');
     const url = `${BASE}/im/api/v1/team/essence/message/list`;
-    return tryPocketPost([
-      { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, label: 'essence num' },
-      { url, payload: { channelId: cid, serverId: sid, nextTime, limit }, label: 'essence str' },
-      { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, modern: true, label: 'essence modern' },
-    ], 'get room essence messages failed');
+    // 与 getRoomMessages 同一套形态记忆（见 ROOM_MSG_SHAPES）：进房时它与首屏消息**并行**发出，
+    // 若每次都从 num 开始串行试三种形态，会白占一轮网络、拖慢并行的消息请求。
+    const pref = roomMsgShapePref.get(url) || 'num';
+    const shapes = [pref, ...ROOM_MSG_SHAPES.filter((s) => s !== pref)];
+    const attempts = shapes.map((shape) => (
+      shape === 'str'
+        ? { url, payload: { channelId: cid, serverId: sid, nextTime, limit }, label: 'essence str' }
+        : shape === 'mod'
+          ? { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, modern: true, label: 'essence mod' }
+          : { url, payload: { channelId: safeNumber(cid), serverId: safeNumber(sid), nextTime, limit }, label: 'essence num' }
+    ));
+    const res: any = await tryPocketPost(attempts, 'get room essence messages failed');
+    const shape = String(res?._request?.label || '').split(' ')[1];
+    if (shape === 'num' || shape === 'str' || shape === 'mod') roomMsgShapePref.set(url, shape);
+    return res;
   },
 
   /** 解析房间信息（大/小房间通用）：
@@ -885,6 +1012,9 @@ export const pocketApi = {
    *  serverId 必须传入（成员数据里有），否则无法走塞纳河兜底。 */
   async getRoomMeta(channelId: string | number, fallbackChannelId?: string | number, serverId?: string | number) {
     const cid = String(channelId);
+    /** 进房耗时诊断（tag room）：这条与首屏消息并行，看它是不是反而成了「背景迟迟不出」的那个 */
+    const metaAt = Date.now();
+    let usesSeine = false;
 // 传入 serverId 为空时（成员数据缺 serverId）自动解析，否则无法走塞纳河兜底 → name/bg 全空。
     // 复刻 getRoomMessages 的 v2.4.2 逻辑：resolveServerId 从 room/info 的 content.serverId 提取并写回 store。
     let resolvedSid = serverId;
@@ -929,6 +1059,7 @@ export const pocketApi = {
     // 兜底补位（对齐桌面）：房间有名字但缺背景 → 塞纳河 server/detail 的 channelInfoList/chatServerInfo 补背景
     if ((!meta.bg || (!meta.name && !meta.bg)) && resolvedSid !== undefined && resolvedSid !== null && String(resolvedSid) !== '' && String(resolvedSid) !== '0') {
       try {
+        usesSeine = true;
         const res = await this.getSeineServerDetail(Number(resolvedSid)).catch(() => null);
         const content = (res as any)?.content || (res as any)?.data || {};
         const list = Array.isArray(content.channelInfoList) ? content.channelInfoList : [];
@@ -949,6 +1080,11 @@ export const pocketApi = {
       const fb = await tryRoomInfo(String(fallbackChannelId)).catch(() => ({ name: '', bg: '' }));
 if (fb.bg) meta = { name: meta.name || fb.name, bg: fb.bg };
     }
+    logInfo(
+      `[room.net] 房间元数据 ${Date.now() - metaAt}ms ch=${cid}`
+      + ` name=${meta.name ? 1 : 0} bg=${meta.bg ? 1 : 0} 塞纳河兜底=${usesSeine ? 1 : 0}`,
+      'room',
+    );
     return meta;
   },
 

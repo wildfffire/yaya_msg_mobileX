@@ -3,7 +3,8 @@
  *
  * PiliPlus 的「我的」页是个人中心：右上角放设置齿轮图标，点进去才是分门别类的设置列表。
  * 本页对应地（2026-11-11 改版）：
- *  - 右上角两个**纯图标**入口：账号管理（AccountScreen）在左、设置（SettingsDetailScreen）在右，无文字；
+ *  - 右上角**纯图标**入口：深浅色切换 + 设置（SettingsDetailScreen），无文字
+ *    （2026-11-12 按用户要求删掉「账号管理」图标入口，账号中心统一从顶部的账号头像进）；
  *  - 顶部是账号头像 / 用户名 / 等级（点头像进账号中心），不展示无官方接口的数字；
  *  - 稍后再看 / 观看历史改为贴边横滑卡区，由设置里的两个开关控制，默认关；
  *  - 工具与成员数据板块保留；应用图标、版本号、网页端入口、仓库地址与清除缓存移到设置最后一项「关于」。
@@ -159,7 +160,8 @@ export default function MyScreen() {
   return (
     <>
       <View style={[styles.container, { backgroundColor: usePageBackground() }]}>
-        {/* 2026-11-09：账号管理在左、设置放它右边，两个都只显示图标 */}
+        {/* 2026-11-12：用户要求删掉右上角的「账号管理」入口（点头像仍进账号中心）——
+            这里只留深浅色切换与设置齿轮 */}
         <ScreenHeader
           title={t('我的')}
           hideBack
@@ -180,19 +182,10 @@ export default function MyScreen() {
                 accessibilityLabel={`${t('主题')}：${settings.theme === 'light' ? t('浅色') : settings.theme === 'dark' ? t('深色') : t('跟随系统')}`}
               >
                 <MaterialCommunityIcons
-                  name={settings.theme === 'light' ? 'white-balance-sunny' : settings.theme === 'dark' ? 'weather-night' : 'theme-light-dark'}
+                  name={settings.theme === 'light' ? 'weather-sunny' : settings.theme === 'dark' ? 'weather-night' : 'theme-light-dark'}
                   size={22}
                   color={palette.label}
                 />
-              </TouchableOpacity>
-              <TouchableOpacity
-                onPress={() => navigation.navigate('AccountScreen')}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                activeOpacity={0.85}
-                accessibilityRole="button"
-                accessibilityLabel={t('进入账号管理')}
-              >
-                <MaterialCommunityIcons name="account-key-outline" size={22} color={palette.label} />
               </TouchableOpacity>
               <TouchableOpacity
                 onPress={() => navigation.navigate('SettingsDetailScreen')}

@@ -731,6 +731,8 @@ export const en: Record<string, string> = {
   '这个成员没有小房间 channelId。': 'This member has no small room channelId.',
   '这个成员缺少大房间 channelId，无法打开房间。': 'This member is missing the main room channelId; cannot open the room.',
   '这个成员缺少小房间 channelId，无法打开小房间。': 'This member is missing the small room channelId; cannot open the small room.',
+  '该成员的小房间未开通': 'This member\'s small room is not available',
+  '点「大房间」查看大房间消息': 'Tap "Main room" to view main room messages',
   '这个条目没有可播放地址，接口也没有返回播放流': 'This item has no playable URL and the API returned no stream',
   '这个链接无法直接打开。': 'This link cannot be opened directly.',
   '退出全屏': 'Exit fullscreen',

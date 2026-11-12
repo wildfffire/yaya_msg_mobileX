@@ -343,7 +343,11 @@ try {
     assert.ok(pollers.includes('thawStaleBusy()'), '后台 Promise 不 settle 时要强制解冻 busy 防重入');
     // ★ WebView 的 JS 在后台被暂停，签名永远回不来 → 后台复用最近一次前台签名
     assert.ok(pocket.includes('PA_CACHE_TTL_MS'), '后台要复用最近签名，请求才发得出去');
-    assert.ok(pocket.includes("AppState.currentState !== 'active'"), '签名复用只在后台生效，前台仍每次现签');
+    assert.ok(/PA_CACHE_TTL_MS = 5 \* 60_000/.test(pocket), '后台复用窗口是 5 分钟');
+    // ★ 2026-11-12 进房提速：前台并发请求（消息 + 元数据 + 精华 + 上麦）共用一次签名
+    assert.ok(pocket.includes('PA_FRONT_REUSE_MS'), '前台并发请求要能在短窗口内复用签名');
+    assert.ok(/PA_FRONT_REUSE_MS = \d{2,4};/.test(pocket), '前台复用窗口必须是毫秒级（不能吃后台的 5 分钟缓存）');
+    assert.ok(pocket.includes('paInflight'), '并发签名要合并成一次（多个请求不各签一次）');
   });
 
   await check('设置页有「通知」分类与面板', () => {

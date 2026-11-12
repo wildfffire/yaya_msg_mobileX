@@ -77,9 +77,27 @@ export function firstTextFrom(objects: any[], paths: string[]) {
 
 /* collectUrls（URL 深扫 + 跳过规则）见文件顶部 re-export，实现已搬到 ./mediaScan.ts */
 
-/** 发送者资料。`_room` 仅保留签名（调用方按位置传房间，历史上的昵称兜底已不在此函数内） */
-export function senderProfile(item: any, _room: Member): SenderProfile {
-  if (!item) return { id: '', name: t('未知用户'), avatar: '' };
+/**
+ * 发送者资料的**原始解析结果**缓存（按消息对象身份，WeakMap 自动释放）。
+ *
+ * 为什么需要（用户 2026-11-12「进入房间的速度比较慢」）：`senderProfile` 是房间页最热的解析函数，
+ * 一条消息在一次进房里会被调用 4~6 次（只看偶像过滤 / 行构建 / chatIms / 未读浮标 / idle 判定），
+ * 每次都要走 20+ 个字段路径再 `deepFindText` 递归深扫整棵 ext —— 100 条首屏消息就是几百次深扫，
+ * 全在主线程上，直接体现为「点进房间到出画面」的卡顿。
+ * 消息对象在列表里引用稳定（`mergeMessages` 只做数组去重、不重建对象），按对象身份缓存即可。
+ *
+ * ⚠️ 缓存里**不含 i18n 兜底文案**（`t()` 的结果跟语言走，切语言后对象引用可能没变），
+ * 所以这里只缓存 `{id, name(原始), avatar}`，兜底文案在 `senderProfile` 里现算。
+ * ⚠️ 纯性能：不参与任何判定，缓存命中与不命中结果逐字一致。
+ */
+type RawSenderProfile = { id: string; name: string; avatar: string };
+const rawSenderProfileCache = new WeakMap<object, RawSenderProfile>();
+
+function rawSenderProfile(item: any): RawSenderProfile {
+  if (item && typeof item === 'object') {
+    const hit = rawSenderProfileCache.get(item);
+    if (hit) return hit;
+  }
   const body = messageBody(item);
   // ⚠️ 只把 extraInfo 的 **user 段**当发送者资料（官方 getChannelBaseParams / 我们 buildChannelExt
   // 写入的都是发送者），不要把整个 ext 混进下面的字段查找 —— ext 里还有 replyInfo（被回复者）。
@@ -139,10 +157,20 @@ export function senderProfile(item: any, _room: Member): SenderProfile {
   ]) || deepFindText(objects, ['senderAvatar', 'avatar', 'headImg', 'headUrl']); // 仅小头像字段，勿深扫 picPath 大图
   const avatar = normalizeUrl(String(extUser.avatar || '').trim() || topAvatar);
 
+  const parsed: RawSenderProfile = { id, name, avatar: avatar || '' };
+  if (item && typeof item === 'object') rawSenderProfileCache.set(item, parsed);
+  return parsed;
+}
+
+/** 发送者资料。`_room` 仅保留签名（调用方按位置传房间，历史上的昵称兜底已不在此函数内） */
+export function senderProfile(item: any, _room: Member): SenderProfile {
+  if (!item) return { id: '', name: t('未知用户'), avatar: '' };
+  const raw = rawSenderProfile(item);
+  // i18n 兜底放在缓存外：切语言后对象引用不变也能拿到当前语言文案
   return {
-    id,
-    name: name || (id ? t('用户 {id}', { id }) : t('未知用户')),
-    avatar: avatar || '',
+    id: raw.id,
+    name: raw.name || (raw.id ? t('用户 {id}', { id: raw.id }) : t('未知用户')),
+    avatar: raw.avatar,
   };
 }
 

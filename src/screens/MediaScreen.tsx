@@ -1371,13 +1371,13 @@ export default function MediaScreen() {
   }, []);
 
   /**
-   * 面板内列表的**确定**最大高度（用户 2026-11-12 截图定位）：
-   * ScrollView 只给 flexShrink 时，父级高度由内容决定 → 列表按内容全高撑开，
-   * 面板被 maxHeight 夹住后内容溢出屏幕被裁 = 「底部空白 + 名单被截断」。
-   * 必须给数值上限，列表才会真正滚动。
+   * ⚠️【横屏底部空白修复 · 用户 2026-11-12 截图定位】
+   * 横屏抽屉是「满高右栏」：面板被 stretch 撑到 100% 高，
+   * 内部列表若用**固定数值 maxHeight**（原来礼物 高-300 / 贡献榜 高-150），
+   * 内容只会长到那个上限就停 → 面板底部（礼物是「去充值鸡腿」下面）留一大片空白。
+   * 现改为横屏给列表 `flex:1`（见 giftGridLandscape / rankListLandscape）吃满剩余高度，
+   * 面板底部固定行（数量 + 送出 + 充值）始终贴底，不再有空白。
    */
-  const panelRankListH = Math.max(180, Math.round(screen.height) - 150);
-  const panelGiftListH = Math.max(140, Math.round(screen.height) - 300);
 
   /**
    * 「…」面板里的功能项（用户 2026-11-12 澄清）：
@@ -1432,6 +1432,9 @@ export default function MediaScreen() {
                 {/* 黑白实心抽屉（用户 2026-11-12）：与贡献榜同一套深色面板，
                     横屏贴右侧并吃满高度（原来没套 landscape 布局 → 面板挤在左下半屏）。 */}
                 <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
+                  {/* 点左侧画面（竖屏则是面板上方的空白）关闭（用户 2026-11-12）：
+                      独立兄弟节点、排在面板之前 —— 包住面板会与内部 ScrollView 抢手势（一滑就关）。 */}
+                  <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setGiftVisible(false)} />
                   <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
                     {/* 与弹幕列表同一套头（用户 2026-11-12）：handle + 图标标题 + 关闭 × */}
                     <DarkSheetHandle show={!isPlayerLandscape} />
@@ -1445,10 +1448,7 @@ export default function MediaScreen() {
                       <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{giftStatus}</Text>
                     ) : null}
                     <ScrollView
-                      style={[
-                        styles.giftGrid,
-                        isPlayerLandscape ? [styles.giftGridLandscape, { maxHeight: panelGiftListH }] : null,
-                      ]}
+                      style={[styles.giftGrid, isPlayerLandscape ? styles.giftGridLandscape : null]}
                       showsVerticalScrollIndicator={false}
                     >
                       <View style={styles.giftGridInner}>
@@ -1505,6 +1505,9 @@ export default function MediaScreen() {
               <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
                 {/* 横屏贴右 + 实心黑底（与弹幕列表同风格，用户 2026-11-09） */}
                 <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
+                  {/* 点左侧画面（竖屏则是面板上方的空白）关闭（用户 2026-11-12）：
+                      独立兄弟节点、排在面板之前 —— 不能包住面板（会与内部滚动列表抢手势）。 */}
+                  <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setRankVisible(false)} />
                   <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
                     <DarkSheetHandle show={!isPlayerLandscape} />
                     <DarkSheetHeader
@@ -1517,10 +1520,7 @@ export default function MediaScreen() {
                       <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{rankStatus}</Text>
                     ) : null}
                     <ScrollView
-                      style={[
-                        styles.rankList,
-                        isPlayerLandscape ? [styles.rankListLandscape, { maxHeight: panelRankListH }] : null,
-                      ]}
+                      style={[styles.rankList, isPlayerLandscape ? styles.rankListLandscape : null]}
                       showsVerticalScrollIndicator={false}
                     >
                       {rankRows.map((row, index) => (
@@ -2069,13 +2069,11 @@ const styles = StyleSheet.create({
    */
   giftPanel: { maxHeight: '88%', flexShrink: 1, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 14, paddingBottom: 14 },
   /**
-   * 横屏：底部抽屉可用高度只有 ~400dp 的 82% ≈ 330dp，再叠加内部固定 maxHeight 的
-   * 滚动区（360/430）会把「送出 / 去充值」挤出屏幕（RN 默认 flexShrink:0，不会自动让位）。
-   * 放宽面板上限 + 配合内部滚动区收窄（见 giftGridLandscape / rankListLandscape）。
+   * 横屏：贡献榜/礼物面板贴右整列（与弹幕列表同一套抽屉，用户 2026-11-09）。
+   * 抽屉高度由底板 `alignItems: stretch` 撑到满高（maxHeight 100% 只是兜底），
+   * 因此内部滚动区用 flexGrow 吃满剩余高度，底部固定行始终贴底（见 giftGridLandscape）。
    */
-  /** 横屏：贡献榜/礼物面板贴右整列（与弹幕列表同一套抽屉，用户 2026-11-09） */
   giftPanelLandscape: {
-    /** 高度按内容自适应（去掉 height:'100%'）——否则榜单只有几条时底部留一大片空白 */
     maxHeight: '100%', width: 420, maxWidth: '92%', flexShrink: 0,
     borderTopRightRadius: 0, borderBottomRightRadius: 0,
     borderBottomLeftRadius: 20,
@@ -2085,8 +2083,12 @@ const styles = StyleSheet.create({
   giftStatus: { fontSize: 12, marginBottom: 10 },
   giftTip: { fontSize: 11, marginBottom: 6, textAlign: 'center', fontWeight: '600' },
   giftGrid: { maxHeight: 360, flexShrink: 1 },
-  /** 横屏：面板高度已定（100%），列表 flexGrow 吃满剩余空间 —— 固定 maxHeight 会只显示半屏 */
-  giftGridLandscape: { flexShrink: 1 },
+  /**
+   * 横屏：抽屉是满高右栏 → 礼物宫格**吃满剩余高度**（flexGrow），底部「数量 + 送出 + 去充值」
+   * 始终贴底。原来只给 flexShrink，宫格长到固定 maxHeight 就停，面板底部留一大片空白
+   * （用户 2026-11-12 截图：礼物面板「去充值鸡腿」下面空了一大块）。
+   */
+  giftGridLandscape: { flexGrow: 1, flexShrink: 1, maxHeight: '100%' },
   giftGridInner: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   giftItem: { width: '31%', padding: 8, borderRadius: radiiAlias.input, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth },
   giftItemActive: {},
@@ -2100,8 +2102,8 @@ const styles = StyleSheet.create({
   rechargeBtn: { marginTop: 10, alignItems: 'center', paddingVertical: 10 },
   rechargeText: { fontSize: 13, fontWeight: '800' },
   rankList: { maxHeight: 430, flexShrink: 1 },
-  /** 横屏：contrib 列表吃满剩余高度（固定 maxHeight 会只显示半屏） */
-  rankListLandscape: { flexShrink: 1 },
+  /** 横屏：与礼物宫格同一口径 —— 榜单吃满剩余高度，面板底部不再留空白 */
+  rankListLandscape: { flexGrow: 1, flexShrink: 1, maxHeight: '100%' },
   rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth },
   rankNo: { width: 32, fontSize: 15, fontWeight: '900' },
   rankAvatar: { width: 38, height: 38, borderRadius: 20, marginRight: 10 },

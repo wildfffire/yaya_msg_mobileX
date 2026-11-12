@@ -33,7 +33,8 @@ import { rememberOwnReplyQuote, type RoomReplyTarget } from '../utils/roomReply'
 import { flushRoomUnreadPersist, useRoomUnreadStore } from '../services/roomUnread';
 // 三条计数通道（实时 / 5s 通知轮询 / 30s 指纹）共用同一份消息 id 总账
 import { claimCountId, markCountConsumed } from '../services/roomCountLedger';
-import { messageId } from '../utils/roomMessageCursor';
+// isDetailFromSide：识别「小房间请求回退到大房间频道」的串味数据（三处：首屏/上拉/静默刷新）
+import { isDetailFromSide, messageId } from '../utils/roomMessageCursor';
 import { fetchMemberRadioUrl } from '../services/radio';
 import { checkMaskWords } from '../services/maskWords';
 import { usePalette } from '../theme';
@@ -144,6 +145,8 @@ import { enqueueDownload } from '../services/downloads';
 import { giftImage, giftName, normalizeGiftList } from '../utils/gift';
 import { memberSearchText } from '../utils/members';
 import { getBgDisplayUri, ensureBgCached } from '../services/roomBgCache';
+// 房间元数据（房间名/背景原图地址）跨启动缓存：冷启动首进房也能第一帧显示背景（用户 2026-11-12 进房提速）
+import { getRoomMetaCached, putRoomMetaCache } from '../services/roomMetaCache';
 import { previewTextOf, useRoomPreviewTextStore } from '../services/roomPreviewText';
 import { resolveLastSeenTarget } from '../utils/roomLastSeen';
 // 房间列表排序（用户 2026-11-09）：置顶 → 新消息在上（可关）→ 自定义/按队伍/按字母
@@ -339,6 +342,27 @@ function cachedRoomMessages(sideKey: string): any[] | null {
   return entry.msgs;
 }
 
+/**
+ * 丢弃某一侧的进房快照（分侧键）。
+ *
+ * 用途（用户 2026-11-12「大房间和小房间串了」）：小房间请求被服务端回退到大房间频道时，
+ * 缓存里可能已经存着「被当成小房间」的大房间消息 —— 必须就地作废，
+ * 否则下次进小房间仍会先铺一屏大房间内容（缓存优先于网络渲染）。
+ */
+function forgetRoomMessages(sideKey: string) {
+  if (!sideKey) return;
+  roomMsgMemCache.delete(sideKey);
+}
+
+/**
+ * 已确认「服务端不可用」的分侧键（小房间未开通/已关闭）。
+ *
+ * 这些侧的快照缓存一律**不读**：缓存里可能是上一版写进来的串味数据（大房间消息被当成
+ * 小房间首屏存下来），读它就会先铺一屏大房间内容再被网络结果清掉 —— 用户看到的仍是「串了」。
+ * 该侧之后只要成功拉回**本侧**数据，就把它从集合里移除（成员开通小房间后自动恢复）。
+ */
+const roomSideUnavailable = new Set<string>();
+
 export default function FollowedRoomsScreen() {
   const palette = usePalette();
   const resolvedTheme = useResolvedTheme();
@@ -464,6 +488,17 @@ const route = useRoute<any>();
   // 进新房间的第一帧立刻置 true，新消息 setRoomMessages 后置 false → 彻底消除旧房间内容闪一帧。
   const [followedError, setFollowedError] = useState('');
   const [roomMsgError, setRoomMsgError] = useState('');
+  /**
+   * 该成员的小房间在服务端不可用（未开通/已关闭/无权限）。
+   *
+   * 判据不是「请求报错」，而是**详情回退到了大房间频道**（见 openRoom 的串味拦截）：
+   * 小房间请求失败时 `getRoomMessages` 会回退 fallbackChannelId 并成功返回大房间消息，
+   * 以前这批数据会被当成小房间内容渲染（用户 2026-11-12「大房间和小房间串了」）。
+   * 现在置 true = 本侧没有自己的数据，消息区显示明确提示，且不参与 idle 判定。
+   */
+  const [roomSideClosed, setRoomSideClosed] = useState(false);
+  /** 串味诊断日志节流键（`房间id#侧`）：静默刷新 5s 一轮，同一侧只打一条 */
+  const sideClosedLogRef = useRef('');
   const [searchQuery, setSearchQuery] = useState('');
   const [searchOpen, setSearchOpen] = useState(false);
   /**
@@ -575,6 +610,11 @@ const route = useRoute<any>();
   // 房间内展示：房间名（channelInfo.channelName）+ 背景图（channelInfo.bgImg）
   const [roomMeta, setRoomMeta] = useState<{ name: string; bg: string }>({ name: '', bg: '' });
   const roomMetaCache = useRef<Record<string, { name: string; bg: string }>>({});
+  /**
+   * 在途的房间元数据请求（channelId 集合）：进房时元数据与消息**并行**发起，
+   * 同房间内切大/小侧、切群聊视图会再次走到 openRoom，这里防重复请求。
+   */
+  const roomMetaInflightRef = useRef<Set<string>>(new Set());
   /**
    * 房间背景双层交叉淡入：实现已抽到 ./room/useRoomBackground.ts
    *（那里的注释记录了「同图不动 opacity」与「A→B→A 死锁」两个历史坑）。
@@ -1975,6 +2015,15 @@ const route = useRoute<any>();
         fetchAll: false,
         fallbackChannelId: side === 'small' ? String((room as any).channelId || '') : undefined,
       });
+      /**
+       * 串味拦截（同首屏/上拉）：小房间不可用时这里拿回的是**大房间**的房主发言。
+       * 不拦的话会被记成「小房间采样」→「7 天内偶像无消息」判定与房主发言键集合全都串侧
+       *（真机日志里的 `采样小=36` 就可能来自回退数据）。
+       */
+      if (!isDetailFromSide((res as any)?._request?.payload?.channelId, channelId)) {
+        logWarn(`[room] 房主采样：小房间详情回退到大房间（本侧=${channelId}），不记采样`, 'room');
+        return;
+      }
       const list = unwrapList(res, ['content.messageList', 'content.message', 'content.messages', 'content.list', 'data.messageList', 'data.message', 'messageList', 'message', 'messages', 'list']);
       const sorted = sortMessagesNewestFirst(list.filter(Boolean));
       let latest = 0;
@@ -2098,6 +2147,8 @@ const route = useRoute<any>();
         setRoomSendHint('');
       }
     }
+    // 切房/切侧先清「小房间不可用」标记：由本次请求的实际命中频道重新判定（见下方串味拦截）
+    setRoomSideClosed(false);
     setRoomSearchQuery('');
     setPlayingMedia(null);
     /**
@@ -2122,7 +2173,8 @@ const route = useRoute<any>();
          * 再叠加「只看偶像 0 条 → 自动展开群聊」，小房间彻底被大房间内容取代。
          * 现在：有该侧缓存先秒开（确定同侧、不会串），没有就清空进 loading。
          */
-        const cached = cachedRoomMessages(sideKey);
+        // ⚠️ 已确认不可用的一侧不读缓存（里面可能是串味数据，见 roomSideUnavailable）
+        const cached = roomSideUnavailable.has(sideKey) ? null : cachedRoomMessages(sideKey);
         if (cached && cached.length) {
           setRoomMessages(cached);
           setRoomLoadedOnce(true);
@@ -2136,7 +2188,7 @@ const route = useRoute<any>();
       // 同侧切换不设 loading/roomLoadedOnce=false：
       // 否则切换粉丝/成员发言时 loading 态会让消息区闪转圈、整段请求期间卡住（用户实测切换慢）。
     } else if (channelChanged) {
-      const cached = cachedRoomMessages(sideKey);
+      const cached = roomSideUnavailable.has(sideKey) ? null : cachedRoomMessages(sideKey);
       if (cached && cached.length) {
         setRoomMessages(cached);
         setRoomLoadedOnce(true);
@@ -2158,6 +2210,52 @@ const route = useRoute<any>();
     refreshingRef.current = false;
     setRoomMode(nextMode);
     setShowFanMessages(wantFans);
+    /**
+     * ★ 进房并行化（用户 2026-11-12「进入房间的速度比较慢」）：
+     * 房间元数据（名字/背景）与上麦扫描**不再等首屏消息返回后才发起**。
+     * 旧链路是 `await getRoomMessages` 成功之后才 `.then(getRoomMeta)` ——
+     * 冷启动第一次进房要连等「消息 RTT + 元数据 RTT」（小房间的 room/info 还会串塞纳河
+     * 兜底，最坏 2~3 个串行请求）才看到背景图，期间背景区一片空白。
+     * 现在两者与消息请求同时起步，背景/标题与消息一起到达。
+     *
+     * 元数据来源优先级：本次会话内存缓存 → 跨启动持久化缓存（services/roomMetaCache）
+     * → 网络。命中缓存 = 第一帧就有房间名 + 本地背景图（图文件由 roomBgCache 落盘）。
+     */
+    const cachedMeta = roomMetaCache.current[channelId] || getRoomMetaCached(channelId);
+    if (cachedMeta && (cachedMeta.name || cachedMeta.bg)) {
+      roomMetaCache.current[channelId] = cachedMeta;
+      setRoomMeta({ ...cachedMeta, bg: getBgDisplayUri(cachedMeta.bg) });
+      if (cachedMeta.bg) ensureBgCached(cachedMeta.bg); // 后台补齐/校验本地副本
+    } else if (!roomMetaInflightRef.current.has(channelId)) {
+      // 无缓存（或上次只拿到空值）：立刻发起，与消息请求并行；同一 channelId 不重复发
+      if (Object.keys(roomMetaCache.current).length > 80) roomMetaCache.current = {};
+      roomMetaInflightRef.current.add(channelId);
+      // 小房间 room/info 服务端 2001 无权限（实测）→ getRoomMeta 内部回退塞纳河 server/detail
+      pocketApi.getRoomMeta(channelId, nextMode === 'small' ? room.channelId : undefined, room.serverId)
+        .then((meta) => {
+          putRoomMetaCache(channelId, meta);
+          // Y22: 期间已切房（seq 过期或 channelId 变化）则丢弃，避免旧房间标题/背景覆盖
+          if (openSeq !== roomSeqRef.current || activeChannelRef.current !== channelId) return;
+          if (meta.name || meta.bg) roomMetaCache.current[channelId] = meta;
+          setRoomMeta({ ...meta, bg: getBgDisplayUri(meta.bg) });
+          if (meta.bg) ensureBgCached(meta.bg); // 后台落盘，下次进房间直接本地显示
+        })
+        .catch(() => undefined)
+        .finally(() => { roomMetaInflightRef.current.delete(channelId); });
+    }
+    // 上麦状态检测（驱动房间内上麦按钮；单成员扫描不影响其它成员）：同样与消息并行
+    const ocChannel = roomChannelId(room, nextMode);
+    if (ocChannel) {
+      useOnMicStore.getState().scan([{
+        memberId: String(room.id || ''),
+        name: String(room.ownerName || room.id || ''),
+        channelId: ocChannel,
+        serverId: String(room.serverId || ''),
+        smallChannelId: String(nextMode === 'small' ? (room.yklzId || '') : (room.channelId || '')),
+      }]);
+    }
+    /** 同步准备阶段耗时（点击 → 所有 state/store 就位，即进房那一帧提交之前） */
+    const prepMs = Date.now() - roomOpenStart;
     try {
       /**
        * ⚠️ 这两件事**并行**（用户反馈「进入房间很慢」）：
@@ -2191,6 +2289,38 @@ const route = useRoute<any>();
       // Y22: 进房竞态——用户已切到别的房间/模式，丢弃慢响应，避免旧房间消息覆盖新房间
       if (openSeq !== roomSeqRef.current) return;
       /**
+       * ★ 大／小房间串味拦截（用户 2026-11-12：「陈琳的小房间是不是关了，现在大房间和小房间串了」）。
+       *
+       * 小房间（yklzId）在服务端没有权限 / 已关闭时（实测 2001），`getRoomMessages` 会按
+       * attempts 顺序**回退到 fallbackChannelId（= 同成员的大房间频道）并成功返回**；
+       * 而消息体里根本没有 channelId 字段 → 大房间的聊天记录被当成小房间内容渲染。
+       * 这就是「大小房间串了」：小房间点开是大房间的聊天记录。
+       *
+       * `tryPocketPost` 把实际命中的 payload 放在 `_request.payload.channelId`，比对即可识别
+       * （与未读精确计数/服务端房主表同一判据，见 utils/roomMessageCursor.isDetailFromSide）。
+       *
+       * 命中回退时：**不渲染、不写分侧缓存、不推进分页游标、不记房主采样**，
+       * 并标记「本侧不可用」交给消息区提示 —— 且**绝不走 1s/3s/8s 自动重试**
+       *（重试只会一遍遍拿回大房间数据）。
+       */
+      const usedChannelId = String((res as any)?._request?.payload?.channelId ?? '');
+      if (!isDetailFromSide(usedChannelId, channelId)) {
+        setRoomMessages([]);
+        setRoomNextTime(0);
+        setHasMoreMessages(false);
+        setRoomLoadedOnce(true);
+        setRoomMsgError('');
+        roomMsgRetryRef.current = 0;
+        roomSideUnavailable.add(sideKey);
+        forgetRoomMessages(sideKey);
+        setRoomSideClosed(true);
+        logWarn(
+          `[room] 小房间不可用：详情回退到大房间 ch=${usedChannelId}（本侧=${channelId}）→ 不渲染、不缓存、不重试`,
+          'room',
+        );
+        return;
+      }
+      /**
        * 空结果保护（用户 2026-09-30：「房间也容易刷没消息」）。
        *
        * 接口返回 200 但解析出 0 条（字段形态变化 / 服务端限流 / 频道刚建）时，
@@ -2211,6 +2341,8 @@ const route = useRoute<any>();
       } else {
         setRoomMessages(sorted);
       }
+      // 本次确实拿到了**本侧**频道的数据 → 该侧恢复正常（成员后来开通小房间能自动恢复）
+      roomSideUnavailable.delete(sideKey);
       // ★ 进房秒开缓存：成功拉到的首屏写**分侧**内存缓存，下次进同一侧先渲染它（见 roomMsgMemCache）
       if (!keepPrev && sorted.length) rememberRoomMessages(sideKey, sorted);
       /**
@@ -2254,39 +2386,26 @@ const route = useRoute<any>();
         setRoomNextTime(nextTime);
         setHasMoreMessages(nextTime > 0 && list.length > 0);
       }
-      // 房间名 + 背景图：room/info -> channelInfo.channelName / channelInfo.bgImg（按 channelId 缓存，异步拉取不阻塞消息）
-      const cachedMeta = roomMetaCache.current[channelId];
-      if (cachedMeta !== undefined) {
-        // 背景优先走本地缓存（瞬时显示，避免二次进房间重新联网/解码跳变）
-        setRoomMeta({ ...cachedMeta, bg: getBgDisplayUri(cachedMeta.bg) });
-        if (cachedMeta.bg) ensureBgCached(cachedMeta.bg); // 后台补齐/校验本地副本
-      } else {
-        // 缓存上界：反复刷房间时 channelId 会一直累积（每个成员大+小两个键）——
-        // 这是房间页唯一无界增长的容器，超限就整体重置（代价只是下次进房重新拉一次元数据）
-        if (Object.keys(roomMetaCache.current).length > 80) roomMetaCache.current = {};
-        roomMetaCache.current[channelId] = { name: '', bg: '' };
-        // 小房间 room/info 服务端 2001 无权限（实测）→ 塞纳河 server/detail 拿 channelInfoList 房间名 + 背景墙图
-        pocketApi.getRoomMeta(channelId, nextMode === 'small' ? room.channelId : undefined, room.serverId)
-          .then((meta) => {
-            // Y22: 期间已切房（seq 过期或 channelId 变化）则丢弃，避免旧房间标题/背景覆盖
-            if (openSeq !== roomSeqRef.current || activeChannelRef.current !== channelId) return;
-            roomMetaCache.current[channelId] = meta;
-            setRoomMeta({ ...meta, bg: getBgDisplayUri(meta.bg) });
-            if (meta.bg) ensureBgCached(meta.bg); // 后台落盘，下次进房间直接本地显示
-          })
-          .catch(() => { roomMetaCache.current[channelId] = { name: '', bg: '' }; });
-      }
-      // 进入房间后立即检测该成员上麦状态（驱动房间内上麦按钮；单成员扫描不影响其它成员）
-      const ocChannel = roomChannelId(room, nextMode);
-      if (ocChannel) {
-        useOnMicStore.getState().scan([{
-          memberId: String(room.id || ''),
-          name: String(room.ownerName || room.id || ''),
-          channelId: ocChannel,
-          serverId: String(room.serverId || ''),
-          smallChannelId: String(nextMode === 'small' ? (room.yklzId || '') : (room.channelId || '')),
-        }]);
-      }
+      /**
+       * 房间名 + 背景图 + 上麦扫描：已在进房**同步阶段**发起（见上方「进房并行化」），
+       * 与消息请求并行、不再串行等消息返回 —— 这里不再重复请求。
+       */
+      /**
+       * 进房分段耗时（用户 2026-11-12「进入房间的速度比较慢」）：
+       * 「点击 → 首屏数据到 → 首帧渲染完成」三段分开打，真机 logcat（tag room）能直接看出
+       * 慢在网络（消息 RTT）还是渲染（数据到了却迟迟出不了画面）。
+       */
+      const msgDoneMs = Date.now() - roomOpenStart;
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          if (openSeq !== roomSeqRef.current) return;
+          const nowMs = Date.now() - roomOpenStart;
+          logInfo(
+            `[room] 进房耗时 点击→首帧=${nowMs}ms（准备=${prepMs}ms 消息=${msgDoneMs}ms ${sorted.length}条 渲染=${nowMs - msgDoneMs}ms）`,
+            'room',
+          );
+        });
+      });
     } catch (error) {
       /**
        * Y22 竞态修复（补齐失败路径）：成功路径已有 `openSeq !== roomSeqRef.current` 守卫，
@@ -2405,6 +2524,14 @@ const route = useRoute<any>();
         fallbackChannelId: roomMode === 'small' ? selectedRoom.channelId : undefined,
       });
       if (openSeq !== roomSeqRef.current) return; // 已切换房间，丢弃慢响应
+      /**
+       * 串味拦截（同首屏）：小房间回退到大房间频道时返回的是大房间历史，
+       * 合并进小房间列表就是「大小房间串了」。丢弃本页，也不推进分页游标。
+       */
+      if (!isDetailFromSide((res as any)?._request?.payload?.channelId, channelId)) {
+        logWarn(`[room] 上拉：小房间详情回退到大房间（本侧=${channelId}），丢弃本页`, 'room');
+        return;
+      }
       const list = unwrapList(res, ['content.messageList', 'content.message', 'content.messages', 'content.list', 'data.messageList', 'data.message', 'messageList', 'message', 'messages', 'list']);
       const nextTime = getNextTime(res, list);
       setRoomMessages((prev) => {
@@ -2460,6 +2587,20 @@ const route = useRoute<any>();
         fallbackChannelId: roomMode === 'small' ? selectedRoom.channelId : undefined,
       });
       if (openSeq !== roomSeqRef.current) return; // 已切换房间，丢弃慢响应
+      /**
+       * 串味拦截（同首屏/上拉）：小房间不可用时服务端会把大房间频道的数据返回过来。
+       * 静默刷新每 5s 一次 → 不拦住就会把大房间消息不断并进小房间列表。
+       * 日志按「房间#侧」节流（否则 5s 一条刷屏）。
+       */
+      if (!isDetailFromSide((res as any)?._request?.payload?.channelId, channelId)) {
+        setRoomSideClosed(true);
+        const logKey = `${String(selectedRoom.id || '')}#${roomMode}`;
+        if (sideClosedLogRef.current !== logKey) {
+          sideClosedLogRef.current = logKey;
+          logWarn(`[room] 静默刷新：小房间详情回退到大房间（本侧=${channelId}），丢弃本批`, 'room');
+        }
+        return;
+      }
       /**
        * 静默刷新**成功** = 消息链路已恢复 → 清掉「消息加载失败」浮层。
        * ⚠️ 以前 roomMsgError 只在「进房首屏成功」时清，轮询路径永不清：
@@ -3301,8 +3442,15 @@ const route = useRoute<any>();
      *     配合 onScrollToIndexFailed 的「迭代逼近」逐步把目标行逼进渲染窗口。
      * 窗口由 1.4s 放宽到 ~3.4s：真机日志里首屏 50 条 + 图片解码常要 2s 以上，
      * 旧窗口在第 4 轮就放弃，正是「偶尔定位失效」的来源。
+     *
+     * ★ `latest`（无未读 → 回最新）只需要 2 轮（用户 2026-11-12 真机日志）：
+     *   inverted 列表的「最新端」就是 offset 0，首屏数据一换列表本来就贴在这一端；
+     *   旧实现照样跑满 8 轮（日志里进房后 9 秒内反复 scrollToOffset(0) + 每轮一条日志），
+     *   纯属无谓的原生滚动调用与布局开销。保留 2 轮只为兜住「从上一个房间残留滚动位置」。
      */
-    const delays = [0, 120, 300, 600, 1000, 1600, 2400, 3400];
+    const delays = mode === 'latest'
+      ? [0, 120]
+      : [0, 120, 300, 600, 1000, 1600, 2400, 3400];
     const attempt = (n: number) => {
       const run = posRunRef.current;
       if (run.cancelled || run.key !== key || posUserScrolledRef.current || n >= delays.length) return;
@@ -3366,6 +3514,9 @@ const route = useRoute<any>();
    */
   const idolIdleNow = useMemo(() => {
     if (!selectedRoom || !roomLoadedOnce || loading) return false;
+    // 本侧在服务端不可用（小房间关了）：没有自己的数据，不能断言「N 天内偶像无消息」，
+    // 否则会和「小房间未开通」提示同时出现（用户 2026-11-12）
+    if (roomSideClosed) return false;
     if (roomMsgError && roomMessages.length === 0) return false;
     if (roomSearchOpen && !!roomSearchQuery.trim()) return false;
     const nowMs = Date.now();
@@ -3385,7 +3536,7 @@ const route = useRoute<any>();
     }
     // 采样缺失（该侧还没请求过 homeowner）：退回严格房主判定
     return isIdolIdle(roomMessages, (m) => isIdolMessage(m, room, false), getMessageTime, nowMs);
-  }, [selectedRoom, roomLoadedOnce, loading, roomMsgError, roomMessages, roomSearchOpen, roomSearchQuery, ownerSampleBySide, roomMode]);
+  }, [selectedRoom, roomLoadedOnce, loading, roomMsgError, roomMessages, roomSearchOpen, roomSearchQuery, ownerSampleBySide, roomMode, roomSideClosed]);
 
   /**
    * 诊断（用户 2026-10-02「群里明明有偶像发言却提示 7 天无消息」）：
@@ -4699,6 +4850,24 @@ const route = useRoute<any>();
                 <View style={styles.roomSearchEmpty} pointerEvents="none">
                   <MaterialCommunityIcons name="magnify-close" size={26} color={palette.labelTertiary} />
                   <Text style={[styles.roomSearchEmptyText, { color: palette.labelTertiary }]}>{t('没有找到匹配的消息')}</Text>
+                </View>
+              ) : null}
+              {/* ★ 小房间在服务端不可用（未开通 / 已关闭 / 无权限，用户 2026-11-12）：
+                  以前这类房间会被「回退到大房间频道」的数据填满 —— 小房间里显示大房间聊天记录
+                  （用户原话「大房间和小房间串了」）。现在 openRoom 已拦截并标记，
+                  这里只显示明确提示：不给「重试」（重试永远只会拿回大房间数据），
+                  也不参与「N 天内偶像无消息」判定（那会误报）。 */}
+              {!roomSearchOpen && roomMode === 'small' && roomSideClosed ? (
+                <View style={styles.roomSearchEmpty} pointerEvents="none">
+                  <View style={styles.roomIdleCard}>
+                    <MaterialCommunityIcons name="door-closed" size={26} color={IDLE_CARD_FG} />
+                    <Text style={[styles.roomSearchEmptyText, { color: IDLE_CARD_FG }]}>
+                      {t('该成员的小房间未开通')}
+                    </Text>
+                    <Text style={[styles.roomErrorHint, { color: IDLE_CARD_FG_MUTED }]}>
+                      {t('点「大房间」查看大房间消息')}
+                    </Text>
+                  </View>
                 </View>
               ) : null}
               {/* ★ 「{days} 天内偶像无消息」（用户 2026-10-01 口径，大/小房间通用）：

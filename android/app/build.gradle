@@ -143,7 +143,7 @@ android {
         // minSdk 26（Android 8）：兜底兼容 HarmonyOS 2/3/4 全系（基座 Android 8-10）及更老 Android 机型
         minSdkVersion Math.max(rootProject.ext.minSdkVersion as int, 26)
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3000046
+        versionCode 3000047
         versionName "3.0.0"
 
         // ⚠️ 这里**不要**设 ndk { abiFilters … }（2026-11-04 修正）：

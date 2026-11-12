@@ -228,6 +228,17 @@ try {
     assert.ok(!center.includes('rememberSeen(dedupeKey, now);\n  }\n\n  const burstKey'), '不能先记去重再发送');
   });
 
+  await check('★ 大/小房间防串味（用户 2026-11-12）：四个取消息的入口都要校验实际命中频道', () => {
+    const hits = (screen.match(/isDetailFromSide\(/g) || []).length;
+    assert.ok(hits >= 4, `首屏 / 上拉 / 静默刷新 / 房主采样 都要拦（当前只有 ${hits} 处）`);
+    assert.ok(screen.includes('forgetRoomMessages(sideKey)'), '串味命中后要作废该侧快照缓存');
+    assert.ok(screen.includes('setRoomSideClosed(true)'), '要标记本侧不可用（不渲染、不自动重试）');
+    assert.ok(screen.includes("t('该成员的小房间未开通')"), '小房间不可用要显示明确提示');
+    const guardIdx = screen.indexOf('const usedChannelId');
+    const rememberIdx = screen.indexOf('rememberRoomMessages(sideKey, sorted)');
+    assert.ok(guardIdx > 0 && rememberIdx > guardIdx, '串味拦截必须在写分侧消息缓存之前');
+  });
+
   await check('角标：单一数据源 counts + 三条通道共用 id 总账 + 失败不推进基线', () => {
     // 2026-11-10「只要一套数据源」：服务端 unreadCount / 已读地板已退出显示，只认 counts
     assert.ok(screen.includes('(id: string, side: RoomUnreadSide): number => roomUnreadCount(roomUnreadCounts, id, side)'),

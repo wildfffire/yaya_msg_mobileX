@@ -33,6 +33,9 @@ import { NOTICE_URL } from './src/constants';
 import { initDeepLink } from './src/services/deepLink';
 import { startMessagePollers } from './src/services/messagePollers';
 import { initGiftPrices } from './src/services/giftPrices';
+// 进房提速：启动预载房间背景图映射与房间元数据（名字/背景地址）缓存
+import { initRoomBgCache } from './src/services/roomBgCache';
+import { initRoomMetaCache } from './src/services/roomMetaCache';
 import { InAppNoticeBanner } from './src/components/InAppNoticeBanner';
 import { initRuntimeLog, logCrash, logInfo } from './src/utils/runtimeLog';
 import { fetchCoverToFile, normalizeCoverUrl } from './src/utils/coverToFile';
@@ -661,6 +664,15 @@ export default function App() {
     const stopPollers = startMessagePollers();
     // 礼物价格快照：读本地 + 节流同步（无远端地址时零请求）
     initGiftPrices();
+    /**
+     * 进房提速（用户 2026-11-12「进入房间的速度比较慢」）：
+     * 把「房间背景图落盘映射」与「房间名/背景地址缓存」在启动时读进内存镜像。
+     * 不预载时 `getBgDisplayUri` 只能回退网络地址 —— 即使磁盘上已有同一张图，
+     * 冷启动后第一次进房仍会联网重新加载背景（白等一次图片下载）。
+     * 两者都只是读 AsyncStorage，不阻塞开屏，失败静默。
+     */
+    void initRoomBgCache().catch(() => undefined);
+    void initRoomMetaCache().catch(() => undefined);
     /**
      * 软件外通知的两个前提（2026-11-10 真机实证）：
      *   ① 系统通知真的可用：Android 13+ 申请 POST_NOTIFICATIONS；12 及以下系统**不会**弹权限框，

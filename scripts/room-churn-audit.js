@@ -106,9 +106,14 @@ check(`${ROOM}：存在"不在房间却有残留层"的自愈哨兵`, () => {
 });
 
 // 4) 铺满层必须声明 pointerEvents（否则吃触摸 = 卡住）
-check(`${DANMAKU}：铺满层 pointerEvents="none"`, () => {
+//    2026-11-12：飘屏支持点按开资料卡，pointerEvents 改成条件式
+//    （interactive ? 'box-none' : 'none'），所以锁「非交互时必须是 none」这个语义，
+//    不再锁字面量写法 —— 否则可点飘屏一上线这条回归锁就误报。
+check(`${DANMAKU}：铺满层非交互时 pointerEvents="none"`, () => {
   const src = read(DANMAKU);
-  if (!src.includes("pointerEvents=\"none\"")) throw new Error('飘屏层是铺满层，必须声明 pointerEvents="none"');
+  const ok = src.includes("pointerEvents=\"none\"")
+    || /pointerEvents=\{[^}]*\?\s*'box-none'\s*:\s*'none'[^}]*\}/.test(src);
+  if (!ok) throw new Error('飘屏层是铺满层，非交互时必须声明 pointerEvents="none"');
 });
 check(`${ROOM}：消息区错误浮层 pointerEvents="box-none"`, () => {
   const src = read(ROOM);
