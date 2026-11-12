@@ -21,10 +21,11 @@ interface Props {
   label?: string;
 }
 
-const TRACK_W = 46;
-const TRACK_H = 28;
-const BORDER = 1.5;
-const PAD = 3;
+/** 细长胶囊（用户 2026-11-12：弹幕设置里的开关也要和胶囊一致的细长语言） */
+const TRACK_W = 52;
+const TRACK_H = 22;
+const BORDER = 1.2;
+const PAD = 2.5;
 const THUMB = TRACK_H - PAD * 2;
 
 export function SoleSwitch({ value, onValueChange, disabled, label }: Props) {

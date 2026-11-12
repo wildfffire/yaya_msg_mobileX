@@ -21,9 +21,9 @@ import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const memberData = readFileSync(path.join(root, 'src/services/memberData.ts'), 'utf8');
-// 2026-11-09：设置页拆成「我的」(MyScreen) + 分类设置 (SettingsDetailScreen)，
-// 成员数据同步入口随板块留在「我的」页，静态守卫要跟着换文件。
-const myScreen = readFileSync(path.join(root, 'src/screens/MyScreen.tsx'), 'utf8');
+// 2026-11-11：成员数据同步入口按用户要求从「我的」页迁入设置 → 关于，
+// 静态守卫跟着换文件（MyScreen 已不再承载该逻辑）。
+const settingsScreen = readFileSync(path.join(root, 'src/screens/SettingsScreen.tsx'), 'utf8');
 
 let pass = 0;
 const fails = [];
@@ -61,9 +61,9 @@ check('不再调用 getLastMessages 反推 channelId', !memberData.includes('get
 // 注释里会保留「当年为什么错」的说明（提到 serverToChannel），所以只断言**不再有声明**
 check('不再声明 serverToChannel 单值映射表', !memberData.includes('const serverToChannel'));
 
-// 4) UI 侧如实反馈
-check('「我的」页按 updated 判失败', myScreen.includes('if (!res?.updated)'));
-check('「我的」页失败走「更新失败」文案', myScreen.includes("t('更新失败：{msg}（已保留本地数据）'"));
+// 4) UI 侧如实反馈（设置 → 关于 → 成员数据）
+check('「关于」页按 updated 判失败', settingsScreen.includes('if (!res?.updated)'));
+check('「关于」页失败走「更新失败」文案', settingsScreen.includes("t('更新失败：{msg}（已保留本地数据）'"));
 
 if (fails.length) {
   console.log(`\n成员库同步护栏：${pass}/${pass + fails.length} 通过，失败 ${fails.length}`);

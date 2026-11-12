@@ -99,7 +99,8 @@ try {
     assert.ok(!/from ['"].*GlassSurface|<GlassSurface|<BlurView|from ['"]expo-blur/.test(bar));
     assert.match(bar, /useSidebarMetrics\(\)/);
     assert.match(bar, /totalW/);
-    assert.match(bar, /UserProfileSheet/);
+    // 2026-11-11：侧栏头像不再弹资料卡，改为进入账号中心（AccountScreen）
+    assert.match(bar, /onOpenAccount/);
     assert.match(bar, /badge/);
   });
 

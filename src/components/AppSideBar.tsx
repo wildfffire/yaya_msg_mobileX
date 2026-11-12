@@ -6,28 +6,27 @@
  *  - 完全透明、无底板、无阴影、无 BlurView / GlassSurface，只保留一条 hairline 细竖线
  *  - 屏幕左侧窄栏：上方用户头像，左下四个 tab 竖排（主页 / 直播 / 房间 / 我的）
  *  - 选中图标变主题色，房间入口保留未读数字角标
- *  - 点头像打开现有 UserProfileSheet（组件自身的玻璃样式不属于「侧栏本体」）
+ *  - 点头像进入账号中心（AccountScreen；与「我的」页右上账号图标同一个页面）
  *
  * 布局与 MainTabs 的 sceneStyle.paddingLeft 配套：宽度由 useSidebarMetrics() 按屏幕短边算出，
  * 侧栏本体、场景留白、首页网格三处共用同一个真值，避免留白对不齐或卡片换行。
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { Animated, Image, Pressable, StyleSheet, Text, View } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { usePalette } from '../theme';
 import { useI18n } from '../i18n';
-import { useSettingsStore, useUiStore } from '../store';
+import { useSettingsStore } from '../store';
 import { useSafeAreaInsets } from '../hooks/useSafeAreaInsets';
 import { useSidebarMetrics } from '../hooks/useSidebarMode';
 import { POCKET_MEDIA_HEADERS } from '../utils/mediaHeaders';
 import { loadSelfProfile } from '../services/pocketNim/credentials';
 import type { NimSelfProfile } from '../services/pocketNim/types';
-import { UserProfileSheet, type UserProfileTarget } from './UserProfileSheet';
 import type { AppTabBarProps, TabBarItem } from './AppTabBar';
 
 export interface AppSideBarProps extends AppTabBarProps {
-  /** 资料卡「私信」：由导航层决定跳转方式 */
-  onOpenChat?: (target: { id: string; name: string }) => void;
+  /** 头像点击：进入账号中心（由导航层决定跳转方式） */
+  onOpenAccount: () => void;
 }
 
 /** 单个 tab：纯图标 + 可选角标，选中用主题色点亮并轻微弹一下（不铺任何底板） */
@@ -82,7 +81,7 @@ function SideCell({
   );
 }
 
-export function AppSideBar({ items, activeKey, onSelect, onOpenChat }: AppSideBarProps) {
+export function AppSideBar({ items, activeKey, onSelect, onOpenAccount }: AppSideBarProps) {
   const palette = usePalette();
   const { t } = useI18n();
   const insets = useSafeAreaInsets();
@@ -91,7 +90,6 @@ export function AppSideBar({ items, activeKey, onSelect, onOpenChat }: AppSideBa
   const p48Token = useSettingsStore((state) => state.settings.p48Token);
   const [self, setSelf] = useState<NimSelfProfile | null>(null);
   const [avatarFailed, setAvatarFailed] = useState(false);
-  const [profileVisible, setProfileVisible] = useState(false);
 
   // 自身资料：loadSelfProfile 内有模块级缓存 + inflight + 切号自愈；
   // 只在侧栏挂载（或换号）时取一次，不做轮询、不打印头像 URL。
@@ -114,25 +112,6 @@ export function AppSideBar({ items, activeKey, onSelect, onOpenChat }: AppSideBa
     setAvatarFailed(false);
   }, [avatarUri]);
 
-  const target: UserProfileTarget | null = self
-    ? {
-        nick: self.nickName,
-        avatar: self.avatar,
-        userId: self.userId ? String(self.userId) : undefined,
-      }
-    : null;
-
-  const showToast = useUiStore((state) => state.showToast);
-  const openProfile = useCallback(() => {
-    // 未登录时资料卡没有可加载的 id，弹出来只会是一张空卡 —— 直接给出提示
-    if (!self) {
-      showToast(t('请先登录'));
-      return;
-    }
-    setProfileVisible(true);
-  }, [self, showToast, t]);
-  const closeProfile = useCallback(() => setProfileVisible(false), []);
-
   return (
     <View pointerEvents="box-none" style={[styles.outer, { width: totalW }]}>
       {/* 唯一的视觉分区：一条 hairline 细竖线，上下留白，不铺底色 */}
@@ -146,9 +125,9 @@ export function AppSideBar({ items, activeKey, onSelect, onOpenChat }: AppSideBa
 
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={t('我的资料')}
+        accessibilityLabel={t('账号管理')}
         hitSlop={6}
-        onPress={openProfile}
+        onPress={onOpenAccount}
         style={({ pressed }) => [
           styles.avatarWrap,
           { top: insets.top + 4, left: inset, width: contentW },
@@ -177,13 +156,6 @@ export function AppSideBar({ items, activeKey, onSelect, onOpenChat }: AppSideBa
           />
         ))}
       </View>
-
-      <UserProfileSheet
-        visible={profileVisible}
-        target={target}
-        onClose={closeProfile}
-        onOpenChat={onOpenChat}
-      />
     </View>
   );
 }

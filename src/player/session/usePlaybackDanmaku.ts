@@ -26,7 +26,7 @@ export interface PlaybackDanmaku {
   /** 云信数据源（输入条/礼物特效直接消费） */
   barrage: UseLiveBarrageResult;
   /** 直播飘屏 items（云信，出现即上屏） */
-  liveItems: Array<{ key: string; text: string }>;
+  liveItems: Array<{ key: string; text: string; userId?: string; nick?: string; avatar?: string }>;
   /** 直播弹幕列表条目（云信） */
   liveEntries: DanmakuListEntry[];
   /** 直播 HTTP 轮询时间轴（livePollMs>0 时才有值） */
@@ -68,6 +68,10 @@ export function usePlaybackDanmaku({
     () => barrage.items.map((item) => ({
       key: item.id,
       text: item.nick ? `${item.nick}：${item.text}` : item.text,
+      // 飘屏可点进资料卡（用户 2026-11-12）：带上发送者身份
+      userId: item.userId ? String(item.userId) : undefined,
+      nick: item.nick || undefined,
+      avatar: item.avatar || undefined,
     })),
     [barrage.items],
   );

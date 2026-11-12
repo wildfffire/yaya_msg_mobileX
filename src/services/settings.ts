@@ -48,6 +48,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
   yaya_auto_checkin_enabled: false,
   yaya_auto_checkin_last_date: '',
   yaya_auto_checkin_last_user: '',
+  // 「我的」页横滑卡区默认不展示；老存档 loadSettings 的 spread 会自动补 false，无需迁移 marker
+  my_show_watch_later: false,
+  my_show_watch_history: false,
   yaya_trip_show_all: false,
   customBackgroundFile: '',
   customBackgroundUpdatedAt: 0,

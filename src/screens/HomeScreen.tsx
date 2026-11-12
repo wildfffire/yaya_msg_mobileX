@@ -38,6 +38,7 @@ import { Button } from '../components/Button';
 import { Skeleton } from '../components/Skeleton';
 import { FadeInView, ScalePressable } from '../components/Motion';
 import { NetworkImage } from '../components/NetworkImage';
+import LivePulseDot from '../components/LivePulseDot';
 import { useI18n } from '../i18n';
 import { pocketApi } from '../api/pocket48';
 import { normalizeUrl, pickText, unwrapList } from '../utils/data';
@@ -72,7 +73,7 @@ const ICONS: Record<string, string> = {
   Profile: 'account', MemberDynamic: 'star-circle', MemberWeibo: 'web', Trip: 'briefcase',
   VideoLibrary: 'play-box', MusicLibrary: 'music-note', AudioPrograms: 'podcast',
   MeleeRank: 'trophy', Database: 'database', Login: 'key-variant', Download: 'download', Invoice: 'file-document-outline', Settings: 'account-circle-outline',
-  Community: 'forum', OnMic: 'microphone',
+  Community: 'forum', OnMic: 'microphone', Netface: 'account-voice',
 };
 
 const QUICK: NavItem[] = [
@@ -84,13 +85,15 @@ const QUICK: NavItem[] = [
 
 /** 工具：单行横向 chips（翻牌/统计/下载/账号/设置…） */
 const TOOL_CHIPS: NavItem[] = [
+  // 现场互动（用户 2026-11-11：从「我的 → 工具」移到首页工具第一位）
+  { title: '现场互动', desc: '', route: 'NetfaceScreen', icon: ICONS.Netface },
   { title: '翻牌', desc: '', route: 'FlipScreen', icon: ICONS.FlipSend },
   { title: '上麦', desc: '', route: 'OnMicScreen', icon: ICONS.OnMic },
   { title: '统计', desc: '', route: 'AnalysisScreen', icon: ICONS.Analysis },
   // 行程紧跟在统计后：工具条横向滚动，放末尾在手机上要滑才看得见
   { title: '行程', desc: '', route: 'TripScreen', icon: ICONS.Trip },
   { title: '下载', desc: '', route: 'DownloadScreen', icon: ICONS.Download },
-  { title: '账号', desc: '', route: 'LoginScreen', icon: ICONS.Login },
+  { title: '账号', desc: '', route: 'AccountScreen', icon: ICONS.Login },
   { title: '我的', desc: '', route: 'Settings', icon: ICONS.Settings },
   { title: '公演', desc: '', route: 'OpenLiveScreen', icon: ICONS.OpenLive },
   { title: 'B站', desc: '', route: 'BilibiliLiveScreen', icon: ICONS.Bilibili },
@@ -192,7 +195,8 @@ function SectionHeader({ title, action_label, onAction }: { title: string; actio
 }
 
 /**
- * 首页成员直播小卡（一行四张）：封面 + 渐变 + 标题/昵称上浮 + 直播中角标。
+ * 首页成员直播小卡（一行四张）：封面 + 渐变 + 标题/昵称上浮 + 与直播页同款的
+ * 左上类型徽标（电台/视频）+ 右上状态徽标（电台/直播中）。
  * `height` 默认等于宽度（竖屏方格）；横屏会传入被「屏高 1/3」压过的较小高度 → 呈横向宽卡。
  */
 function HomeLiveCell({
@@ -253,8 +257,28 @@ function HomeLiveCell({
           colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.72)']}
           style={styles.homeLiveCellShade}
         />
+        {/* 与 MediaScreen 直播网格完全同款的双徽标：判据只认 liveType===2（电台）。
+            normalizeLiveList 已带 liveType，不需要改数据链路；小卡更窄，徽标整体缩一档。 */}
         <View style={[styles.liveBadge, styles.homeLiveCellBadge]}>
-          <Text style={styles.liveBadgeText}>{t('直播中')}</Text>
+          <MaterialCommunityIcons
+            name={item.liveType === 2 ? 'radio' : 'video'}
+            size={8}
+            color="#FFFFFF"
+          />
+          <Text style={styles.homeLiveCellBadgeText}>{item.liveType === 2 ? t('电台') : t('视频')}</Text>
+        </View>
+        <View style={[styles.liveBadge, styles.homeLiveCellStatusBadge]}>
+          {item.liveType === 2 ? (
+            <>
+              <MaterialCommunityIcons name="radio" size={8} color="#FFFFFF" />
+              <Text style={styles.homeLiveCellBadgeText}>{t('电台')}</Text>
+            </>
+          ) : (
+            <>
+              <LivePulseDot size={6} />
+              <Text style={styles.homeLiveCellBadgeText}>{t('直播中')}</Text>
+            </>
+          )}
         </View>
         <View style={styles.homeLiveCellInfo}>
           <Text style={styles.homeLiveCellTitle} numberOfLines={1}>{item.title}</Text>
@@ -736,7 +760,7 @@ export default function HomeScreen() {
           ) : null}
 
           {!token ? (
-            <ScalePressable style={{ marginBottom: spacing.xl }} onPress={() => handleNav({ title: '', desc: '', route: 'LoginScreen', icon: '' })} pressedScale={0.98}>
+            <ScalePressable style={{ marginBottom: spacing.xl }} onPress={() => handleNav({ title: '', desc: '', route: 'AccountScreen', icon: '' })} pressedScale={0.98}>
               <GlassCard strong padding={14} radius={20} style={{ borderColor: palette.danger }}>
                 <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                   <View style={[styles.loginBadge, { backgroundColor: palette.tintSoft }]}>
@@ -995,7 +1019,6 @@ const styles = StyleSheet.create({
   liveBadge: {
     position: 'absolute',
     top: 8,
-    left: 8,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.55)',
@@ -1004,7 +1027,6 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
     gap: 4,
   },
-  liveBadgeText: { color: '#fff', fontSize: 10, fontWeight: '700' },
   // 成员直播小卡（一行四张）
   homeLiveCell: {
     borderRadius: 12,
@@ -1013,7 +1035,10 @@ const styles = StyleSheet.create({
   homeLiveCellCover: { width: '100%', height: '100%' },
   homeLiveCellFallback: { flex: 1, alignItems: 'center', justifyContent: 'center' },
   homeLiveCellShade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: '62%' },
-  homeLiveCellBadge: { top: 5, left: 5, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 8 },
+  // 左上类型 / 右上状态：不能用同一个 left，否则右上徽标会被 left+right 拉伸成整行
+  homeLiveCellBadge: { top: 5, left: 5, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 8, gap: 2 },
+  homeLiveCellStatusBadge: { top: 5, right: 5, paddingHorizontal: 5, paddingVertical: 2, borderRadius: 8, gap: 2 },
+  homeLiveCellBadgeText: { color: '#FFFFFF', fontSize: 8, fontWeight: '700' },
   homeLiveCellInfo: { position: 'absolute', left: 0, right: 0, bottom: 0, paddingHorizontal: 6, paddingBottom: 5 },
   homeLiveCellTitle: { color: '#FFFFFF', fontSize: 11, fontWeight: '800', lineHeight: 14, textShadowColor: 'rgba(0,0,0,0.65)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },
   homeLiveCellNick: { color: 'rgba(255,255,255,0.85)', fontSize: 9, marginTop: 1, textShadowColor: 'rgba(0,0,0,0.55)', textShadowOffset: { width: 0, height: 1 }, textShadowRadius: 2 },

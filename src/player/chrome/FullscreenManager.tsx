@@ -19,15 +19,19 @@ export function FullscreenManager() {
   // 退全屏：followSystem() 交还系统 —— 不再强制 PORTRAIT_UP，否则每次退全屏都会把
   //         已经跟随系统的全局横屏压回竖屏（改造前「只能竖屏」的主因之一）。
   useEffect(() => {
-    if (fullscreen) {
-      setLiveImmersiveMode(true);
-      lockLandscape();
-    } else {
-      setLiveImmersiveMode(false);
-      followSystem();
-    }
-    return () => setLiveImmersiveMode(false);
+    /**
+     * 用户 2026-11-12：「进入播放器就隐藏设备状态栏」——
+     * 以前只在全屏时调 setImmersive(true)，页面级播放器顶部仍露状态栏。
+     * 现在只要播放器挂载就沉浸；全屏切换只影响方向锁。
+     * ⚠️ 不要在 fullscreen 变化时 cleanup 成 false，否则每次切换状态栏会闪一下。
+     */
+    setLiveImmersiveMode(true);
+    if (fullscreen) lockLandscape();
+    else followSystem();
   }, [fullscreen]);
+
+  /** 播放器卸载（关闭）时恢复系统栏 */
+  useEffect(() => () => setLiveImmersiveMode(false), []);
 
   // PiP 标志：播放中且未全屏（App 切后台自动进系统悬浮窗）。
   // 统一写点：所有视频（原生/Exo/网页内核）的 PiP 身份都从这里下发；

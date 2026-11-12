@@ -138,7 +138,7 @@ export interface PlayerScreenProps {
     /** 带 options 时可省略（条目仅作小面板入口，不直接触发） */
     onPress?: () => void;
   }>;
-  /** 顶栏左上按钮（返回键右侧、标题前）：如公告开关 —— 收起后仍可随时点开（2026-09-26） */
+  /** 顶栏左上按钮（返回键右侧、标题前）：收起后仍可随时点开（2026-09-26） */
   topLeftAction?: {
     icon: string;
     label: string;

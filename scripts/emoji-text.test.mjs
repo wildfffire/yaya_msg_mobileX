@@ -150,7 +150,7 @@ try {
     assert.equal(item.text, replaceEmojiText('[大哭]').repeat(2));
   });
 
-  await check('渲染层收口：飘屏 / 弹幕抽屉 / 弹幕榜 / 公告 / 房间独占字段 / 私信都过替换', () => {
+  await check('渲染层收口：飘屏 / 弹幕抽屉 / 弹幕榜 / 房间独占字段 / 私信都过替换', () => {
     // ⚠️ 用户第二次反馈（2026-09-29）：「房间里还是有表情识别不出来，只显示 [示爱]」。
     // 根因：同一份数据有多条渲染路径，只有走 messageText/parseDanmaku 的那条替换了，
     // 引用卡（replyText）、礼物回复、翻牌答案（answerContent，优先级高于正文）漏了。

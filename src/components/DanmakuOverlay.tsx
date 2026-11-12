@@ -10,7 +10,7 @@
  *       旧弹幕（anim/位置均未变）被 memo 拦截不重渲染，避免整屏 4Hz 全量 reconcile 卡顿。
  */
 import React, { memo, useEffect, useRef, useState } from 'react';
-import { Animated, StyleSheet, useWindowDimensions } from 'react-native';
+import { Animated, Pressable, StyleSheet, Text, useWindowDimensions } from 'react-native';
 import { DanmakuItem } from '../utils/danmaku';
 import { replaceEmojiText } from '../utils/emoji';
 import { useDanmakuSettings } from '../store/danmakuSettings';
@@ -51,6 +51,10 @@ interface ActiveDanmaku {
   text: string;
   lane: number;
   anim: Animated.Value;
+  /** 点击进资料卡用（用户 2026-11-12）：直播飘屏带发送者身份，LRC 无 */
+  userId?: string;
+  nick?: string;
+  avatar?: string;
 }
 
 /** 单条弹幕：memo 后仅在自身入池/出池时渲染，不被父级 4Hz spawn 连带重渲染 */
@@ -60,27 +64,32 @@ const Bullet = memo(function Bullet({
   fontSize: fs,
   anim,
   width: w,
+  onPress,
 }: {
   text: string;
   top: number;
   fontSize: number;
   anim: Animated.Value;
   width: number;
+  onPress?: () => void;
 }) {
   const translateX = anim.interpolate({ inputRange: [0, 1], outputRange: [w, -w * 0.72] });
   return (
-    <Animated.Text
-      style={[
-        styles.bullet,
-        { top, fontSize: fs, transform: [{ translateX }], color: '#ffffff' },
-      ]}
-    >
-      {/* 最后一道防线（用户反馈 2026-09-29：飘屏上仍有 `[示爱]` 这类短码没变成表情）：
-          上游各条链路（LRC / 云信 / barrage.list / 房间飘屏）都应替换过，但来源一旦新增
-          就会漏 —— 在这里再收一次口，任何来源的 `[xx]` 都能显示成表情。
-          替换幂等（emoji 不含方括号），重复调用无副作用。 */}
-      {replaceEmojiText(text)}
-    </Animated.Text>
+    <Animated.View style={[styles.bullet, { top, transform: [{ translateX }] }]}>
+      <Pressable
+        disabled={!onPress}
+        onPress={onPress}
+        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+      >
+        <Text style={{ fontSize: fs, color: '#ffffff', fontWeight: '700', textShadowColor: 'rgba(0,0,0,0.95)', textShadowOffset: { width: 1, height: 1 }, textShadowRadius: 3 }}>
+          {/* 最后一道防线（用户反馈 2026-09-29：飘屏上仍有 `[示爱]` 这类短码没变成表情）：
+              上游各条链路（LRC / 云信 / barrage.list / 房间飘屏）都应替换过，但来源一旦新增
+              就会漏 —— 在这里再收一次口，任何来源的 `[xx]` 都能显示成表情。
+              替换幂等（emoji 不含方括号），重复调用无副作用。 */}
+          {replaceEmojiText(text)}
+        </Text>
+      </Pressable>
+    </Animated.View>
   );
 });
 
@@ -104,10 +113,16 @@ export interface DanmakuOverlayProps {
    * 与 danmaku（录播按时间轴）互不影响；直播时传这个、danmaku 传空数组即可。
    * key 必须稳定（同一条消息重复推不会重复上屏）。
    */
-  liveItems?: Array<{ key: string; text: string }>;
+  liveItems?: Array<{ key: string; text: string; userId?: string; nick?: string; avatar?: string }>;
+  /**
+   * 点击飘屏条目（用户 2026-11-12）：
+   * 直播飘屏带发送者 userId/avatar，点了直接开用户资料卡；LRC（回放）没有身份 → 不触发。
+   * 不传时飘屏层保持 pointerEvents: none（完全不挡播放器手势）。
+   */
+  onPressItem?: (item: { key: string; text: string; userId?: string; nick?: string; avatar?: string }) => void;
 }
 
-export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, opacity: opacityProp, liveItems }: DanmakuOverlayProps) {
+export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, opacity: opacityProp, liveItems, onPressItem }: DanmakuOverlayProps) {
   // 弹幕时钟：外部显式传入优先（如直播恒传 0）；否则自行订阅播放器进度（见 props 注释）
   const storeTime = usePlayerStore((s) => s.position);
   const clock = currentTime !== undefined ? currentTime : storeTime;
@@ -294,7 +309,16 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
       ]).start(() => {
         setActive((prev) => prev.filter((a) => a.anim !== anim));
       });
-      return { key: `L${counter.current++}`, text: d.text, lane, anim };
+      return {
+        key: `L${counter.current++}`,
+        text: d.text,
+        lane,
+        anim,
+        // 点击进资料卡需要发送者身份（直播有，LRC 无）
+        userId: d.userId,
+        nick: d.nick,
+        avatar: d.avatar,
+      };
     });
     setActive((prev) => [...prev, ...newOnes].slice(-MAX_ACTIVE));
   }, [liveItems, visible, enabled, laneCount, speed, avoidOverlap]);
@@ -302,8 +326,17 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
   if (!visible || !enabled) return null;
   const opacity = opacityProp ?? sOpacity;
 
+  /**
+   * 可点飘屏（用户 2026-11-12）：只有传了 onPressItem 才松开触摸，
+   * 否则保持 pointerEvents:none（完全不影响播放器手势）。
+   * box-none = 容器自身不吃触摸，只有子弹条目能点。
+   */
+  const interactive = !!onPressItem;
   return (
-    <Animated.View style={[StyleSheet.absoluteFill, { opacity, zIndex: 30, pointerEvents: 'none' }]} pointerEvents="none">
+    <Animated.View
+      style={[StyleSheet.absoluteFill, { opacity, zIndex: 30 }]}
+      pointerEvents={interactive ? 'box-none' : 'none'}
+    >
       {active.map((a) => (
         <Bullet
           key={a.key}
@@ -312,6 +345,13 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
           fontSize={fontSize}
           anim={a.anim}
           width={width}
+          onPress={interactive && a.userId ? () => onPressItem?.({
+            key: a.key,
+            text: a.text,
+            userId: a.userId,
+            nick: a.nick,
+            avatar: a.avatar,
+          }) : undefined}
         />
       ))}
     </Animated.View>
@@ -319,14 +359,10 @@ export function DanmakuOverlay({ danmaku, currentTime, visible, live = false, op
 }
 
 const styles = StyleSheet.create({
+  /** 子弹容器（文字样式在 Bullet 内联：字号随设置变化，阴影固定） */
   bullet: {
     position: 'absolute',
     left: 0,
-    fontWeight: '700',
-    color: '#ffffff',
-    textShadowColor: 'rgba(0,0,0,0.95)',
-    textShadowOffset: { width: 1, height: 1 },
-    textShadowRadius: 3,
     paddingHorizontal: 6,
   },
 });

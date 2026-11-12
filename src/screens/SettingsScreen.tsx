@@ -2,7 +2,8 @@
  * SettingsDetailScreen · 分类设置页（2026-11-09 按 PiliPlus 思路从「我的」页拆出）
  *
  * PiliPlus：个人中心（我的）右上角齿轮 → 按类别分组的设置列表。
- * 本页对应地按「账号 / 外观 / 语言 / 小窗播放 / 房间 / 自动签到」分组陈列全部设置项，
+ * 本页对应地按「外观 / 语言 / 小窗播放 / 房间 / 通知」分组陈列设置项，
+ * 账号入口与自动签到已迁至账号中心（AccountScreen），
  * 每组标题带图标；原有主题色预设、RGB 取色、动态取色、纯黑主题、背景图等全部保留。
  * 路由名 SettingsDetailScreen，由「我的」页右上角齿轮进入。
  */
@@ -10,6 +11,8 @@ import React, { useEffect, useState } from 'react';
 import {
   Alert,
   BackHandler,
+  Image,
+  Linking,
   ScrollView,
   StyleSheet,
   Text,
@@ -20,8 +23,14 @@ import { useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import * as ImagePicker from 'expo-image-picker';
 import { RootStackParamList } from '../navigation/types';
-import { useSettingsStore, useUiStore } from '../store';
+import { useMemberStore, useSettingsStore, useUiStore, useUpdateStore } from '../store';
 import { saveSettings } from '../services/settings';
+// 「我的」页迁入关于：运行日志 + 成员数据（用户 2026-11-11）
+import RuntimeLogViewer from '../components/RuntimeLogViewer';
+import { getMemberDataMeta, updateMemberData, type MemberDataMeta } from '../services/memberData';
+import { toMs } from '../utils/format';
+import { APP_VERSION, APP_BUILD } from '../constants';
+import { clearAppCache } from '../services/cacheCleaner';
 import { setPipEnabled } from '../utils/pip';
 import ScreenHeader from '../components/ScreenHeader';
 // 通知设置面板（用户 2026-11-09）：软件外/软件内、私信/房间、房间三态、免打扰
@@ -55,7 +64,7 @@ import { sniffImageBase64Mime } from '../utils/dataUri';
 type SettingsNavProp = StackNavigationProp<RootStackParamList>;
 
 /** 分类二级入口：竖屏点进去看详情，横屏左分类 / 右详情 */
-type CategoryId = 'account' | 'appearance' | 'language' | 'pip' | 'room' | 'checkin' | 'notify';
+type CategoryId = 'appearance' | 'language' | 'pip' | 'room' | 'notify' | 'mine' | 'about';
 
 /**
  * 设置页分组卡：**玻璃常驻 + 内容淡入**。
@@ -143,6 +152,14 @@ function Row({
   );
 }
 
+/** 成员库更新时间：yyyy-MM-dd HH:mm（从「我的」页原样迁入） */
+function formatTime(ts: number): string {
+  if (!ts) return '';
+  const d = new Date(toMs(ts));
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 function ChipRow<T>({ options, value, onChange }: { options: { label: string; value: T }[]; value: T; onChange: (value: T) => void }) {
   const segs = options.map((o, i) => ({ key: String(i), label: o.label }));
   const idx = String(options.findIndex((o) => o.value === value));
@@ -176,6 +193,44 @@ export default function SettingsScreen() {
   const setSettings = useSettingsStore((state) => state.setSettings);
   const showToast = useUiStore((state) => state.showToast);
   const { t } = useI18n();
+  const hasUpdate = useUpdateStore((s) => s.hasUpdate);
+  const REPO_URL = 'https://github.com/wildfffire/yaya_msg_mobileX';
+
+  /** 版本 chip：有更新直接开下载页，否则主动检查一次（从「我的」页搬来） */
+  const checkVersion = () => {
+    const { hasUpdate: up, latestUrl } = useUpdateStore.getState();
+    if (up && latestUrl) {
+      Linking.openURL(latestUrl).catch(() => {});
+    } else {
+      useUpdateStore.getState().checkUpdate(true).then((has) => {
+        const next = useUpdateStore.getState();
+        if (has && next.hasUpdate && next.latestUrl) Linking.openURL(next.latestUrl).catch(() => {});
+        else showToast(t('已是最新版本'));
+      }).catch(() => showToast(t('已是最新版本')));
+    }
+  };
+
+  const openRepo = () => Linking.openURL(REPO_URL).catch(() => showToast(t('这个链接无法直接打开。')));
+
+  /** 只清可重建缓存，二次确认后执行（白名单见 services/cacheCleaner.ts） */
+  const handleClearCache = () => {
+    Alert.alert(
+      t('清除缓存'),
+      t('将清理图片、排期、成员库等可重建缓存；不会删除账号、设置、观看历史、稍后再看与已下载内容。'),
+      [
+        { text: t('取消'), style: 'cancel' },
+        {
+          text: t('清除'),
+          style: 'destructive',
+          onPress: () => {
+            clearAppCache()
+              .then((res) => showToast(t('已清理 {count} 项缓存', { count: res.keys + res.dirs })))
+              .catch((error: any) => showToast(t('清除缓存失败：{msg}', { msg: error?.message || String(error) })));
+          },
+        },
+      ],
+    );
+  };
   /** PiliPlus 风格自定义颜色弹窗（RGB 滑块 + Hex 输入） */
   const [pickerVisible, setPickerVisible] = useState(false);
   /**
@@ -188,17 +243,48 @@ export default function SettingsScreen() {
   const [activeId, setActiveId] = useState<CategoryId | null>(null);
   const { width, height } = useWindowDimensions();
   const isLandscape = width > height;
-  const shownId: CategoryId | null = activeId ?? (isLandscape ? 'account' : null);
+  const shownId: CategoryId | null = activeId ?? (isLandscape ? 'appearance' : null);
+
+  /** ── 关于内的「维护」块（用户 2026-11-11：从「我的」页迁入） ── */
+  const [logVisible, setLogVisible] = useState(false);
+  const [memberMeta, setMemberMeta] = useState<MemberDataMeta | null>(null);
+  const [memberSyncing, setMemberSyncing] = useState(false);
+  const memberCount = useMemberStore((state) => state.members.length);
+
+  useEffect(() => {
+    getMemberDataMeta().then(setMemberMeta).catch(() => {});
+  }, []);
+
+  /** 手动更新成员数据库（双源: yk1z 库 + 官方接口），与「我的」页原实现一致 */
+  const manualSyncMembers = () => {
+    if (memberSyncing) return;
+    setMemberSyncing(true);
+    updateMemberData()
+      .then((res) => {
+        if (!res?.updated) {
+          showToast(t('更新失败：{msg}（已保留本地数据）', { msg: res?.message || '' }));
+          return;
+        }
+        return getMemberDataMeta().then((fresh) => {
+          setMemberMeta(fresh);
+          showToast(res?.detail ? t('更新成功：{detail}', { detail: res.detail }) : t('成员数据已更新'));
+        });
+      })
+      .catch((e: any) => showToast(t('更新失败：{msg}（已保留本地数据）', { msg: e?.message || String(e) })))
+      .finally(() => setMemberSyncing(false));
+  };
 
   const CATEGORY_META: { id: CategoryId; title: string; icon: string }[] = [
-    { id: 'account', title: t('账号'), icon: 'account-key-outline' },
     { id: 'appearance', title: t('外观'), icon: 'palette-outline' },
     { id: 'language', title: t('语言'), icon: 'translate' },
     { id: 'pip', title: t('小窗播放'), icon: 'picture-in-picture-bottom-right' },
     { id: 'room', title: t('房间'), icon: 'home-account' },
-    { id: 'checkin', title: t('自动签到'), icon: 'calendar-check-outline' },
     // 通知（用户 2026-11-09）：软件外/软件内两套开关 + 私信/房间范围 + 房间三态
     { id: 'notify', title: t('通知'), icon: 'bell-ring-outline' },
+    // 「我的」页横滑卡区显示开关（2026-11-11）
+    { id: 'mine', title: t('我的页'), icon: 'view-dashboard-outline' },
+    // 关于固定放最后一项：图标 / 版本 / 仓库地址 / 清除缓存
+    { id: 'about', title: t('关于'), icon: 'information-outline' },
   ];
 
   const backgroundValue = settings.customBackgroundFile?.trim() || '';
@@ -302,16 +388,6 @@ export default function SettingsScreen() {
   /** 右栏 / 竖屏详情：只渲染当前选中分类的 Section（见 Section 的 id/activeId） */
   const detailScroll = (
         <ScrollView {...chromeScrollProps} style={{ flex: 1 }} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
-
-        {/* 账号 */}
-        <Section id="account" activeId={shownId} title={t('账号')} icon="account-key-outline" delay={60}>
-          <Row
-            icon="account-key"
-            title={t('进入账号管理')}
-            value={t('登录 / 切换 / 修改资料')}
-            onPress={() => navigation.navigate('LoginScreen')}
-          />
-        </Section>
 
         {/* 外观与主题 */}
         <Section id="appearance" activeId={shownId} title={t('外观')} icon="palette-outline" delay={100}>
@@ -547,21 +623,92 @@ export default function SettingsScreen() {
           <RoomSortPanel />
         </Section>
 
-        {/* 自动签到 */}
-        <Section id="checkin" activeId={shownId} title={t('自动签到')} icon="calendar-check-outline" delay={260}>
-          <View style={styles.innerPad}>
-            <ChipRow options={[{ label: t('关闭'), value: false as any }, { label: t('开启'), value: true as any }]} value={settings.yaya_auto_checkin_enabled} onChange={(v) => update('yaya_auto_checkin_enabled', v)} />
-            {settings.yaya_auto_checkin_enabled ? (
-              <Text style={[styles.rowLabel, { color: palette.labelSecondary, marginTop: 10 }]}>
-                {t('上次签到：{date}', { date: settings.yaya_auto_checkin_last_date || t('尚未执行') })}
-              </Text>
-            ) : null}
-          </View>
-        </Section>
-
         {/* 通知（用户 2026-11-09）：软件外/软件内、私信/房间、房间三态、免打扰 */}
         <Section id="notify" activeId={shownId} title={t('通知')} icon="bell-ring-outline" delay={300}>
           <NotifySettingsPanel />
+        </Section>
+
+        {/* 「我的」页横滑卡区开关（默认关） */}
+        <Section id="mine" activeId={shownId} title={t('我的页')} icon="view-dashboard-outline" delay={320}>
+          <View style={styles.innerPad}>
+            <Text style={[styles.rowLabel, { color: palette.labelSecondary }]}>{t('在「我的」页显示稍后再看')}</Text>
+            <ChipRow
+              options={[{ label: t('关闭'), value: false as any }, { label: t('开启'), value: true as any }]}
+              value={!!settings.my_show_watch_later}
+              onChange={(v) => update('my_show_watch_later', v)}
+            />
+            <View style={[styles.divider, { backgroundColor: palette.innerStroke, marginLeft: 0, marginVertical: 12 }]} />
+            <Text style={[styles.rowLabel, { color: palette.labelSecondary }]}>{t('在「我的」页显示观看历史')}</Text>
+            <ChipRow
+              options={[{ label: t('关闭'), value: false as any }, { label: t('开启'), value: true as any }]}
+              value={!!settings.my_show_watch_history}
+              onChange={(v) => update('my_show_watch_history', v)}
+            />
+            <Text style={[styles.note, { color: palette.labelTertiary, marginHorizontal: 0 }]}>
+              {t('开启后以横滑卡片展示，与首页公演直播同一方式。')}
+            </Text>
+          </View>
+        </Section>
+
+        {/* 关于（设置最后一项）：应用图标 / 版本 / 仓库地址 / 网页端 / 清除缓存 */}
+        <Section id="about" activeId={shownId} title={t('关于')} icon="information-outline" delay={360}>
+          <View style={styles.aboutHero}>
+            <View style={styles.aboutLogoWrap}>
+              <Image source={require('../../assets/logo.png')} style={styles.aboutLogoImg} />
+            </View>
+            <View style={{ flex: 1, marginLeft: 12 }}>
+              <Text style={[styles.aboutName, { color: palette.label }]}>{t('牙牙消息 X')}</Text>
+              <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={2}>
+                {t('口袋48 / SNH48 Group 的第三方 Android 客户端')}
+              </Text>
+            </View>
+            <View style={styles.verChipWrap}>
+              <ScalePressable onPress={checkVersion} pressedScale={0.94}>
+                <View style={[styles.verChip, { backgroundColor: palette.tintSoft }]}>
+                  <Text style={[styles.verChipText, { color: palette.tint }]}>v{APP_VERSION}</Text>
+                </View>
+              </ScalePressable>
+              {hasUpdate ? <View style={[styles.verDot, { backgroundColor: palette.danger, borderColor: palette.surface }]} /> : null}
+              <Text style={[styles.verBuildText, { color: palette.labelTertiary }]}>
+                {t('Build {n}', { n: APP_BUILD })}
+              </Text>
+            </View>
+          </View>
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+          <Row
+            icon="github"
+            title={t('仓库地址')}
+            value="github.com/wildfffire/yaya_msg_mobileX"
+            wrapValue
+            onPress={openRepo}
+          />
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+          <Row icon="text-box-search-outline" title={t('运行日志')} onPress={() => setLogVisible(true)} />
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+          <Row icon="delete-sweep-outline" title={t('清除缓存')} danger onPress={handleClearCache} />
+          {/* 成员数据：用户 2026-11-12 要求「永远置于底部」——固定在关于分区最后 */}
+          <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
+          <View style={styles.memberStatRow}>
+            <View style={[styles.memberStatCard, { backgroundColor: palette.fill3 }]}>
+              <Text style={[styles.memberStatNum, { color: palette.label }]}>{memberCount}</Text>
+              <Text style={[styles.memberStatLabel, { color: palette.labelSecondary }]}>{t('位成员')}</Text>
+            </View>
+            <View style={[styles.memberStatCard, { backgroundColor: palette.fill3 }]}>
+              <Text style={[styles.memberStatNum, { color: palette.label }]} numberOfLines={1}>
+                {memberMeta ? formatTime(memberMeta.savedAt) : t('尚未同步')}
+              </Text>
+              <Text style={[styles.memberStatLabel, { color: palette.labelSecondary }]}>{t('最近更新')}</Text>
+            </View>
+          </View>
+          <Row
+            icon="cloud-download"
+            title={t('手动更新成员数据')}
+            value={memberSyncing ? t('更新中…') : t('立即同步')}
+            onPress={manualSyncMembers}
+          />
+          <Text style={[styles.note, { color: palette.labelTertiary }]}>
+            {t('成员数据共 {count} 位，数据来源于 yk1z 数据库（yk1z/yaya_msg），进入软件时自动同步最新。', { count: memberCount })}
+          </Text>
         </Section>
 
         </ScrollView>
@@ -608,6 +755,7 @@ export default function SettingsScreen() {
           update('accentPreset', DEFAULT_ACCENT_PRESET, { accentColor: DEFAULT_ACCENT_COLOR });
         }}
       />
+      <RuntimeLogViewer visible={logVisible} onClose={() => setLogVisible(false)} />
     </>
   );
 }

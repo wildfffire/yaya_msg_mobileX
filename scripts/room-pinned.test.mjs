@@ -173,19 +173,23 @@ try {
     assert.ok(!bar.includes('从最近消息选择'), '不该有从消息里挑一条置顶的 UI');
     assert.ok(!bar.includes('onPick'), '不该有用户置顶回调');
   });
-  await check('设置分类详情页不再显示 Version / Build', () => {
+  await check('应用图标/版本已搬到设置最后一项「关于」', () => {
     assert.ok(!settings.includes("t('Version {v}'"));
-    assert.ok(!settings.includes("t('Build {n}'"));
+    assert.ok(settings.includes('v{APP_VERSION}'));
+    assert.ok(settings.includes("t('Build {n}'"));
+    assert.ok(settings.includes('id="about"'));
+    assert.ok(settings.includes("t('仓库地址')"));
+    assert.ok(!my.includes('v{APP_VERSION}'));
+    assert.ok(!my.includes("t('Build {n}'"));
   });
-  await check('「我的」hero 仍保留 v{APP_VERSION} 与 Build', () => {
-    assert.ok(my.includes('v{APP_VERSION}'));
-    assert.ok(my.includes("t('Build {n}'"));
-  });
-  await check('公告面板写死品牌粉已清除，改用 palette.tint', () => {
-    assert.ok(!host.includes('rgba(251,114,153'));
-    assert.ok(!host.includes("'#fb7299'"));
-    assert.ok(host.includes('withAlpha(palette.tint, 0.32)'));
-    assert.ok(host.includes('color={palette.tint}'));
+  await check('播放器功能面板：只去掉公告入口，公告能力保留', () => {
+    // 用户 2026-11-12 澄清：「只把播放器功能里的入口去掉，公告能力不要拆」
+    assert.ok(host.includes('announcePanel'), '公告面板应保留');
+    assert.ok(host.includes('usePlaybackAnnouncement'), '公告拉取应保留');
+    assert.ok(host.includes('announceTopAction'), '顶栏公告按钮应保留');
+    assert.ok(!host.includes("key: 'announce'"), '控制坞不应再追加公告入口');
+    // 观众功能已删除（官方无观众列表接口）
+    assert.ok(!host.includes('AudienceSheet'));
   });
   await check('房间列表徽章 compact 缩小，但 Team 前缀保持 11 号字', () => {
     assert.ok(row.includes('fontSize={10}'));

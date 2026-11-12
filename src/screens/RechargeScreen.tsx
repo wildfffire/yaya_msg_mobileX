@@ -1,52 +1,28 @@
-import React, { useState, useEffect, useRef } from 'react';
-import {
-  ActivityIndicator,
-  StyleSheet,
-  Text,
-  View,
-} from 'react-native';
+import React, { useRef, useState } from 'react';
+import { StyleSheet, View } from 'react-native';
 import { WebView } from 'react-native-webview';
-import pocketApi from '../api/pocket48';
-import { errorMessage } from '../utils/data';
+import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import ScreenHeader from '../components/ScreenHeader';
-import { HeaderAction } from '../components/HeaderAction';
-import { GlassCard } from '../components/GlassCard';
 import { CenterSpinner } from '../components/Loaders';
+import { ScalePressable } from '../components/Motion';
 import { ErrorState } from '../components/StateViews';
-import { FadeInView } from '../components/Motion';
 import { usePalette, radii } from '../theme';
 import { useI18n } from '../i18n';
-import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 
 const RECHARGE_URL = 'https://live.48.cn/Recharge/';
 
+/**
+ * 鸡腿充值：直接铺官方充值页。
+ *
+ * 用户 2026-11-11 要求「把进去里面网页上面那一块删掉」——原来的余额卡整块删除；
+ * 2026-11-12 补充「保留一个刷新按钮」：页头右侧一个刷新图标（重载官方充值页），
+ * 余额仍在「我的 → 账号 → 鸡腿充值」看。
+ */
 export default function RechargeScreen() {
   const palette = usePalette();
   const { t } = useI18n();
-  const [balance, setBalance] = useState('');
-  const [status, setStatus] = useState(t('暂无数据'));
   const [webError, setWebError] = useState('');
-  const [loading, setLoading] = useState(false);
   const webViewRef = useRef<WebView>(null);
-
-  // React 18+ 卸载后 setState 为 no-op（无告警），请求继续执行无害；保留简单调用
-  useEffect(() => { refreshBalance(); }, []);
-
-  const refreshBalance = async () => {
-    if (loading) return;
-    setLoading(true);
-    setStatus(t('正在刷新余额...'));
-    try {
-      const res = await pocketApi.getUserMoney();
-      const money = res?.content?.moneyTotal ?? res?.data?.moneyTotal ?? res?.content?.money ?? res?.data?.money ?? '';
-      setBalance(String(money));
-      setStatus(money !== '' ? t('余额已刷新') : t('接口未返回余额'));
-    } catch (error) {
-      setStatus(t('余额刷新失败：{msg}', { msg: errorMessage(error) }));
-    } finally {
-      setLoading(false);
-    }
-  };
 
   const reloadWeb = () => {
     setWebError('');
@@ -55,31 +31,23 @@ export default function RechargeScreen() {
 
   return (
     <View style={styles.container}>
-      <ScreenHeader title={t('鸡腿充值')} right={
-        <HeaderAction label={t('刷新')} onPress={refreshBalance} loading={loading} />
-      } />
-
-      {/* 余额卡：GlassCard strong + 28/800 金额 + 刷新 */}
-      <FadeInView delay={60} duration={300}>
-        <GlassCard strong style={styles.balanceWrap}>
-          <View style={[styles.balanceIcon, { backgroundColor: palette.tintSoft }]}>
-            <MaterialCommunityIcons name="credit-card-edit-outline" size={22} color={palette.tint} />
-          </View>
-          <View style={styles.balanceInfo}>
-            <Text style={[styles.balanceLabel, { color: palette.labelSecondary }]}>{t('当前余额')}</Text>
-            <Text style={[styles.balanceValue, { color: palette.label }]}>
-              {balance !== '' ? t('{balance} 鸡腿', { balance }) : t('暂无数据')}
-            </Text>
-            <View style={styles.statusLine}>
-              <Text style={[styles.statusText, { color: palette.labelSecondary }]} numberOfLines={1}>{status}</Text>
-              {loading ? <ActivityIndicator color={palette.tint} size="small" style={styles.loading} /> : null}
+      <ScreenHeader
+        title={t('鸡腿充值')}
+        right={(
+          <ScalePressable
+            onPress={reloadWeb}
+            accessibilityRole="button"
+            accessibilityLabel={t('刷新')}
+            pressedScale={0.9}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <View style={[styles.headerIcon, { backgroundColor: palette.fill2 }]}>
+              <MaterialCommunityIcons name="refresh" color={palette.tint} size={18} />
             </View>
-          </View>
-          <HeaderAction label={t('刷新')} onPress={refreshBalance} loading={loading} />
-        </GlassCard>
-      </FadeInView>
+          </ScalePressable>
+        )}
+      />
 
-      {/* WebView 容器卡：圆角 16 溢出隐藏 + hairline 边框 */}
       <View style={[styles.webCard, { borderColor: palette.hairline, overflow: 'hidden' }]}>
         <WebView
           ref={webViewRef}
@@ -115,30 +83,13 @@ export default function RechargeScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: 'transparent' },
-  balanceWrap: {
-    marginHorizontal: 16,
-    marginTop: 12,
-    marginBottom: 4,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  balanceIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  balanceInfo: { flex: 1, marginLeft: 12, minWidth: 0 },
-  balanceLabel: { fontSize: 12, fontWeight: '600' },
-  balanceValue: { fontSize: 28, fontWeight: '800', marginTop: 2 },
-  statusLine: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
-  statusText: { fontSize: 11, flex: 1 },
-  loading: { marginLeft: 8 },
+  /** 页头右侧刷新按钮（36 圆形，与账号页同一套） */
+  headerIcon: { width: 36, height: 36, borderRadius: 18, alignItems: 'center', justifyContent: 'center' },
   webCard: {
     flex: 1,
     marginHorizontal: 16,
-    marginTop: 12,
+    marginTop: 4,
+    marginBottom: 12,
     borderRadius: radii.md,
     borderWidth: StyleSheet.hairlineWidth,
   },

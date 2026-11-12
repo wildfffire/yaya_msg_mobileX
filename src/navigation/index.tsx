@@ -40,7 +40,7 @@ import HomeScreen from '../screens/HomeScreen';
 import MessagesScreen from '../screens/MessagesScreen';
 import MediaScreen from '../screens/MediaScreen';
 import FollowedRoomsScreen from '../screens/FollowedRoomsScreen';
-import LoginScreen from '../screens/LoginScreen';
+import AccountScreen from '../screens/AccountScreen';
 import RechargeScreen from '../screens/RechargeScreen';
 import FlipScreen from '../screens/FlipScreen';
 import ProfileScreen from '../screens/ProfileScreen';
@@ -226,7 +226,7 @@ const MediaTabScreen = withTabSwipe(withPageMotion(MediaScreen));
 const RoomsTabScreen = withTabSwipe(withPageMotion(FollowedRoomsScreen));
 const SettingsTabScreen = withTabSwipe(withPageMotion(MyScreen));
 const MessagesStackScreen = withPageMotion(MessagesScreen, ui.motion.stackDuration, 10, true);
-const LoginStackScreen = withPageMotion(LoginScreen, ui.motion.stackDuration, 10, true);
+const AccountStackScreen = withPageMotion(AccountScreen, ui.motion.stackDuration, 10, true);
 const RechargeStackScreen = withPageMotion(RechargeScreen, ui.motion.stackDuration, 10, true);
 const FetchStackScreen = withPageMotion(FetchScreen, ui.motion.stackDuration, 10, true);
 const FlipStackScreen = withPageMotion(FlipScreen, ui.motion.stackDuration, 10, true);
@@ -329,9 +329,7 @@ function MainTabBar({
           items={items}
           activeKey={activeKey}
           onSelect={selectTab}
-          onOpenChat={({ id, name }) => {
-            navigationRef.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
-          }}
+          onOpenAccount={() => navigationRef.navigate('AccountScreen')}
         />
       </View>
     );
@@ -603,7 +601,7 @@ export default function AppNavigator() {
         >
           <Stack.Screen name="Main" component={MainTabs} />
           <Stack.Screen name="MessagesScreen" component={MessagesStackScreen} />
-          <Stack.Screen name="LoginScreen" component={LoginStackScreen} />
+          <Stack.Screen name="AccountScreen" component={AccountStackScreen} />
           <Stack.Screen name="RechargeScreen" component={RechargeStackScreen} />
           <Stack.Screen name="FetchScreen" component={FetchStackScreen} />
           <Stack.Screen name="FlipScreen" component={FlipStackScreen} />

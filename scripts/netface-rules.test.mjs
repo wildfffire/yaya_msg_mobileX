@@ -129,6 +129,7 @@ try {
   const screen = read('src/screens/NetfaceScreen.tsx');
   const nav = read('src/navigation/index.tsx');
   const my = read('src/screens/MyScreen.tsx');
+  const home = read('src/screens/HomeScreen.tsx');
 
   await check('接口层：桌面端同款 netface 路径', () => {
     for (const path of [
@@ -162,11 +163,14 @@ try {
     assert.ok(!screen.includes('joinNetface'), '移动端不接入入场/通话');
   });
 
-  await check('路由与入口：我的 → 工具 → 现场互动', () => {
+  await check('路由与入口：首页 → 工具第一位 → 现场互动', () => {
     assert.ok(nav.includes("import NetfaceScreen from '../screens/NetfaceScreen'"));
     assert.ok(nav.includes('<Stack.Screen name="NetfaceScreen"'));
-    assert.ok(my.includes("t('现场互动')"));
-    assert.ok(my.includes("navigate('NetfaceScreen')"));
+    // 用户 2026-11-11：从「我的 → 工具」移到首页工具条第一位
+    assert.ok(home.includes("{ title: '现场互动'"), '首页工具条缺少现场互动');
+    assert.ok(home.includes("route: 'NetfaceScreen'"));
+    assert.ok(home.indexOf("{ title: '现场互动'") < home.indexOf("{ title: '翻牌'"), '必须排在工具第一位');
+    assert.ok(!my.includes("navigate('NetfaceScreen')"), '「我的」页不应再保留入口');
   });
 } finally {
   rmSync(tmp, { recursive: true, force: true });

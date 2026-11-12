@@ -48,7 +48,7 @@
          否则旋转会重建 Activity → JS 重启 → 播放中断。
          ⚠️ smallestScreenSize 也必须保留：系统自由窗口/侧边条小窗（用户把整个 App 缩成小竖窗）
          会改变 smallestScreenSize，缺了它 Activity 直接重建 → JS 重启 → 播放器整个退出（实测反馈）。
-         例外：LoginScreen（账号表单）在 JS 侧显式锁竖屏。 -->
+         账号中心（AccountScreen）同样跟随系统方向，横屏靠内容限宽居中适配。 -->
     <activity android:name=".MainActivity" android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize|screenLayout|uiMode" android:launchMode="singleTask" android:windowSoftInputMode="adjustResize" android:theme="@style/Theme.App.SplashScreen" android:exported="true" android:screenOrientation="unspecified" android:supportsPictureInPicture="true" android:resizeableActivity="true">
       <intent-filter>
         <action android:name="android.intent.action.MAIN"/>

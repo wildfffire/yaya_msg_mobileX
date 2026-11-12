@@ -4,7 +4,6 @@ import { PerfFlatList } from '../components/PerfFlatList';
 
 import {
   ActivityIndicator,
-  Animated,
   AppState,
   BackHandler,
   DeviceEventEmitter,
@@ -27,6 +26,7 @@ import { useSettingsStore, useUiStore, useMemberStore } from '../store';
 import { setPipPlaying, setPipAspect, isPipActive } from '../utils/pip';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import { FadeInView } from '../components/Motion';
+import LivePulseDot from '../components/LivePulseDot';
 import ScreenHeader from '../components/ScreenHeader';
 import { chromeScrollProps } from '../navigation/chromeScroll';
 import { VODItem, Member } from '../types';
@@ -58,6 +58,7 @@ import { Skeleton } from '../components/Skeleton';
 import { usePalette, radii, radiiAlias } from '../theme';
 import { translate, useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
+import { DarkSheetHandle, DarkSheetHeader } from '../components/DarkSheetHeader';
 import { GlassSegmented, GlassSegmentedScroll } from '../components/GlassSegmented';
 import { UserProfileSheet, type UserProfileTarget } from '../components/UserProfileSheet';
 
@@ -458,33 +459,6 @@ function acceptUserId(item: any): string {
 }
 
 
-/** 直播中呼吸红点（Animated + native driver） */
-function LivePulseDot({ size = 7 }: { size?: number }) {
-  const pulse = useRef(new Animated.Value(1)).current;
-  useEffect(() => {
-    const loop = Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulse, { toValue: 0.35, duration: 700, useNativeDriver: true }),
-        Animated.timing(pulse, { toValue: 1, duration: 700, useNativeDriver: true }),
-      ]),
-    );
-    loop.start();
-    return () => loop.stop();
-  }, [pulse]);
-  return (
-    <Animated.View
-      style={{
-        width: size,
-        height: size,
-        borderRadius: size / 2,
-        backgroundColor: '#ff4d4f',
-        marginRight: 4,
-        opacity: pulse,
-      }}
-    />
-  );
-}
-
 /** 回放/直播列表首屏骨架：banner 块 + 2 列网格块 */
 function MediaGridSkeleton() {
   return (
@@ -578,9 +552,8 @@ export default function MediaScreen() {
   //     （src/player/session/usePlaybackOnlineStat.ts + MediaPlaybackHost 的 onlineStat）
 
   const [rankStatus, setRankStatus] = useState('');
-  // 公告（拉取 / 面板 / 展开态持久化 / 顶栏与控制坞按钮）已收口到统一播放宿主：
-  // 见 src/player/session/usePlaybackAnnouncement.ts + MediaPlaybackHost 的 announcement 开关
-  //（用户 2026-10-02：房间与观看历史里也要能看到公告）。
+  // 公告面板已按用户要求（2026-11-11）从播放器整体删除（含顶栏/控制坞按钮与面板），
+  // usePlaybackAnnouncement 保留文件但不再接线。
   /**
    * 请求在途标记，**按 tab(live/vod) 分别持有**。
    * 旧实现是一个全局布尔：live 的请求还在飞时切到 vod，新请求会被
@@ -1398,15 +1371,24 @@ export default function MediaScreen() {
   }, []);
 
   /**
-   * 控制坞按钮（函数形式：礼物只在直播显示，需要解析后的 isLive）：
-   * 进入房间 / 礼物 / 贡献榜 —— 公告、弹幕设置、弹幕列表、小窗由宿主统一追加。
+   * 面板内列表的**确定**最大高度（用户 2026-11-12 截图定位）：
+   * ScrollView 只给 flexShrink 时，父级高度由内容决定 → 列表按内容全高撑开，
+   * 面板被 maxHeight 夹住后内容溢出屏幕被裁 = 「底部空白 + 名单被截断」。
+   * 必须给数值上限，列表才会真正滚动。
+   */
+  const panelRankListH = Math.max(180, Math.round(screen.height) - 150);
+  const panelGiftListH = Math.max(140, Math.round(screen.height) - 300);
+
+  /**
+   * 「…」面板里的功能项（用户 2026-11-12 澄清）：
+   * 礼物 / 贡献榜**入口保持在这里**，要改的是它们点开后那个面板的观感（黑白 + 简洁）；
+   * 「进入房间」已按用户要求从播放器功能里删除。
    */
   const mediaExtraActions = useCallback((ctx: { isLive: boolean }) => ([
-    ...(playingMember ? [{ key: 'room', icon: 'account-group', label: t('进入房间'), onPress: () => (navigation as any).navigate('Rooms', { openMemberId: playingMember.id }) }] : []),
     ...(ctx.isLive ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openGiftPanel() }] : []),
     { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: () => openRankPanel() },
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  ]), [t, playingMember, navigation]);
+  ]), [t]);
 
   if (media) {
     return (
@@ -1422,8 +1404,6 @@ export default function MediaScreen() {
           /* 点标题进房间：成员库反查到的 id 比 media.ownerId 更可靠（未登录/旧数据也能进） */
           roomMemberId={playingMember ? String(playingMember.id) : undefined}
           onClose={() => { setPipPlaying(false); closePlayer(); }}
-          /* 直播间公告（含录播）：宿主统一拉取 + 面板 + 顶栏/控制坞按钮 + 展开态持久化 */
-          announcement
           initialPosition={pendingResumeAt}
           /* 与历史行为一致：直播弹幕 HTTP 轮询兜底（5s）+ 回放弹幕到达 toast */
           danmakuLivePollMs={5000}
@@ -1432,6 +1412,8 @@ export default function MediaScreen() {
           onVideoSize={onVideoSize}
           /* 系统 PiP：快照会拍进浮层 → 隐藏弹幕列表/设置面板/公告面板（宿主统一判断） */
           hideSheets={inSystemPip}
+          /* 直播间公告（含录播）：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已按用户要求删除） */
+          announcement
           extraActions={mediaExtraActions}
           afterPlayer={(
             <>
@@ -1447,19 +1429,28 @@ export default function MediaScreen() {
               />
 
               <Modal visible={giftVisible} transparent animationType="slide" onRequestClose={() => setGiftVisible(false)}>
-                <View style={styles.modalShade}>
-                  <GlassSurface radius={20} role="card" style={[styles.giftPanel, isPlayerLandscape ? styles.giftPanelLandscape : null, { backgroundColor: 'transparent' }]}>
-                    <View style={styles.giftHeader}>
-                      <Text style={[styles.giftTitle, { color: palette.label }]}>{t('直播送礼')}</Text>
-                      <TouchableOpacity onPress={() => setGiftVisible(false)} activeOpacity={0.8}>
-                        <Text style={[styles.backBtnText, { color: palette.tint }]}>{t('关闭')}</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={[styles.giftTip, { color: palette.danger }]}>{t('直播送礼主播看不到赠送，仅能统计贡献值')}</Text>
-                    <Text style={[styles.giftStatus, { color: palette.labelSecondary }]}>
-                      {balance ? `${t('余额：{balance} 鸡腿', { balance })} · ` : ''}{giftStatus}
-                    </Text>
-                    <ScrollView style={[styles.giftGrid, isPlayerLandscape ? styles.giftGridLandscape : null]}>
+                {/* 黑白实心抽屉（用户 2026-11-12）：与贡献榜同一套深色面板，
+                    横屏贴右侧并吃满高度（原来没套 landscape 布局 → 面板挤在左下半屏）。 */}
+                <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
+                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
+                    {/* 与弹幕列表同一套头（用户 2026-11-12）：handle + 图标标题 + 关闭 × */}
+                    <DarkSheetHandle show={!isPlayerLandscape} />
+                    <DarkSheetHeader
+                      icon="gift-outline"
+                      title={t('直播送礼')}
+                      meta={balance ? t('余额 {balance}', { balance }) : undefined}
+                      onClose={() => setGiftVisible(false)}
+                    />
+                    {giftStatus ? (
+                      <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{giftStatus}</Text>
+                    ) : null}
+                    <ScrollView
+                      style={[
+                        styles.giftGrid,
+                        isPlayerLandscape ? [styles.giftGridLandscape, { maxHeight: panelGiftListH }] : null,
+                      ]}
+                      showsVerticalScrollIndicator={false}
+                    >
                       <View style={styles.giftGridInner}>
                         {gifts.map((gift) => {
                           const active = String(selectedGift?.giftId || selectedGift?.id) === String(gift.giftId || gift.id);
@@ -1468,15 +1459,17 @@ export default function MediaScreen() {
                               key={String(gift.giftId || gift.id)}
                               style={[
                                 styles.giftItem,
-                                active && styles.giftItemActive,
-                                { backgroundColor: active ? palette.tintSoft : palette.fill2, borderColor: active ? palette.tint : palette.hairline },
+                                {
+                                  backgroundColor: active ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.06)',
+                                  borderColor: active ? 'rgba(255,255,255,0.9)' : 'transparent',
+                                },
                               ]}
                               onPress={() => setSelectedGift(gift)}
                               activeOpacity={0.85}
                             >
-                              {giftImage(gift) ? <Image source={{ uri: giftImage(gift) }} style={styles.giftImage} /> : <View style={[styles.giftImage, { backgroundColor: palette.fill3 }]} />}
-                              <Text style={[styles.giftName, { color: palette.label }]} numberOfLines={1}>{giftName(gift)}</Text>
-                              <Text style={[styles.giftCost, { color: palette.tint }]}>{t('{count} 鸡腿', { count: giftCost(gift) })}</Text>
+                              {giftImage(gift) ? <Image source={{ uri: giftImage(gift) }} style={styles.giftImage} /> : <View style={[styles.giftImage, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
+                              <Text style={[styles.giftName, { color: 'rgba(255,255,255,0.9)' }]} numberOfLines={1}>{giftName(gift)}</Text>
+                              <Text style={[styles.giftCost, { color: 'rgba(255,255,255,0.55)' }]}>{t('{count} 鸡腿', { count: giftCost(gift) })}</Text>
                             </TouchableOpacity>
                           );
                         })}
@@ -1484,13 +1477,14 @@ export default function MediaScreen() {
                     </ScrollView>
                     <View style={styles.giftFooter}>
                       <TextInput
-                        style={[styles.giftNum, { color: palette.label, borderColor: palette.hairline, backgroundColor: palette.fill2 }]}
+                        style={[styles.giftNum, { color: '#fff', borderColor: 'rgba(255,255,255,0.24)', backgroundColor: 'rgba(255,255,255,0.08)' }]}
                         keyboardType="numeric"
                         value={giftNum}
                         onChangeText={setGiftNum}
+                        placeholderTextColor="rgba(255,255,255,0.4)"
                       />
-                      <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: palette.tint }]} onPress={sendGift} activeOpacity={0.85}>
-                        <Text style={[styles.sendGiftText, { color: palette.onTint }]}>
+                      <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: '#fff' }]} onPress={sendGift} activeOpacity={0.85}>
+                        <Text style={[styles.sendGiftText, { color: '#111114' }]}>
                           {selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
                         </Text>
                       </TouchableOpacity>
@@ -1503,25 +1497,48 @@ export default function MediaScreen() {
                       }}
                       activeOpacity={0.8}
                     >
-                      <Text style={[styles.rechargeText, { color: palette.tint }]}>{t('余额不足？去充值鸡腿')}</Text>
+                      <Text style={[styles.rechargeText, { color: 'rgba(255,255,255,0.6)' }]}>{t('余额不足？去充值鸡腿')}</Text>
                     </TouchableOpacity>
-                  </GlassSurface>
+                  </View>
                 </View>
               </Modal>
               <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
                 {/* 横屏贴右 + 实心黑底（与弹幕列表同风格，用户 2026-11-09） */}
                 <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
-                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(15,15,18,0.98)' }]}>
-                    <View style={styles.giftHeader}>
-                      <Text style={[styles.giftTitle, { color: 'rgba(255,255,255,0.94)' }]}>{t('贡献榜')}</Text>
-                      <TouchableOpacity onPress={() => setRankVisible(false)} activeOpacity={0.8}>
-                        <Text style={[styles.backBtnText, { color: 'rgba(255,255,255,0.75)' }]}>{t('关闭')}</Text>
-                      </TouchableOpacity>
-                    </View>
-                    <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.6)' }]}>{rankStatus}</Text>
-                    <ScrollView style={[styles.rankList, isPlayerLandscape ? styles.rankListLandscape : null]}>
+                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
+                    <DarkSheetHandle show={!isPlayerLandscape} />
+                    <DarkSheetHeader
+                      icon="trophy-outline"
+                      title={t('贡献榜')}
+                      meta={rankRows.length ? t('{n} 人', { n: rankRows.length }) : undefined}
+                      onClose={() => setRankVisible(false)}
+                    />
+                    {rankStatus ? (
+                      <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{rankStatus}</Text>
+                    ) : null}
+                    <ScrollView
+                      style={[
+                        styles.rankList,
+                        isPlayerLandscape ? [styles.rankListLandscape, { maxHeight: panelRankListH }] : null,
+                      ]}
+                      showsVerticalScrollIndicator={false}
+                    >
                       {rankRows.map((row, index) => (
-                        <View key={String(row.userId || row.id || index)} style={[styles.rankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}>
+                        <TouchableOpacity
+                          key={String(row.userId || row.id || index)}
+                          style={[styles.rankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}
+                          activeOpacity={0.75}
+                          accessibilityRole="button"
+                          accessibilityLabel={row.name}
+                          onPress={() => {
+                            setRankVisible(false);
+                            setDanmakuProfile({
+                              nick: String(row.name || ''),
+                              avatar: String(row.avatar || ''),
+                              userId: row.userId ? String(row.userId) : undefined,
+                            });
+                          }}
+                        >
                           {/* 黑白榜（用户 2026-11-09）：名次不用主题色，前三名白 0.95、其余白 0.5 */}
                           <Text style={[styles.rankNo, { color: index < 3 ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)' }]}>{row.rank || index + 1}</Text>
                           {row.avatar ? <Image source={{ uri: row.avatar }} style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} /> : <View style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
@@ -1529,7 +1546,8 @@ export default function MediaScreen() {
                             <Text style={[styles.rankName, { color: 'rgba(255,255,255,0.94)' }]} numberOfLines={1}>{row.name}</Text>
                             <Text style={[styles.rankValue, { color: 'rgba(255,255,255,0.6)' }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
                           </View>
-                        </View>
+                          <MaterialCommunityIcons name="chevron-right" size={18} color="rgba(255,255,255,0.4)" />
+                        </TouchableOpacity>
                       ))}
                     </ScrollView>
                   </View>
@@ -2039,10 +2057,17 @@ const styles = StyleSheet.create({
   memberHitChip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: radii.pill, borderWidth: 1 },
   memberHitText: { fontSize: 12, fontWeight: '700' },
   memberHitTeam: { fontSize: 9, marginLeft: 6, opacity: 0.85 },
-  modalShade: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.72)' },
+  /** 遮罩与弹幕列表统一（0.5） */
+  modalShade: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
   /** 横屏：底板横排、面板贴右（贡献榜/礼物面板共用） */
   modalShadeLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
-  giftPanel: { maxHeight: '82%', borderTopLeftRadius: radii.sheet, borderTopRightRadius: radii.sheet, padding: 14 },
+  /**
+   * ⚠️【显示不全修复 · 用户 2026-11-11】
+   * 面板必须 `flexShrink: 1`：RN 默认 0，内容超高时不会收缩，
+   * 底部「数量 + 送出 / 去充值」会被顶出屏幕（横屏尤其明显）。
+   * 上限从 82% 提到 88%，配合内部滚动区的 flexShrink 把高度让给底部操作行。
+   */
+  giftPanel: { maxHeight: '88%', flexShrink: 1, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 14, paddingBottom: 14 },
   /**
    * 横屏：底部抽屉可用高度只有 ~400dp 的 82% ≈ 330dp，再叠加内部固定 maxHeight 的
    * 滚动区（360/430）会把「送出 / 去充值」挤出屏幕（RN 默认 flexShrink:0，不会自动让位）。
@@ -2050,17 +2075,18 @@ const styles = StyleSheet.create({
    */
   /** 横屏：贡献榜/礼物面板贴右整列（与弹幕列表同一套抽屉，用户 2026-11-09） */
   giftPanelLandscape: {
-    maxHeight: '100%', height: '100%', width: 380,
+    /** 高度按内容自适应（去掉 height:'100%'）——否则榜单只有几条时底部留一大片空白 */
+    maxHeight: '100%', width: 420, maxWidth: '92%', flexShrink: 0,
     borderTopRightRadius: 0, borderBottomRightRadius: 0,
-    borderBottomLeftRadius: radii.sheet, paddingTop: 18,
+    borderBottomLeftRadius: 20,
   },
   giftHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   giftTitle: { fontSize: 18, fontWeight: '800' },
   giftStatus: { fontSize: 12, marginBottom: 10 },
   giftTip: { fontSize: 11, marginBottom: 6, textAlign: 'center', fontWeight: '600' },
-  giftGrid: { maxHeight: 360 },
-  /** 横屏：礼物网格收窄 + 允许收缩，把高度让给底部「送出」按钮 */
-  giftGridLandscape: { maxHeight: 150, flexShrink: 1 },
+  giftGrid: { maxHeight: 360, flexShrink: 1 },
+  /** 横屏：面板高度已定（100%），列表 flexGrow 吃满剩余空间 —— 固定 maxHeight 会只显示半屏 */
+  giftGridLandscape: { flexShrink: 1 },
   giftGridInner: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   giftItem: { width: '31%', padding: 8, borderRadius: radiiAlias.input, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth },
   giftItemActive: {},
@@ -2073,9 +2099,9 @@ const styles = StyleSheet.create({
   sendGiftText: { fontSize: 14, fontWeight: '800' },
   rechargeBtn: { marginTop: 10, alignItems: 'center', paddingVertical: 10 },
   rechargeText: { fontSize: 13, fontWeight: '800' },
-  rankList: { maxHeight: 430 },
-  /** 横屏：贡献榜列表收窄 + 允许收缩（同上） */
-  rankListLandscape: { maxHeight: 160, flexShrink: 1 },
+  rankList: { maxHeight: 430, flexShrink: 1 },
+  /** 横屏：contrib 列表吃满剩余高度（固定 maxHeight 会只显示半屏） */
+  rankListLandscape: { flexShrink: 1 },
   rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth },
   rankNo: { width: 32, fontSize: 15, fontWeight: '900' },
   rankAvatar: { width: 38, height: 38, borderRadius: 20, marginRight: 10 },

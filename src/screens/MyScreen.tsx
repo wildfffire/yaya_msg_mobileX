@@ -2,15 +2,20 @@
  * MyScreen · 「我的」（原设置 tab，2026-11-09 按 PiliPlus 思路拆分）
  *
  * PiliPlus 的「我的」页是个人中心：右上角放设置齿轮图标，点进去才是分门别类的设置列表。
- * 本页对应地：
- *  - 右上角两个**纯图标**入口：账号管理（LoginScreen）在左、设置（SettingsDetailScreen）在右，无文字；
- *  - 本页只保留「关于 hero（稍后再看 / 观看历史 / 牙牙消息网页端）」「工具」「成员数据」三个板块；
- *  - 原「账号 / 外观 / 语言 / 小窗播放 / 房间 / 自动签到」全部搬去 SettingsDetailScreen 分类陈列。
+ * 本页对应地（2026-11-11 改版）：
+ *  - 右上角两个**纯图标**入口：账号管理（AccountScreen）在左、设置（SettingsDetailScreen）在右，无文字；
+ *  - 顶部是账号头像 / 用户名 / 等级（点头像进账号中心），不展示无官方接口的数字；
+ *  - 稍后再看 / 观看历史改为贴边横滑卡区，由设置里的两个开关控制，默认关；
+ *  - 工具与成员数据板块保留；应用图标、版本号、网页端入口、仓库地址与清除缓存移到设置最后一项「关于」。
  */
-import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { toMs } from '../utils/format';
+import React, { useEffect, useState } from 'react';
+import { formatTimestamp } from '../utils/format';
+import { useWatchLaterStore } from '../services/watchLater';
+import { useWatchHistoryStore } from '../services/watchHistory';
+import WatchCardStrip, { type WatchStripItem } from '../components/WatchCardStrip';
+import { MediaPlaybackHost } from '../player/session';
+import type { PlayMedia } from '../player/session';
 import {
-  Image,
   Linking,
   ScrollView,
   StyleSheet,
@@ -22,15 +27,18 @@ import { CompositeNavigationProp, useNavigation } from '@react-navigation/native
 import { BottomTabNavigationProp } from '@react-navigation/bottom-tabs';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList, TabParamList } from '../navigation/types';
-import { useUiStore, useMemberStore, useUpdateStore } from '../store';
+import { useUiStore, useSettingsStore } from '../store';
+import { saveSettings } from '../services/settings';
+import type { Theme } from '../types';
 import ScreenHeader from '../components/ScreenHeader';
 import { chromeScrollProps } from '../navigation/chromeScroll';
 import { FadeInView, ScalePressable } from '../components/Motion';
-import RuntimeLogViewer from '../components/RuntimeLogViewer';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { APP_VERSION, APP_BUILD } from '../constants';
-import { getMemberDataMeta, MemberDataMeta, updateMemberData } from '../services/memberData';
-import { usePalette, radii, radiiAlias, usePageBackground } from '../theme';
+import { loadSelfProfile } from '../services/pocketNim/credentials';
+import type { NimSelfProfile } from '../services/pocketNim/types';
+import { accountAvatar } from './account/accountParse';
+import { NetworkImage } from '../components/NetworkImage';
+import { usePalette, radii, usePageBackground } from '../theme';
 import { useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
 
@@ -71,65 +79,82 @@ function Row({ icon, title, value, onPress }: { icon: string; title: string; val
   );
 }
 
-function formatTime(ts: number): string {
-  if (!ts) return '';
-  const d = new Date(toMs(ts));
-  const pad = (n: number) => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-}
-
 export default function MyScreen() {
   const navigation = useNavigation<MyNavProp>();
   const palette = usePalette();
   const showToast = useUiStore((state) => state.showToast);
-  const memberCount = useMemberStore((state) => state.members.length);
   const { t } = useI18n();
-  const hasUpdate = useUpdateStore((s) => s.hasUpdate);
-  const [meta, setMeta] = useState<MemberDataMeta | null>(null);
-  const [logVisible, setLogVisible] = useState(false);
-  const [memberSyncing, setMemberSyncing] = useState(false);
-  const mountedRef = useRef(true);
-  useEffect(() => () => { mountedRef.current = false; }, []);
+  const settings = useSettingsStore((state) => state.settings);
+  const setSettings = useSettingsStore((state) => state.setSettings);
+  const token = settings.p48Token;
+  const watchLaterItems = useWatchLaterStore((state) => state.items);
+  const historyItems = useWatchHistoryStore((state) => state.items);
+  /** 自身资料（头像/昵称/等级）：loadSelfProfile 内有模块级缓存 + inflight + 切号自愈 */
+  const [self, setSelf] = useState<NimSelfProfile | null>(null);
+  /** 横滑卡点按后就地起播（与历史/稍后再看列表页同一套 modal 播放宿主） */
+  const [playMedia, setPlayMedia] = useState<PlayMedia | null>(null);
 
   useEffect(() => {
-    getMemberDataMeta().then(setMeta).catch(() => {});
-  }, []);
-
-  /** 手动更新成员数据库（双源: yk1z 库 + 官方接口） */
-  const manualSyncMembers = useCallback(async () => {
-    if (memberSyncing || !mountedRef.current) return;
-    setMemberSyncing(true);
-    try {
-      const res = await updateMemberData();
-      if (!mountedRef.current) return;
-      if (!res?.updated) {
-        showToast(t('更新失败：{msg}（已保留本地数据）', { msg: res?.message || '' }));
-        return;
-      }
-      const fresh = await getMemberDataMeta();
-      if (!mountedRef.current) return;
-      setMeta(fresh);
-      showToast(res?.detail ? t('更新成功：{detail}', { detail: res.detail }) : t('成员数据已更新'));
-    } catch (e: any) {
-      if (!mountedRef.current) return;
-      showToast(t('更新失败：{msg}（已保留本地数据）', { msg: e?.message || String(e) }));
-    } finally {
-      if (mountedRef.current) setMemberSyncing(false);
+    if (!token) {
+      setSelf(null);
+      return;
     }
-  }, [memberSyncing, t, showToast]);
+    let alive = true;
+    loadSelfProfile()
+      .then((profile) => { if (alive) setSelf(profile); })
+      .catch(() => { if (alive) setSelf(null); });
+    return () => { alive = false; };
+  }, [token]);
 
-  const checkVersion = () => {
-    const { hasUpdate: up, latestUrl } = useUpdateStore.getState();
-    if (up && latestUrl) {
-      Linking.openURL(latestUrl).catch(() => {});
-    } else {
-      useUpdateStore.getState().checkUpdate(true).then((has) => {
-        const next = useUpdateStore.getState();
-        if (has && next.hasUpdate && next.latestUrl) Linking.openURL(next.latestUrl).catch(() => {});
-        else showToast(t('已是最新版本'));
-      }).catch(() => showToast(t('已是最新版本')));
-    }
-  };
+  /** 头像/昵称/等级：拿不到一律走占位，不编造数字（成长值、粉丝数官方无接口，已按用户要求不展示） */
+  const avatarUri = accountAvatar({ avatar: self?.avatar || '' });
+  const nickname = String(self?.nickName || (token ? t('未命名账号') : t('未登录口袋账号')));
+  const level = Number(self?.level || 0);
+
+  /**
+   * 横滑区数据：只取最近 12 条。
+   * media 的 kind/id 分派与 MediaListPage 的 playMedia 逐字一致，
+   * 点卡片直接交给统一播放宿主解析直播/回放，不跳列表页。
+   */
+  const laterStripItems: WatchStripItem[] = watchLaterItems.slice(0, 12).map((it) => {
+    const kind = String(it.kind || '');
+    const base = { title: it.title, cover: it.cover, owner: it.owner, team: it.team, ownerId: it.ownerId };
+    const media: PlayMedia = it.kind === 'video'
+      ? { ...base, kind: 'video', videoId: it.id }
+      : it.kind === 'openlive'
+        ? { ...base, kind: 'openlive', liveId: it.id }
+        : { ...base, kind: 'replay', liveId: it.id };
+    return {
+      key: it.key,
+      title: it.title,
+      cover: it.cover,
+      label: it.audio || it.liveType === 2 ? t('电台') : kind === 'openlive' ? t('公演回放') : kind === 'replay' ? t('回放') : t('视频'),
+      meta: formatTimestamp(it.at).slice(0, 16),
+      media,
+    };
+  });
+  const historyStripItems: WatchStripItem[] = historyItems.slice(0, 12).map((it) => {
+    const kind = String(it.ref?.kind || it.kind || '');
+    const base = { title: it.title, cover: it.cover, owner: it.owner, team: it.team, ownerId: it.ownerId };
+    const refKind = it.ref?.kind;
+    const refId = String(it.ref?.id || '');
+    const liveId = String(it.liveId || '');
+    const media: PlayMedia = refKind === 'video'
+      ? { ...base, kind: 'video', videoId: refId || liveId }
+      : refKind === 'openlive'
+        ? { ...base, kind: 'openlive', liveId: refId || liveId }
+        : refKind === 'replay'
+          ? { ...base, kind: 'replay', liveId: liveId || refId }
+          : { ...base, kind: 'live', liveId: liveId || refId };
+    return {
+      key: it.key,
+      title: it.title,
+      cover: it.cover,
+      label: it.audio || it.liveType === 2 ? t('电台') : kind === 'openlive' ? t('公演回放') : kind === 'replay' ? t('回放') : t('视频'),
+      meta: `${formatTimestamp(it.at).slice(0, 16)}${it.count > 1 ? ` · ${t('看过 {count} 次', { count: it.count })}` : ''}`,
+      media,
+    };
+  });
 
   return (
     <>
@@ -140,8 +165,28 @@ export default function MyScreen() {
           hideBack
           right={
             <View style={styles.headerActions}>
+              {/* 深浅色切换（用户 2026-11-12）：单按钮循环「跟随系统 → 浅色 → 深色」，
+                  只用图标表示，不留文字；设置里的主题入口继续保留。 */}
               <TouchableOpacity
-                onPress={() => navigation.navigate('LoginScreen')}
+                onPress={() => {
+                  const order: Theme[] = ['system', 'light', 'dark'];
+                  const next = order[(order.indexOf(settings.theme) + 1) % order.length];
+                  setSettings({ theme: next });
+                  void saveSettings({ theme: next });
+                }}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                activeOpacity={0.85}
+                accessibilityRole="button"
+                accessibilityLabel={`${t('主题')}：${settings.theme === 'light' ? t('浅色') : settings.theme === 'dark' ? t('深色') : t('跟随系统')}`}
+              >
+                <MaterialCommunityIcons
+                  name={settings.theme === 'light' ? 'white-balance-sunny' : settings.theme === 'dark' ? 'weather-night' : 'theme-light-dark'}
+                  size={22}
+                  color={palette.label}
+                />
+              </TouchableOpacity>
+              <TouchableOpacity
+                onPress={() => navigation.navigate('AccountScreen')}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
                 activeOpacity={0.85}
                 accessibilityRole="button"
@@ -163,95 +208,114 @@ export default function MyScreen() {
         />
         <ScrollView {...chromeScrollProps} style={{ flex: 1 }} contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
 
-          {/* 关于 hero：稍后再看 / 观看历史 / 牙牙消息网页端（用户要求保留的板块） */}
+          {/* 账号头部：头像 + 用户名 + 等级（等级拿不到就不显示徽章），点击进账号中心 */}
           <Section title="" delay={60}>
-            <View style={styles.aboutHero}>
-              <View style={styles.aboutLogoWrap}>
-                <Image source={require('../../assets/logo.png')} style={styles.aboutLogoImg} />
+            <ScalePressable
+              onPress={() => navigation.navigate('AccountScreen')}
+              pressedScale={0.985}
+              activeOpacity={0.9}
+            >
+              <View style={styles.accountHero}>
+                {avatarUri ? (
+                  <NetworkImage
+                    source={{ uri: avatarUri }}
+                    style={styles.accountHeroAvatar}
+                    resizeMode="cover"
+                    thumbnail={160}
+                  />
+                ) : (
+                  <View style={[styles.accountHeroAvatarFallback, { backgroundColor: palette.fill2 }]}>
+                    <MaterialCommunityIcons name="account" color={palette.tint} size={30} />
+                  </View>
+                )}
+                <View style={styles.accountHeroText}>
+                  <View style={styles.accountHeroNameRow}>
+                    <Text style={[styles.accountHeroName, { color: palette.label }]} numberOfLines={1}>
+                      {nickname}
+                    </Text>
+                    {level > 0 ? (
+                      <View style={[styles.levelBadge, { backgroundColor: palette.tint }]}>
+                        <Text style={styles.levelBadgeText}>LV{level}</Text>
+                      </View>
+                    ) : null}
+                  </View>
+                  <Text style={[styles.accountHeroSub, { color: palette.labelSecondary }]} numberOfLines={1}>
+                    {t('登录 / 切换 / 修改资料')}
+                  </Text>
+                </View>
+                <MaterialCommunityIcons name="chevron-right" color={palette.labelTertiary} size={20} />
               </View>
-              <View style={{ flex: 1, marginLeft: 14 }}>
-                <Text style={[styles.aboutName, { color: palette.label }]}>{t('牙牙消息 X')}</Text>
-                <Text style={[styles.aboutSub, { color: palette.labelSecondary }]} numberOfLines={2}>
-                  {t('口袋48 / SNH48 Group 的第三方 Android 客户端')}
-                </Text>
-                <Text style={[styles.aboutSub2, { color: palette.labelTertiary }]} numberOfLines={1}>
-                  {t('面向安卓平板的定制版本')}
-                </Text>
+            </ScalePressable>
+          </Section>
+
+          {/* 用户信息下面三个入口：图标在上、文字在下（对齐样图） */}
+          <View style={styles.quickCardWrap}>
+            <Section title="" delay={80}>
+              <View style={styles.quickEntries}>
+                {[
+                  { icon: 'bookmark-multiple-outline', label: t('稍后再看'), route: 'WatchLaterScreen' },
+                  { icon: 'history', label: t('观看历史'), route: 'HistoryScreen' },
+                  { icon: 'download-outline', label: t('下载管理'), route: 'DownloadScreen' },
+                ].map((entry) => (
+                  <ScalePressable
+                    key={entry.label}
+                    onPress={() => navigation.navigate(entry.route as any)}
+                    pressedScale={0.94}
+                    style={styles.quickEntry}
+                  >
+                    <MaterialCommunityIcons name={entry.icon} size={24} color={palette.label} />
+                    <Text style={[styles.quickEntryText, { color: palette.labelSecondary }]} numberOfLines={1}>
+                      {entry.label}
+                    </Text>
+                  </ScalePressable>
+                ))}
               </View>
-              <View style={styles.verChipWrap}>
-                <TouchableOpacity style={[styles.verChip, { backgroundColor: palette.tintSoft }]} onPress={checkVersion} activeOpacity={0.85}>
-                  <Text style={[styles.verChipText, { color: palette.tint }]}>v{APP_VERSION}</Text>
-                </TouchableOpacity>
-                {hasUpdate ? <View style={[styles.verDot, { backgroundColor: palette.danger, borderColor: palette.surface }]} /> : null}
-                <Text style={[styles.verBuildText, { color: palette.labelTertiary }]}>
-                  {t('Build {n}', { n: APP_BUILD })}
-                </Text>
-              </View>
-            </View>
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row
-              icon="bookmark-multiple-outline"
+              <View style={[styles.divider, { backgroundColor: palette.innerStroke, marginLeft: 0 }]} />
+              <Row
+                icon="open-in-new"
+                title={t('牙牙消息网页端')}
+                value="gnz.hk"
+                onPress={() => Linking.openURL('https://gnz.hk/').catch(() => showToast(t('这个链接无法直接打开。')))}
+              />
+            </Section>
+          </View>
+          <View style={[styles.sectionLine, { backgroundColor: palette.innerStroke }]} />
+
+          {/* 稍后再看 / 观看历史：设置里打开开关后，按首页公演直播的横滑卡样式展示；点卡片直接起播 */}
+          {settings.my_show_watch_later ? (
+            <WatchCardStrip
               title={t('稍后再看')}
-              value={t('视频 / 公演回放 / 直播回放')}
-              onPress={() => navigation.navigate('WatchLaterScreen')}
+              count={watchLaterItems.length}
+              items={laterStripItems}
+              emptyText={t('稍后再看为空')}
+              onPressAll={() => navigation.navigate('WatchLaterScreen')}
+              onPressItem={(item) => { if (item.media) setPlayMedia(item.media); }}
             />
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row
-              icon="history"
+          ) : null}
+          {settings.my_show_watch_history ? (
+            <WatchCardStrip
               title={t('观看历史')}
-              value={t('播放记录与统计')}
-              onPress={() => navigation.navigate('HistoryScreen')}
+              count={historyItems.length}
+              items={historyStripItems}
+              emptyText={t('历史为空')}
+              onPressAll={() => navigation.navigate('HistoryScreen')}
+              onPressItem={(item) => { if (item.media) setPlayMedia(item.media); }}
             />
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row
-              icon="open-in-new"
-              title={t('牙牙消息网页端')}
-              value="gnz.hk"
-              onPress={() => Linking.openURL('https://gnz.hk/').catch(() => showToast(t('这个链接无法直接打开。')))}
-            />
-          </Section>
-
-          {/* 工具（用户要求保留） */}
-          <Section title={t('工具')} delay={100}>
-            {/* 现场互动（口袋云握手）：活动场次 / 预约 / 资格兑换（用户 2026-11-09） */}
-            <Row icon="account-voice" title={t('现场互动')} onPress={() => navigation.navigate('NetfaceScreen')} />
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row icon="download" title={t('下载管理')} onPress={() => navigation.navigate('DownloadScreen')} />
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row icon="text-box-search-outline" title={t('运行日志')} onPress={() => setLogVisible(true)} />
-          </Section>
-
-          {/* 成员数据（用户要求保留） */}
-          <Section title={t('成员数据')} delay={140}>
-            <View style={styles.memberStatRow}>
-              <View style={[styles.memberStatCard, { backgroundColor: palette.fill3 }]}>
-                <Text style={[styles.memberStatNum, { color: palette.label }]}>{memberCount}</Text>
-                <Text style={[styles.memberStatLabel, { color: palette.labelSecondary }]}>{t('位成员')}</Text>
-              </View>
-              <View style={[styles.memberStatCard, { backgroundColor: palette.fill3 }]}>
-                <Text style={[styles.memberStatNum, { color: palette.label }]}>{meta ? formatTime(meta.savedAt) : t('尚未同步')}</Text>
-                <Text style={[styles.memberStatLabel, { color: palette.labelSecondary }]}>{t('最近更新')}</Text>
-              </View>
-            </View>
-            <View style={[styles.autoSyncRow, { backgroundColor: palette.tintSoft }]}>
-              <MaterialCommunityIcons name="sync" size={16} color={palette.tint} />
-              <Text style={[styles.autoSyncText, { color: palette.labelSecondary }]}>{t('进入软件时自动同步成员数据')}</Text>
-            </View>
-            <View style={[styles.divider, { backgroundColor: palette.innerStroke }]} />
-            <Row
-              icon="cloud-download"
-              title={t('手动更新成员数据')}
-              value={memberSyncing ? t('更新中…') : t('立即同步')}
-              onPress={manualSyncMembers}
-            />
-            <Text style={[styles.note, { color: palette.labelTertiary }]}>
-              {t('成员数据共 {count} 位，数据来源于 yk1z 数据库（yk1z/yaya_msg），进入软件时自动同步最新。', { count: memberCount })}
-            </Text>
-          </Section>
+          ) : null}
 
         </ScrollView>
       </View>
-      <RuntimeLogViewer visible={logVisible} onClose={() => setLogVisible(false)} />
+      {/* 横滑卡点按后就地全屏播放：与历史/稍后再看列表页同一套 modal 播放宿主 */}
+      {playMedia ? (
+        <MediaPlaybackHost
+          modal
+          media={playMedia}
+          onClose={() => setPlayMedia(null)}
+          announcement
+          danmakuLivePollMs={5000}
+          danmakuVodNotice
+        />
+      ) : null}
     </>
   );
 }
@@ -267,24 +331,19 @@ const styles = StyleSheet.create({
   rowTitle: { flex: 1, minWidth: 0, fontSize: 15, fontWeight: '600' },
   rowValue: { flexShrink: 1, fontSize: 12, marginRight: 6, maxWidth: '48%', textAlign: 'right' },
   divider: { height: StyleSheet.hairlineWidth, marginLeft: 54 },
-  aboutHero: { flexDirection: 'row', alignItems: 'center', padding: 14 },
-  aboutLogoWrap: { width: 52, height: 52, alignItems: 'center', justifyContent: 'center' },
-  aboutLogoImg: { width: 52, height: 52 },
-  aboutName: { fontSize: 20, fontWeight: '800' },
-  aboutSub: { fontSize: 12, marginTop: 4 },
-  aboutSub2: { fontSize: 11, marginTop: 2 },
-  verChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: radiiAlias.button },
-  verChipWrap: { alignItems: 'flex-end' },
-  verDot: { position: 'absolute', top: -2, right: -2, width: 9, height: 9, borderRadius: 5, borderWidth: 1.5 },
-  verChipText: { fontSize: 12, fontWeight: '800' },
-  verBuildText: { fontSize: 10, fontWeight: '600', marginTop: 3 },
-  memberStatRow: { flexDirection: 'row', gap: 10, padding: 14 },
-  memberStatCard: { flex: 1, padding: 16, borderRadius: radii.md, alignItems: 'center', justifyContent: 'center', backgroundColor: 'transparent' },
-  memberStatNum: { fontSize: 18, fontWeight: '900', textAlign: 'center' },
-  memberStatLabel: { fontSize: 11, marginTop: 4 },
-  autoSyncRow: { flexDirection: 'row', alignItems: 'center', marginHorizontal: 14, paddingVertical: 8, paddingHorizontal: 12, borderRadius: radiiAlias.card },
-  autoSyncText: { fontSize: 12, marginLeft: 8, fontWeight: '600' },
-  note: { marginHorizontal: 14, marginTop: 10, fontSize: 11, lineHeight: 16 },
-  footer: { textAlign: 'center', fontSize: 12, marginTop: 24 },
-  footerSub: { textAlign: 'center', fontSize: 10, marginTop: 3 },
+  accountHero: { flexDirection: 'row', alignItems: 'center', padding: 16 },
+  accountHeroAvatar: { width: 60, height: 60, borderRadius: 30 },
+  accountHeroAvatarFallback: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
+  accountHeroText: { flex: 1, minWidth: 0, marginLeft: 14 },
+  accountHeroNameRow: { flexDirection: 'row', alignItems: 'center', gap: 8, flexWrap: 'wrap' },
+  accountHeroName: { fontSize: 20, fontWeight: '800', flexShrink: 1 },
+  levelBadge: { paddingHorizontal: 7, paddingVertical: 2, borderRadius: radii.pill },
+  levelBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '900' },
+  accountHeroSub: { fontSize: 12, marginTop: 5 },
+  // 账号信息下方三个入口：图标在上、文字在下，等宽横排（对齐样图）
+  quickCardWrap: { marginTop: 16 },
+  quickEntries: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16 },
+  quickEntry: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 7 },
+  quickEntryText: { fontSize: 12, fontWeight: '600' },
+  sectionLine: { height: StyleSheet.hairlineWidth, marginTop: 18 },
 });

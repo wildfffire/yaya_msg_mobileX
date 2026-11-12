@@ -25,6 +25,12 @@ type BgMap = Record<string, { localUri: string; url: string }>;
 let mapCache: BgMap | null = null;
 let mapPromise: Promise<BgMap> | null = null;
 
+/** 「关于 → 清除缓存」：清掉内存索引，下次按已清空的持久化映射重新加载 */
+export function clearRoomBgMemoryCache(): void {
+  mapCache = null;
+  mapPromise = null;
+}
+
 async function loadMap(): Promise<BgMap> {
   if (mapCache) return mapCache;
   if (mapPromise) return mapPromise;

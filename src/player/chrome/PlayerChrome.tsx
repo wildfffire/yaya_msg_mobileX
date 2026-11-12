@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Animated, GestureResponderEvent, Keyboard, Modal, PanResponder, Platform, Pressable, ScrollView, StyleSheet, Text, TouchableOpacity, useWindowDimensions, View } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { usePlayerStore } from '../store/playerStore';
 import { PlayerFeatures, PlayerExtraActionOption } from '../types';
@@ -35,6 +36,14 @@ interface Props {
     active?: boolean;
     onPress: () => void;
   };
+  /** 兼容旧调用点（右侧快捷栏方案已于 2026-11-12 撤销，入口仍留在「…」面板） */
+  sideActions?: Array<{
+    key: string;
+    icon: string;
+    label: string;
+    active?: boolean;
+    onPress?: () => void;
+  }>;
   onClose?: () => void;
   /**
    * 右上角「成员名 + 队伍」点击（进入成员房间）：不传 = 只展示不可点。
@@ -92,8 +101,14 @@ const CENTER_PLAY_LABELS: Record<CenterPlayVariant, string> = {
   bare: 'Bare',
   tint: 'Tint',
 };
-/** 默认 = ring（用户 2026-09-30 在四个备选里选了 B「圆环」，并要求圆环与其中的三角都再大一些） */
-let centerPlayVariant: CenterPlayVariant = 'ring';
+/**
+ * 默认 = glass（用户 2026-11-12 定版）。
+ * 每次在「…」面板里切换都会写入 AsyncStorage，下次启动沿用上次的选择。
+ */
+let centerPlayVariant: CenterPlayVariant = 'glass';
+const CENTER_PLAY_KEY = 'yaya_center_play_variant_v1';
+const isCenterVariant = (v: unknown): v is CenterPlayVariant =>
+  typeof v === 'string' && (CENTER_PLAY_VARIANTS as string[]).includes(v);
 
 /**
  * 直播判定：kind 或流形态（rtmp/rtmps/.flv 铁定直播）。
@@ -182,8 +197,17 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
    * PlayerCore 会在恢复时把落后超过 5s 的直播重建内核拉回实时，这里只是让用户看得见。
    */
   const [livePausedSec, setLivePausedSec] = useState(0);
-  /** 暂停态中央提示的样式变体（见顶部 CENTER_PLAY_VARIANTS 注释）：可在「…」面板里循环切换对比 */
+  /** 暂停态中央提示的样式变体（见顶部 CENTER_PLAY_VARIANTS 注释）：可在「…」面板里循环切换，选择会持久化 */
   const [centerVariant, setCenterVariant] = useState<CenterPlayVariant>(centerPlayVariant);
+  useEffect(() => {
+    AsyncStorage.getItem(CENTER_PLAY_KEY)
+      .then((saved) => {
+        if (!isCenterVariant(saved)) return;
+        centerPlayVariant = saved;
+        setCenterVariant(saved);
+      })
+      .catch(() => undefined);
+  }, []);
   /**
    * 「稍后再看」内置动作的状态（用户 2026-09-30：入口从列表行书签挪到播放器的功能面板）。
    *
@@ -410,9 +434,15 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
     && !/^rtmps?:/i.test(String(source.url || ''))
     && /^https?:/i.test(source.url)
     && !/\.m3u8/i.test(source.url);
+  /**
+   * 功能面板条目：点播追加「下载」；**小窗不再进面板**（用户 2026-11-12：
+   * 控制坞已有直达按钮，面板里那条重复且不常用）。控制坞的 pip 仍由 extraActions 提供。
+   */
   const moreActions = useMemo(() => {
-    if (!downloadAvailable) return extraActions;
-    return [{ key: 'download', icon: 'download', label: t('下载'), onPress: runDownload }, ...extraActions];
+    const base = downloadAvailable
+      ? [{ key: 'download', icon: 'download', label: t('下载'), onPress: runDownload }, ...extraActions]
+      : extraActions;
+    return base.filter((action) => action.key !== 'pip');
   }, [downloadAvailable, extraActions, runDownload, t]);
 
   if (!source) return null;
@@ -694,9 +724,9 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
         </Animated.View>
       ) : null}
 
-      {/* 说明：横屏曾有一版「右侧竖向快捷栏」，按用户要求已移除 ——
-          礼物/贡献榜/公告/弹幕设置/弹幕列表/清晰度统一留在右上「…」的更多面板里，
-          横屏不再另起一级入口（避免两套入口语义重复、也少挡画面）。 */}
+      {/* 说明（用户 2026-11-12 澄清）：礼物 / 贡献榜的**入口仍留在右上「…」面板**，
+          要改的是它们点开后那个面板的观感（黑白 + 简洁），不是把入口搬走。
+          右侧竖向快捷栏方案已撤销。 */}
 
       {/* 错误浮层 */}
       {error ? (
@@ -914,33 +944,48 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
       ) : null}
 
       {/* 倍速抽屉（点播/回放） */}
-      <Modal visible={rateSheetVisible} transparent animationType="slide" onRequestClose={() => setRateSheetVisible(false)}>
-        <TouchableOpacity activeOpacity={1} style={styles.rateMask} onPress={() => setRateSheetVisible(false)}>
-          <View style={[styles.rateSheet, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}>
-            <Text style={[styles.rateSheetTitle, { color: palette.labelSecondary }]}>{t('播放速度')}</Text>
-            <View style={styles.rateGrid}>
-              {RATES.map((r) => (
+      {/* 播放速度：右下角下拉菜单（用户 2026-11-12：不要整屏弹出界面） */}
+      {rateSheetVisible ? (
+        <>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setRateSheetVisible(false)} />
+          <View style={[styles.rateDropdown, isLandscape ? styles.rateDropdownLandscape : null]}>
+            {RATES.map((r) => {
+              const on = rate === r;
+              return (
                 <TouchableOpacity
                   key={r}
-                  style={[styles.rateChip, { backgroundColor: rate === r ? palette.tintSoft : palette.fill2, borderColor: rate === r ? palette.tint : 'transparent' }]}
-                  onPress={() => pickRate(r)}
-                  activeOpacity={0.75}
+                  style={[styles.rateOption, on && styles.rateOptionOn]}
+                  onPress={() => {
+                    pickRate(r);
+                    setRateSheetVisible(false);
+                  }}
+                  activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${r}x`}
                 >
-                  <Text style={[styles.rateChipText, { color: rate === r ? palette.tint : palette.label }]}>{r}x</Text>
+                  <Text style={[styles.rateOptionText, on && styles.rateOptionTextOn]}>{r}x</Text>
+                  {on ? <MaterialCommunityIcons name="check" size={13} color="#FFFFFF" /> : null}
                 </TouchableOpacity>
-              ))}
-            </View>
+              );
+            })}
           </View>
-        </TouchableOpacity>
-      </Modal>
+        </>
+      ) : null}
 
       {/* 更多面板 */}
       <Modal visible={moreVisible} transparent animationType="slide" onRequestClose={() => setMoreVisible(false)}>
         {/* 暗幕区 = 点击关闭（用户 2026-10-02：点外部区域能关掉面板） */}
-        <Pressable style={styles.modalShade} onPress={() => setMoreVisible(false)}>
+        <Pressable
+          style={[styles.modalShade, isLandscape && styles.modalShadeLandscape]}
+          onPress={() => setMoreVisible(false)}
+        >
           {/* 面板自身接管触摸起点：面板内空白处点击不会冒泡到暗幕（只有点在面板外才关闭） */}
           <View
-            style={[styles.morePanel, isLandscape ? styles.sheetLandscape : null, { backgroundColor: palette.surface }]}
+            style={[
+              styles.morePanel,
+              isLandscape ? styles.morePanelLandscape : styles.sheetLandscape,
+              { backgroundColor: palette.surface },
+            ]}
             onStartShouldSetResponder={() => true}
           >
             <View style={styles.moreHeader}>
@@ -952,7 +997,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
             <View style={styles.moreGrid}>
               {/* 画面旋转/镜像（桌面 DPlayer 对齐） */}
               <TouchableOpacity
-                style={styles.moreItem}
+                style={[styles.moreItem, isLandscape && styles.moreItemRow]}
                 onPress={() => {
                   const st = usePlayerStore.getState();
                   st.setRotateDeg((st.rotateDeg + 90) % 360);
@@ -961,12 +1006,12 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                 }}
               >
                 <MaterialCommunityIcons name="sync" size={22} color={palette.labelSecondary} />
-                <Text style={[styles.moreLabel, { color: palette.labelSecondary }]}>
+                <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: palette.labelSecondary }]}>
                   {rotateDeg ? t('旋转 {deg}°', { deg: rotateDeg }) : t('旋转')}
                 </Text>
               </TouchableOpacity>
               <TouchableOpacity
-                style={styles.moreItem}
+                style={[styles.moreItem, isLandscape && styles.moreItemRow]}
                 onPress={() => {
                   const st = usePlayerStore.getState();
                   const next = st.mirrorMode === 'none' ? 'horizontal' : st.mirrorMode === 'horizontal' ? 'vertical' : 'none';
@@ -976,24 +1021,25 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                 }}
               >
                 <MaterialCommunityIcons name="flip-horizontal" size={22} color={palette.labelSecondary} />
-                <Text style={[styles.moreLabel, { color: palette.labelSecondary }]}>
+                <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: palette.labelSecondary }]}>
                   {mirrorMode === 'none' ? t('镜像') : mirrorMode === 'horizontal' ? t('水平镜像') : t('垂直镜像')}
                 </Text>
               </TouchableOpacity>
               {/* 暂停钮样式（对比用临时项，见文件顶部 CENTER_PLAY_VARIANTS 注释）：
                   点一下循环换一种，暂停画面即可对比；用户选定后把默认值改成那个、并删掉本项。 */}
               <TouchableOpacity
-                style={styles.moreItem}
+                style={[styles.moreItem, isLandscape && styles.moreItemRow]}
                 onPress={() => {
                   const idx = CENTER_PLAY_VARIANTS.indexOf(centerVariant);
                   const next = CENTER_PLAY_VARIANTS[(idx + 1) % CENTER_PLAY_VARIANTS.length];
                   centerPlayVariant = next;
                   setCenterVariant(next);
+                  void AsyncStorage.setItem(CENTER_PLAY_KEY, next).catch(() => undefined);
                   setMoreVisible(false);
                 }}
               >
                 <MaterialCommunityIcons name="gesture-tap" size={22} color={palette.labelSecondary} />
-                <Text style={[styles.moreLabel, { color: palette.labelSecondary }]}>
+                <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: palette.labelSecondary }]}>
                   {`${t('暂停钮样式')} · ${CENTER_PLAY_LABELS[centerVariant]}`}
                 </Text>
               </TouchableOpacity>
@@ -1001,7 +1047,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                   只在当前内容带 source.ref（可事后重新解析地址）时出现 —— 见上方 watchLaterRef 注释。 */}
               {watchLaterRef ? (
                 <TouchableOpacity
-                  style={styles.moreItem}
+                  style={[styles.moreItem, isLandscape && styles.moreItemRow]}
                   onPress={() => {
                     const st = usePlayerStore.getState();
                     const added = useWatchLaterStore.getState().toggle({
@@ -1025,7 +1071,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                     size={22}
                     color={inWatchLater ? palette.tint : palette.labelSecondary}
                   />
-                  <Text style={[styles.moreLabel, { color: inWatchLater ? palette.tint : palette.labelSecondary }]}>
+                  <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: inWatchLater ? palette.tint : palette.labelSecondary }]}>
                     {inWatchLater ? t('已加入稍后再看') : t('稍后再看')}
                   </Text>
                 </TouchableOpacity>
@@ -1033,7 +1079,7 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
               {moreActions.map((action) => (
                 <TouchableOpacity
                   key={action.key}
-                  style={styles.moreItem}
+                  style={[styles.moreItem, isLandscape && styles.moreItemRow]}
                   onPress={() => {
                     // 带选项的动作（如 B站画质）：关闭功能面板，从播放器右侧弹出独立小面板
                     if (action.options?.length) {
@@ -1046,21 +1092,21 @@ export function PlayerChrome({ features = {}, extraActions = [], topLeftAction, 
                   }}
                 >
                   <MaterialCommunityIcons name={action.icon as any} size={22} color={action.active ? palette.tint : palette.labelSecondary} />
-                  <Text style={[styles.moreLabel, { color: action.active ? palette.tint : palette.labelSecondary }]}>{action.label}</Text>
+                  <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: action.active ? palette.tint : palette.labelSecondary }]}>{action.label}</Text>
                   {action.options?.length ? (
                     <MaterialCommunityIcons name="chevron-right" size={14} color={palette.labelTertiary} />
                   ) : null}
                 </TouchableOpacity>
               ))}
               {features.kernelSwitch ? (
-                <TouchableOpacity style={styles.moreItem} onPress={() => {
+                <TouchableOpacity style={[styles.moreItem, isLandscape && styles.moreItemRow]} onPress={() => {
                   const s = usePlayerStore.getState();
                   s.setUseWebKernel(!s.useWebKernel);
                   s.clearError();
                   setMoreVisible(false);
                 }}>
                   <MaterialCommunityIcons name="monitor" size={22} color={palette.labelSecondary} />
-                  <Text style={[styles.moreLabel, { color: palette.labelSecondary }]}>
+                  <Text style={[styles.moreLabel, isLandscape && styles.moreLabelRow, { color: palette.labelSecondary }]}>
                     {useWebKernel ? t('切回原生播放器') : t('切换网页播放器')}
                   </Text>
                 </TouchableOpacity>
@@ -1307,11 +1353,47 @@ const styles = StyleSheet.create({
   },
   errorBtnText: { color: '#fff', fontSize: 13, fontWeight: '700' },
   modalShade: { flex: 1, backgroundColor: 'rgba(0,0,0,0.5)', justifyContent: 'flex-end' },
+  /** 横屏：底板横排、面板贴右（与弹幕列表/设置同一套抽屉语言） */
+  modalShadeLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
   morePanel: {
     borderTopLeftRadius: 18, borderTopRightRadius: 18, paddingBottom: 28, paddingTop: 14,
   },
   /** 横屏：底部弹层不再横跨整个宽屏（800px 宽的「更多」菜单很难扫读），收窄居中 */
   sheetLandscape: { maxWidth: 460, width: '100%', alignSelf: 'center' },
+  /** 横屏：右侧竖排抽屉（用户 2026-11-12：「三个点点开的功能面板横屏也放右边竖排」） */
+  morePanelLandscape: {
+    width: 320,
+    maxWidth: '86%',
+    height: '100%',
+    maxHeight: '100%',
+    alignSelf: 'auto',
+    paddingBottom: 20,
+    borderTopLeftRadius: 18,
+    borderTopRightRadius: 0,
+    borderBottomLeftRadius: 18,
+  },
+  /** 播放速度下拉：贴在右侧控制组上方的小菜单（黑白） */
+  rateDropdown: {
+    position: 'absolute',
+    right: 52,
+    bottom: 104,
+    width: 104,
+    borderRadius: 14,
+    paddingVertical: 6,
+    backgroundColor: 'rgba(18,18,20,0.97)',
+    zIndex: 40,
+  },
+  rateDropdownLandscape: { right: 96, bottom: 78 },
+  rateOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+  },
+  rateOptionOn: { backgroundColor: 'rgba(255,255,255,0.14)' },
+  rateOptionText: { fontSize: 13, fontWeight: '600', color: 'rgba(255,255,255,0.82)' },
+  rateOptionTextOn: { color: '#FFFFFF', fontWeight: '800' },
   moreHeader: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 18, paddingBottom: 10,
@@ -1319,7 +1401,10 @@ const styles = StyleSheet.create({
   moreTitle: { fontSize: 16, fontWeight: '700' },
   moreGrid: { flexDirection: 'row', flexWrap: 'wrap', paddingHorizontal: 12 },
   moreItem: { width: '25%', alignItems: 'center', paddingVertical: 12 },
+  /** 横屏竖排：一条一行，图标左、文字右 */
+  moreItemRow: { width: '100%', flexDirection: 'row', alignItems: 'center', justifyContent: 'flex-start', gap: 12, paddingHorizontal: 18, paddingVertical: 12 },
   moreLabel: { fontSize: 11, marginTop: 5, textAlign: 'center' },
+  moreLabelRow: { fontSize: 13, fontWeight: '600', marginTop: 0, textAlign: 'left' },
   // 动作项的右侧独立小面板（如画质）：贴右垂直居中，底色由渲染处传 palette.surface
   optionSheetWrap: { position: 'absolute', top: 0, bottom: 0, right: 0, justifyContent: 'center' },
   optionSheet: {

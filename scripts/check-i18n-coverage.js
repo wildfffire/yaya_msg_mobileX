@@ -16,7 +16,7 @@ const fs = require('fs');
 
 // 扫描范围：仅覆盖这几个历史高风险的入口。扩到全仓需先补齐 en/ja/ko 缺失的 key，
 // 否则门禁会长期处于红色（见 docs/优化方案_小白版_2026-09-28.md 第 4 批）。
-const files = ['src/screens/LoginScreen.tsx', 'src/screens/SettingsScreen.tsx', 'src/navigation/index.tsx'];
+const files = ['src/screens/AccountScreen.tsx', 'src/screens/SettingsScreen.tsx', 'src/navigation/index.tsx'];
 
 // 一个完整的字符串字面量：三种引号，且允许内部有 \" \' \\ 这类转义（否则带引号的 key 会被截断）。
 // 前面的 (?:^|[^A-Za-z0-9_$]) 保证不是 format(...) / split(...) 这类调用的尾巴。

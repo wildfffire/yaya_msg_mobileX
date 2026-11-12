@@ -9,6 +9,12 @@ import * as FileSystem from 'expo-file-system/legacy';
 const coverDataCache = new Map<string, string>();
 let coverDirReady: Promise<boolean> | null = null;
 
+/** 「关于 → 清除缓存」：清内存映射并让目录重新初始化 */
+export function clearCoverFileCache(): void {
+  coverDataCache.clear();
+  coverDirReady = null;
+}
+
 function ensureCoverDir(): Promise<boolean> {
   if (!coverDirReady) {
     coverDirReady = (async () => {

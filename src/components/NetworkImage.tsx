@@ -34,6 +34,13 @@ const localUriCache = new Map<string, string>();
 const localInflight = new Map<string, Promise<string>>();
 const localFailed = new Set<string>();
 
+/** 「关于 → 清除缓存」：文件被删后必须同步清内存映射，否则仍指向已不存在的 file:// */
+export function clearLocalImageCache(): void {
+  localUriCache.clear();
+  localInflight.clear();
+  localFailed.clear();
+}
+
 function hashUri(uri: string): string {
   let hash = 5381;
   for (let i = 0; i < uri.length; i += 1) hash = ((hash << 5) + hash + uri.charCodeAt(i)) | 0;

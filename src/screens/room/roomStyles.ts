@@ -384,7 +384,8 @@ export const styles = StyleSheet.create({
    */
   sideBadge: { minWidth: 18, height: 16, borderRadius: 8, paddingHorizontal: 5, alignItems: 'center', justifyContent: 'center', marginRight: 6 },
   sideBadgeText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', lineHeight: 13 },
-  roomRankPanel: { maxHeight: '82%', padding: 14, paddingBottom: 24, borderTopLeftRadius: radii.sheet, borderTopRightRadius: radii.sheet },
+  /** flexShrink:1 必须有：RN 默认 0，内容超高时面板不收缩 → 底部操作行被顶出屏幕（用户 2026-11-11 报「显示不全」） */
+  roomRankPanel: { maxHeight: '88%', flexShrink: 1, paddingHorizontal: 14, paddingBottom: 14, borderTopLeftRadius: 20, borderTopRightRadius: 20 },
   /**
    * 横屏：底部抽屉可用高度 ≈ 400dp×82% ≈ 330dp，而内部滚动区固定 maxHeight 420/360，
    * RN 默认 flexShrink:0 → 内容从面板盒体溢出到屏幕外（「送出」按钮点不到）。
@@ -395,9 +396,10 @@ export const styles = StyleSheet.create({
    * 只有左两角圆角 —— 右侧贴屏幕边缘。
    */
   roomRankPanelLandscape: {
-    maxHeight: '100%', height: '100%', width: 380,
+    /** 高度按内容自适应（去掉 height:'100%'）：榜单只有几条时底部不再留一大片空白 */
+    maxHeight: '100%', width: 420, maxWidth: '92%', flexShrink: 0,
     borderTopRightRadius: 0, borderBottomRightRadius: 0,
-    borderBottomLeftRadius: radii.sheet, paddingTop: 18,
+    borderBottomLeftRadius: 20,
   },
   // 用户资料卡（房间内点头像）
   /** 关闭区 · 上方：卡片上方的空白（flex:1 吃掉剩余空间）。卡片本身是普通 View，不参与手势竞争 */
@@ -444,9 +446,9 @@ export const styles = StyleSheet.create({
   roomRankClose: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
   roomRankTitle: { fontSize: 18, fontWeight: '900' },
   roomRankStatus: { fontSize: 12, marginBottom: 10 },
-  roomRankList: { maxHeight: 420 },
-  /** 横屏：贡献榜/送礼列表收窄 + 允许收缩，把高度让给面板底部的操作行 */
-  roomRankListLandscape: { maxHeight: 160, flexShrink: 1 },
+  roomRankList: { maxHeight: 420, flexShrink: 1 },
+  /** 横屏：面板高度已定（100%），列表 flexGrow 吃满剩余空间 —— 固定 maxHeight 会只显示半屏 */
+  roomRankListLandscape: { flexShrink: 1 },
   roomRankRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
   roomRankNo: { width: 24, fontSize: 13, fontWeight: '900', textAlign: 'center' },
   roomRankAvatar: { width: 34, height: 34, borderRadius: 17 },

@@ -3,7 +3,7 @@ import { NavigatorScreenParams } from '@react-navigation/native';
 export type RootStackParamList = {
   Main: NavigatorScreenParams<TabParamList>;
   MessagesScreen: undefined;
-  LoginScreen: undefined;
+  AccountScreen: undefined;
   RechargeScreen: undefined;
   FetchScreen: undefined;
   FlipScreen: { mode?: 'view' | 'send' } | undefined;

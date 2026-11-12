@@ -332,6 +332,9 @@ export interface AppSettings {
   yaya_auto_checkin_enabled: boolean;
   yaya_auto_checkin_last_date: string;
   yaya_auto_checkin_last_user: string;
+  /** 「我的」页横滑卡区开关：默认关，老存档由 loadSettings 合并补 false */
+  my_show_watch_later: boolean;
+  my_show_watch_history: boolean;
   customBackgroundFile: string;
   customBackgroundUpdatedAt: number;
   yaya_trip_show_all: boolean;

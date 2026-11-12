@@ -150,6 +150,7 @@ import { resolveLastSeenTarget } from '../utils/roomLastSeen';
 import { sortRooms, type RoomSortMode } from '../utils/roomListSort';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { GlassSurface } from '../components/GlassSurface';
+import { DarkSheetHandle, DarkSheetHeader } from '../components/DarkSheetHeader';
 import { GlassSegmented } from '../components/GlassSegmented';
 /**
  * 「房主发言采样」：某侧 homeowner 接口（服务端按房主过滤 = 「只看偶像」的数据源）的返回统计。
@@ -744,6 +745,11 @@ const route = useRoute<any>();
    * （关闭区 + 把按钮抬离系统手势条）。
    */
   const userCardHeight = Math.max(320, Math.round(winH) - 44);
+  /**
+   * 贡献榜列表的确定高度上限（用户 2026-11-12 截图定位）：
+   * 只给 flexShrink 时面板高度由内容决定，超出屏幕的部分被直接裁掉 → 名单少显示几个人。
+   */
+  const roomRankListH = Math.max(180, Math.round(winH) - 150);
   // 直播弹幕（云信飘屏/输入条/列表）、回放 LRC 弹幕、弹幕设置面板、礼物特效层：
   // 已全部收口到统一播放宿主（见 JSX 的 MediaPlaybackHost），本页不再自建弹幕连接。
 
@@ -2772,8 +2778,8 @@ const route = useRoute<any>();
   }, [roomLiveId, t]);
 
   /**
-   * 房间场景的控制坞按钮（函数形式：礼物只在**直播**显示，需要解析后的 isLive）：
-   * 礼物 / 贡献榜；弹幕设置、弹幕列表、小窗由宿主统一追加。
+   * 「…」面板里的功能项（用户 2026-11-12 澄清）：
+   * 礼物 / 贡献榜入口保持在这里，改的是它们点开后面板的观感（黑白 + 简洁）。
    */
   const roomExtraActions = useCallback(
     (ctx: { isLive: boolean }) => ([
@@ -4135,8 +4141,13 @@ const route = useRoute<any>();
               /* 已经在房间里：标题点击不要再跳一次房间（用户 2026-11-04 的标题进房功能只在外部场景启用） */
               roomLink={false}
               extraActions={roomExtraActions}
-              /* 直播间公告（用户 2026-10-02：房间内也要能看到）：
-                 直播与回放都拉，面板/顶栏与控制坞按钮由宿主统一渲染 */
+              /* 弹幕列表 / 飘屏点发送者 → 房间内用户资料卡（用户 2026-11-12） */
+              onOpenDanmakuProfile={(entry) => openSenderProfile({
+                id: entry.userId != null ? String(entry.userId) : '',
+                name: entry.nick,
+                avatar: entry.avatar || '',
+              })}
+              /* 直播间公告（房间内也要能看到）：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已删） */
               announcement
               /* 房间续播提示：「上次看到 mm:ss，已自动续播」（宿主统一 toast） */
               resumeNotice
@@ -4151,28 +4162,27 @@ const route = useRoute<any>();
                     上游就是因此出现「滑一下就关 / 划不动」（本次借鉴定版）。 */}
                 <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setRankVisible(false)} />
                 {/* 实心黑底（与弹幕列表同风格）：玻璃层会透出房间画面，用户 2026-11-09 反馈「背景是房间的背景」 */}
-                <View style={[styles.roomRankPanel, isRoomLandscape && styles.roomRankPanelLandscape, { backgroundColor: 'rgba(15,15,18,0.98)' }]}>
-                  {/* 顶部 handle */}
-                  <View style={styles.roomRankHandleWrap}>
-                    <View style={[styles.roomRankHandle, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />
-                  </View>
-                  <View style={styles.roomRankHeader}>
-                    <Text style={[styles.roomRankTitle, { color: 'rgba(255,255,255,0.94)' }]}>{t('贡献榜')}</Text>
-                    <ScalePressable onPress={() => setRankVisible(false)} pressedScale={0.92} activeOpacity={0.8} hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}>
-                      <View style={[styles.roomRankClose, { backgroundColor: 'rgba(255,255,255,0.12)' }]}>
-                        <MaterialCommunityIcons name="close" color={'rgba(255,255,255,0.75)'} size={18} />
-                      </View>
-                    </ScalePressable>
-                  </View>
+                <View style={[styles.roomRankPanel, isRoomLandscape && styles.roomRankPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
+                  {/* 与弹幕列表同一套头（用户 2026-11-12） */}
+                  <DarkSheetHandle show={!isRoomLandscape} />
+                  <DarkSheetHeader
+                    icon="trophy-outline"
+                    title={t('贡献榜')}
+                    meta={rankRows.length ? t('{n} 人', { n: rankRows.length }) : undefined}
+                    onClose={() => setRankVisible(false)}
+                  />
                   {rankLoading ? (
                     <View style={styles.roomRankLoadingRow}>
                       <ActivityIndicator size="small" color={'rgba(255,255,255,0.85)'} />
                       <Text style={[styles.roomRankStatus, { color: 'rgba(255,255,255,0.6)', marginBottom: 0 }]}>{t('正在加载...')}</Text>
                     </View>
-                  ) : (
-                    <Text style={[styles.roomRankStatus, { color: 'rgba(255,255,255,0.6)' }]}>{rankStatus}</Text>
-                  )}
-                  <ScrollView style={[styles.roomRankList, isRoomLandscape ? styles.roomRankListLandscape : null]} showsVerticalScrollIndicator={false}>
+                  ) : rankStatus ? (
+                    <Text style={[styles.roomRankStatus, { color: 'rgba(255,255,255,0.55)' }]}>{rankStatus}</Text>
+                  ) : null}
+                  <ScrollView
+                    style={[styles.roomRankList, isRoomLandscape ? [styles.roomRankListLandscape, { maxHeight: roomRankListH }] : null]}
+                    showsVerticalScrollIndicator={false}
+                  >
                     {rankLoading && !rankRows.length ? (
                       /* 骨架行：点开不再是一片空白（上游 v2.7.7 同款修复） */
                       [0, 1, 2, 3, 4].map((i) => (
@@ -4194,7 +4204,21 @@ const route = useRoute<any>();
                         const valNum = Number(row.value) || 0;
                         const progress = maxValue > 0 ? Math.max(0, Math.min(1, valNum / maxValue)) : 0;
                         return (
-                          <View key={String(row.userId || row.id || index)} style={[styles.roomRankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}>
+                          <TouchableOpacity
+                            key={String(row.userId || row.id || index)}
+                            style={[styles.roomRankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}
+                            activeOpacity={0.75}
+                            accessibilityRole="button"
+                            accessibilityLabel={row.name}
+                            onPress={() => {
+                              setRankVisible(false);
+                              openSenderProfile({
+                                id: String(row.userId || row.id || ''),
+                                name: String(row.name || ''),
+                                avatar: String(row.avatar || ''),
+                              });
+                            }}
+                          >
                             {/* 黑白榜（用户 2026-11-09）：名次不再用主题色，前三名白 0.95、其余白 0.5 */}
                             <Text style={[styles.roomRankNo, { color: index < 3 ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)' }]}>{row.rank || index + 1}</Text>
                             {row.avatar ? <NetworkImage source={{ uri: row.avatar }} style={[styles.roomRankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} thumbnail={180} /> : <View style={[styles.roomRankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
@@ -4205,7 +4229,7 @@ const route = useRoute<any>();
                               </View>
                             </View>
                             <Text style={[styles.roomRankValue, { color: 'rgba(255,255,255,0.6)' }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
-                          </View>
+                          </TouchableOpacity>
                         );
                       });
                     })()}
@@ -5019,7 +5043,7 @@ const route = useRoute<any>();
               icon="account-key-outline"
               title={t('登录后可查看关注房间和最新消息')}
               actionLabel={t('去登录')}
-              onAction={() => navigation.navigate('LoginScreen')}
+              onAction={() => navigation.navigate('AccountScreen')}
             />
           ) : followedError ? (
             <ErrorState title={t('加载失败')} hint={followedError} onAction={() => loadFollowed(true)} />

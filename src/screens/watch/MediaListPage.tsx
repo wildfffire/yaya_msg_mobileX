@@ -241,8 +241,7 @@ export function MediaListPage({
           modal
           media={playMedia}
           onClose={closePlayback}
-          /* 直播间公告（用户 2026-10-02：观看历史/稍后再看里也要能看到）：
-             直播与回放都拉，面板/顶栏与控制坞按钮由宿主统一渲染 */
+          /* 直播间公告：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已删） */
           announcement
           /* 与主直播页同一口径：直播弹幕 HTTP 轮询兜底 + 回放弹幕到达 toast */
           danmakuLivePollMs={5000}

@@ -84,7 +84,9 @@ export interface MediaPlaybackHostProps {
    *
    * 开启后宿主自动完成：拉取（直播与录播都拉，getLiveOne → getOpenLiveOne 兜底）、
    * 面板渲染（含控制条联动位移、刷新/收起）、顶栏与控制坞按钮、展开态持久化。
-   * 关闭时使用页面自己传入的 topLeftAction。
+   *
+   * ⚠️ 2026-11-12 用户澄清：「只把播放器功能（…面板）里的公告入口去掉，公告能力不要拆」。
+   * 所以顶栏按钮、公告面板、拉取与持久化全部保留；控制坞那一条不再追加（见 mergedActions）。
    */
   announcement?: boolean;
   /** 顶栏左上按钮（announcement 开启时由宿主接管） */
@@ -330,33 +332,19 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolved, miniPlayerBackTo, onClose, carousel.radio]);
 
-  /** 控制坞按钮 = 场景按钮 + 公告 + 通用（弹幕设置 / 弹幕列表 / 小窗）—— 与旧直播页/房间顺序一致 */
+  /** 控制坞按钮 = 场景按钮 + 通用（弹幕设置 / 弹幕列表 / 小窗）—— 与旧直播页/房间顺序一致 */
   const mergedActions = useMemo<PlaybackAction[]>(() => {
     const sceneActions = typeof extraActions === 'function'
       ? extraActions({ isLive, resolved })
       : (extraActions || []);
     const list: PlaybackAction[] = [...sceneActions];
-    // 公告按钮（与顶栏同一个动作，但独立构造 —— 它定义在 mergedActions 之后，
-    // 这里直接用原始依赖，避免「used before declaration」）
-    if (announcement && (announce.hasAnnouncement || isLive)) {
-      list.push({
-        key: 'announce',
-        icon: 'bullhorn',
-        label: t('公告'),
-        active: announce.expanded,
-        onPress: () => {
-          if (announce.hasAnnouncement) announce.toggle();
-          else void announce.refresh();
-        },
-      });
-    }
     list.push({ key: 'danmaku', icon: 'cog', label: t('弹幕设置'), onPress: () => setShowDanmakuSettings(true) });
     list.push({ key: 'danmakuList', icon: 'format-list-bulleted', label: t('弹幕列表'), active: showDanmakuList, onPress: () => setShowDanmakuList((v) => !v) });
     if (showMiniPlayer) {
       list.push({ key: 'pip', icon: 'picture-in-picture-bottom-right-outline', label: t('小窗'), onPress: openMiniPlayer });
     }
     return list;
-  }, [extraActions, isLive, resolved, announcement, announce.hasAnnouncement, announce.expanded, announce.toggle, announce.refresh, showDanmakuList, showMiniPlayer, openMiniPlayer, t]);
+  }, [extraActions, isLive, resolved, showDanmakuList, showMiniPlayer, openMiniPlayer, t]);
 
   /** 弹幕飘屏数据：直播=云信即时条目（+可选 HTTP 轮询时间轴）；回放=LRC 时间轴 */
   const overlayDanmaku = isLive ? danmaku.pollItems : danmaku.vodItems;
@@ -382,7 +370,8 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
      用户 2026-10-02：「房间和观看历史里还是没有（公告）」——
      公告本来就是播放器周边能力，收进宿主后主直播页 / 房间 / 历史 / 稍后再看
      由同一个开关（announcement）打开，面板样式与位移逻辑也只剩一份。
-     hook 调用必须在 mergedActions 之前（那里要读它构造控制坞按钮）。 */
+     hook 调用必须在 mergedActions 之前（那里要读它构造控制坞按钮）。
+     ⚠️ 2026-11-12：控制坞里的公告入口按用户要求去掉，顶栏按钮与面板保留。 */
   const insets = useSafeAreaInsets();
   const screen = useWindowDimensions();
   const isLandscape = isLandscapeSize(screen.width, screen.height);
@@ -407,9 +396,8 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
   }, [controlsVisible, ANNOUNCE_TOP_WITH_BAR, ANNOUNCE_TOP_NO_BAR, announceTopAnim]);
 
   /**
-   * 公告按钮（顶栏左上 + 控制坞，两处同一动作）：
-   * 有公告 → 展开/收起；无公告但直播 → 点一次拉取（保留主直播页原行为：
-   * 直播时按钮恒在，用户可主动拉；录播只有确实有公告才出现）。
+   * 公告按钮（顶栏左上，唯一入口；控制坞那条已按用户要求删除）：
+   * 有公告 → 展开/收起；无公告但直播 → 点一次拉取。
    */
   const announceTopAction = useMemo<PlaybackTopAction | undefined>(() => (
     announcement && (announce.hasAnnouncement || isLive)
@@ -523,7 +511,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
         }}
         resumeAt={resumeAt}
         extraActions={mergedActions}
-        /* 公告按钮优先走宿主内置（announcement 开启时），否则用页面传入的 */
+        /* 公告按钮走宿主内置（顶栏唯一入口；控制坞入口已按用户要求删除） */
         topLeftAction={announceTopAction || topLeftAction}
         barrageInput={resolved.isLive ? (
           <LiveBarrageBoard
@@ -560,6 +548,15 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
           visible={danmakuVisible}
           live={resolved.isLive}
           liveItems={overlayLiveItems}
+          /* 点飘屏 → 同一个用户资料卡（用户 2026-11-12）；LRC 无 userId 时不触发 */
+          onPressItem={onOpenDanmakuProfile ? (item) => onOpenDanmakuProfile({
+            id: item.key,
+            time: 0,
+            nick: item.nick || '',
+            text: item.text,
+            userId: item.userId,
+            avatar: item.avatar,
+          }) : undefined}
         />
         {/* 礼物特效层：与弹幕同一条云信连接 */}
         <GiftEffectOverlay items={danmaku.barrage.items} enabled={giftEffectOn} />
