@@ -115,14 +115,21 @@ try {
   await check('★ 接线：列表预览优先用详情页文本，且只写 /list/all 的页', () => {
     const row = readFileSync(join(root, 'src', 'screens', 'room', 'RoomListRow.tsx'), 'utf8');
     const screen = readFileSync(join(root, 'src', 'screens', 'FollowedRoomsScreen.tsx'), 'utf8');
-    const pollers = readFileSync(join(root, 'src', 'services', 'messagePollers.ts'), 'utf8');
+    // 滞后实验已拆到 ownerLagProbe.ts：接线守卫读「轮询 + 实验模块」两份源码
+    const pollers = [
+      readFileSync(join(root, 'src', 'services', 'messagePollers.ts'), 'utf8'),
+      readFileSync(join(root, 'src', 'services', 'ownerLagProbe.ts'), 'utf8'),
+    ].join('\n');
     assert.ok(row.includes('bigPreviewText') && row.includes('smallPreviewText'), '行要用详情页文本');
-    assert.ok(screen.includes('previewTextOf(roomPreviewMap'), '父级按侧取文本传进行');
+    assert.ok(row.includes("useRoomPreviewTextStore((s) => previewTextOf(s.map, previewId, 'big'))"),
+      '★ 行内按侧订阅预览文本（用户 2026-11-13：写入即刻显示，不再等父级换 data）');
+    assert.ok(!screen.includes('useRoomPreviewTextStore((s) => s.map)'),
+      '页面层不得订阅整张预览表（每次写入会整屏重渲染）');
     assert.ok(pollers.includes("startsWith('all')"), '只认 /list/all 的页（owner 回退页会停在过去）');
     assert.ok(pollers.includes('useRoomPreviewTextStore'), '轮询要写入预览文本');
     assert.ok(
-      pollers.includes('const idolMessages: any[] = list.filter((m: any) => isOwnerMessage(m));'),
-      '★ 每页只能筛一次偶像消息（预览/计数/诊断共用这一份，用户 2026-11-11）',
+      pollers.includes('const idolMessages: any[] = pickIdolMessages(list, {'),
+      '★ 每页只能筛一次偶像消息（5s/30s 共用 pickIdolMessages，用户 2026-11-13 统一）',
     );
     assert.ok(pollers.includes('() => isOwnerMessageStrict(m, s.member)'),
       '★ 计数/通知/预览共用严格房主判定（用户 2026-11-11「都走严格判定」）');

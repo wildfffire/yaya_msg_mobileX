@@ -9,7 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import PlayerScreen, { buildPocketHeaders } from '../player';
+import { InlineMediaPlayer, buildPocketHeaders } from '../player';
 import { usePlayerStore } from '../player/store/playerStore';
 import officialMediaApi from '../api/officialMedia';
 import { useI18n } from '../i18n';
@@ -178,13 +178,11 @@ export default function AudioProgramsScreen() {
           <Text style={[styles.playerTitle, { color: palette.label }]} numberOfLines={1}>
             {playing?.title || t('正在播放')}
           </Text>
-          {/* 统一播放器（重写）：电台节目 → 内嵌 PlayerScreen（线路切换保留在 children 按钮） */}
+          {/* 电台节目：统一内联播放器（线路切换保留在 children 按钮） */}
           <View style={styles.audioPlayer}>
-            <PlayerScreen
-              inline
+            <InlineMediaPlayer
               source={{ kind: 'audio', url: playUrls[urlIndex], headers: buildPocketHeaders() }}
               meta={{ title: playing?.title || t('正在播放') }}
-              features={{ kernelSwitch: true, rate: true }}
             >
               {playUrls.length > 1 ? (
                 <TouchableOpacity
@@ -198,7 +196,7 @@ export default function AudioProgramsScreen() {
                   <Text style={styles.switchLineText}>{t('切换线路')} ({urlIndex + 1}/{playUrls.length})</Text>
                 </TouchableOpacity>
               ) : null}
-            </PlayerScreen>
+            </InlineMediaPlayer>
           </View>
         </GlassSurface>
       ) : null}

@@ -16,9 +16,9 @@
  */
 import officialMediaApi from '../../api/officialMedia';
 import pocketApi from '../../api/pocket48';
-import { pickPlayableUrls, resolveRoomLiveMedia } from '../room/mediaResolve';
+import { resolveRoomLiveMedia } from '../room/mediaResolve';
 import { buildPocketHeaders } from '../../player';
-import { normalizeUrl } from '../../utils/data';
+import { normalizeUrl, pickText, unwrapList } from '../../utils/data';
 import { t } from '../../i18n';
 import type { WatchLaterKind } from '../../services/watchLater';
 
@@ -53,6 +53,51 @@ function officialMediaUrl(path: string): string {
   return path.startsWith('/') ? `https://mp4.48.cn${path}` : normalizeUrl(path);
 }
 
+/** 公演流评分：mp4 优先（可拖/兼容最好），其次 m3u8、flv、rtmp */
+function openLiveScore(url: string): number {
+  const lower = url.toLowerCase();
+  if (lower.includes('.mp4')) return 100;
+  if (lower.includes('.m3u8')) return 90;
+  if (lower.includes('.flv')) return 70;
+  if (lower.startsWith('rtmp://')) return 60;
+  return 40;
+}
+
+/**
+ * 公演场次的可播放地址（**唯一实现**）。
+ *
+ * 口径：`streamType === 2`（高清）优先；否则在 playStreams / 常见字段里按 mp4 > m3u8 > flv > rtmp 排序。
+ * 以前这段逻辑只写在 `OpenLiveScreen`，历史/稍后再看重播同一场时用的是另一套抽取（可能拿到标清）。
+ * 用户 2026-11-13：统一到一处，页面与 watch 解析都调用它。
+ */
+export function pickOpenLiveStreamUrl(res: any): string {
+  const streams = unwrapList(res, [
+    'content.playStreams',
+    'content.streams',
+    'data.playStreams',
+    'playStreams',
+  ]);
+  const highQuality = streams.find((stream: any) => Number(stream?.streamType) === 2);
+  const highQualityUrl = normalizeUrl(pickText(highQuality, ['streamPath', 'playStreamPath', 'url', 'playUrl']));
+  if (highQualityUrl) return highQualityUrl;
+  const urls = [
+    ...streams.map((item: any) => normalizeUrl(pickText(item, ['streamPath', 'playStreamPath', 'url', 'playUrl', 'flv', 'm3u8']))),
+    normalizeUrl(pickText(res, [
+      'content.playStreamPath',
+      'content.streamPath',
+      'content.playUrl',
+      'content.url',
+      'data.playStreamPath',
+      'data.streamPath',
+      'data.playUrl',
+      'playStreamPath',
+      'streamPath',
+      'url',
+    ])),
+  ].filter(Boolean) as string[];
+  return Array.from(new Set(urls)).sort((a, b) => openLiveScore(b) - openLiveScore(a))[0] || '';
+}
+
 export async function resolvePlayUrl(item: PlayableRef): Promise<ResolvedPlayback> {
   const title = String(item.title || '');
   const refKind = item.refKind;
@@ -67,10 +112,10 @@ export async function resolvePlayUrl(item: PlayableRef): Promise<ResolvedPlaybac
     return { url, headers: buildPocketHeaders(), title, refKind, refId };
   }
 
-  // ② 公演回放
+  // ② 公演回放（高清优先口径与公演页完全一致）
   if (refKind === 'openlive' && refId) {
     const detail = await pocketApi.getOpenLiveOne(refId);
-    const url = String(pickPlayableUrls(detail)[0] || '');
+    const url = pickOpenLiveStreamUrl(detail);
     if (!url) throw new Error(t('没有解析到播放地址'));
     return { url, headers: buildPocketHeaders(), title, refKind, refId };
   }

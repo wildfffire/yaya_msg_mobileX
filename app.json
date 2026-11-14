@@ -20,7 +20,7 @@
       },
       "edgeToEdgeEnabled": true,
       "package": "com.yk1z.yayamsg",
-      "versionCode": 3000047,
+      "versionCode": 3000067,
       "usesCleartextTraffic": true,
       "permissions": [
         "INTERNET",

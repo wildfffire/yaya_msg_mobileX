@@ -18,7 +18,7 @@
  */
 import { t } from '../../i18n';
 import { liveIdFromUrl } from '../../utils/data';
-import { buildPocketHeaders } from '../resolve/streamResolver';
+import { buildPocketHeaders } from '../../utils/mediaHeaders';
 import { cachedLiveList, resolveRoomLiveMediaWithRetry } from '../../screens/room/mediaResolve';
 import { isPlayableMediaUrl, roomTapIsVod, streamNeedsProxy } from '../../screens/room/mediaRules';
 import { findLiveItem } from '../../screens/room/roomIdentity';
@@ -63,6 +63,28 @@ export async function resolveMedia(media: PlayMedia): Promise<ResolvedMedia> {
   if (media.kind === 'video' || media.kind === 'openlive') {
     const refId = String(media.videoId || media.liveId || '');
     if (!refId) throw new Error(t('这条记录没有可用的播放地址'));
+    /**
+     * 公演（openlive）可能**已经拿到地址**（页面解析好带过来，含高清优先的口径）：
+     * 这种情况直接用，只补 isLive（公演直播要无进度条）。
+     * 官方视频库仍按 id 重新解析（地址带时效）。
+     */
+    const ownUrl = media.kind === 'openlive' && isPlayableMediaUrl(String(media.url || ''))
+      ? String(media.url)
+      : '';
+    if (ownUrl) {
+      return {
+        url: ownUrl,
+        urls: [ownUrl],
+        headers,
+        title: title || t('直播 / 录播'),
+        cover: media.cover,
+        liveId: String(media.liveId || refId),
+        isLive: !!media.isLive,
+        needsExo: streamNeedsProxy(ownUrl),
+        audioOnly: false,
+        ref: { kind: 'openlive', id: refId },
+      };
+    }
     const r = await resolvePlayUrl({
       refKind: media.kind,
       refId,
@@ -77,7 +99,7 @@ export async function resolveMedia(media: PlayMedia): Promise<ResolvedMedia> {
       title: r.title || title,
       cover: media.cover,
       liveId: String(r.liveId || liveId || refId),
-      isLive: false,
+      isLive: media.kind === 'openlive' ? !!media.isLive : false,
       needsExo: streamNeedsProxy(r.url),
       audioOnly: false,
       ref: { kind: media.kind, id: refId },

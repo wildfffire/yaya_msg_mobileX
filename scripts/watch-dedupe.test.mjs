@@ -32,7 +32,7 @@ try {
   );
   const mod = await import(`file://${join(tmp, 'src', 'utils', 'watchKeys.js')}`);
   const { historyKey, mergeHistoryItems, watchLaterBucket, watchLaterKey, mergeWatchLaterItems } = mod;
-  for (const fn of ['historyKey', 'mergeHistoryItems', 'watchLaterBucket', 'watchLaterKey', 'mergeWatchLaterItems']) {
+  for (const fn of ['historyKey', 'mergeHistoryItems', 'watchLaterBucket', 'watchLaterKey', 'mergeWatchLaterItems', 'shouldRecordHistory', 'isReplayableHistoryItem']) {
     if (typeof mod[fn] !== 'function') throw new Error(`编译产物里没有 ${fn} —— 拒绝以「通过」结束`);
   }
 
@@ -48,6 +48,24 @@ try {
   await check('历史：官方视频库（video:<videoId>）不与直播场次混在一起', () => {
     assert.equal(historyKey({ ref: { kind: 'video', id: 'V9' } }), 'video:V9');
     assert.notEqual(historyKey({ ref: { kind: 'video', id: 'V9' } }), historyKey({ liveId: 'V9' }));
+  });
+
+  await check('历史白名单（2026-11-13）：只记录直播 / 直播回放 / 公演', () => {
+    const { shouldRecordHistory, isReplayableHistoryItem } = mod;
+    assert.equal(shouldRecordHistory({ kind: 'live' }), true, '直播要记');
+    assert.equal(shouldRecordHistory({ kind: 'vod', ref: { kind: 'replay' } }), true, '直播回放要记');
+    assert.equal(shouldRecordHistory({ kind: 'vod', ref: { kind: 'openlive' } }), true, '公演要记');
+    assert.equal(shouldRecordHistory({ kind: 'direct' }), false, '房间视频消息不该进历史');
+    assert.equal(shouldRecordHistory({ kind: 'audio' }), false, '语音/电台节目不进历史');
+    assert.equal(shouldRecordHistory({ kind: 'vod', ref: { kind: 'video' } }), false, '官方视频库不进历史');
+    assert.equal(shouldRecordHistory({ kind: 'vod' }), false, '无来源的临时播放不进历史');
+    // 旧数据清理：无 ref / 无 liveId 的 `t:标题` 条目（房间视频、表情、私信媒体）要删掉
+    assert.equal(isReplayableHistoryItem({ key: 't:视频' }), false);
+    assert.equal(isReplayableHistoryItem({ key: 't:表情' }), false);
+    assert.equal(isReplayableHistoryItem({ key: 't:消息媒体' }), false);
+    assert.equal(isReplayableHistoryItem({ key: 'live:L1', liveId: 'L1' }), true);
+    assert.equal(isReplayableHistoryItem({ key: 'live:L2', ref: { kind: 'replay', id: 'L2' } }), true);
+    assert.equal(isReplayableHistoryItem({ key: 'video:V1', ref: { kind: 'video', id: 'V1' } }), true);
   });
 
   await check('历史：拿不到 id 时按归一化标题兜底（空白/大小写不同也算同一条）', () => {

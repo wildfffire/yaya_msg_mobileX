@@ -11,7 +11,7 @@
  */
 
 import type { Member } from '../../types';
-import { normalizeUrl, pickText, unwrapList } from '../../utils/data';
+import { unwrapList } from '../../utils/data';
 import { t } from '../../i18n';
 import { getMessageTime, normMs } from './timeRules';
 import type { LiveEntry, LiveNowIndex } from './liveIndex';
@@ -210,77 +210,13 @@ export function findLiveItem(listRes: any, liveId: string) {
   return list.find((item: any) => String(item.liveId || item.id || item.live_id || '') === String(liveId));
 }
 
-export function normalizeLiveRank(res: any): any[] {
-  let list = unwrapList(res, [
-    'content.rankList',
-    'content.userRankList',
-    'content.userRankingList',
-    'content.contributionList',
-    'content.list',
-    'content.data',
-    'data.rankList',
-    'data.userRankList',
-    'data.userRankingList',
-    'data.contributionList',
-    'data.list',
-    'rankList',
-    'userRankList',
-    'userRankingList',
-    'contributionList',
-    'list',
-  ]);
-  if (!list.length) {
-    const content = res?.content || res?.data || res;
-    const found: any[] = [];
-    const walk = (node: any, depth = 0) => {
-      if (!node || depth > 5) return;
-      if (Array.isArray(node)) {
-        node.forEach((item) => walk(item, depth + 1));
-        return;
-      }
-      if (typeof node !== 'object') return;
-      const hasUser = pickText(node, ['nickName', 'nickname', 'userName', 'name', 'userInfo.nickname', 'userInfo.nickName', 'user.nickname', 'user.nickName']);
-      const hasValue = pickText(node, ['score', 'total', 'cost', 'money', 'giftValue', 'value', 'amount', 'contribution', 'count', 'giftNum']);
-      if (hasUser || hasValue || node.userInfo || node.user) found.push(node);
-      Object.values(node).forEach((value) => walk(value, depth + 1));
-    };
-    walk(content);
-    list = found;
-  }
-  return list.map((item: any, index: number) => ({
-    ...item,
-    userId: pickText(item, ['userId', 'uid', 'id', 'account', 'userInfo.userId', 'userInfo.id', 'user.userId', 'user.id', 'user.userIdStr', 'memberInfo.userId', 'memberInfo.id']),
-    rank: Number(item.rank || item.no || item.index || index + 1),
-    name: pickText(item, [
-      'nickName',
-      'nickname',
-      'userName',
-      'name',
-      'senderName',
-      'userInfo.nickName',
-      'userInfo.nickname',
-      'userInfo.name',
-      'user.nickName',
-      'user.nickname',
-      'user.userName',
-      'user.name',
-      'memberInfo.nickName',
-      'memberInfo.nickname',
-    ], t('用户 {id}', { id: index + 1 })),
-    avatar: normalizeUrl(pickText(item, [
-      'avatar',
-      'headImg',
-      'picPath',
-      'userInfo.avatar',
-      'userInfo.headImg',
-      'user.avatar',
-      'user.headImg',
-      'user.userAvatar',
-      'memberInfo.avatar',
-    ])),
-    value: pickText(item, ['score', 'total', 'cost', 'money', 'giftValue', 'value', 'amount', 'contribution', 'count', 'giftNum'], ''),
-  }));
-}
+/**
+ * 贡献榜归一化：唯一实现在 `utils/liveRank`（与直播页共用）。
+ *
+ * 这里保留同名再导出，只是为了不让既有 import 断掉；**不要**再写第二份实现 ——
+ * 以前房间这份少了资料兜底，直播页修好的头像/昵称在房间里不生效（用户 2026-11-13）。
+ */
+export { normalizeLiveRank } from '../../utils/liveRank';
 
 export function avatarInitial(name: string) {
   return (name || t('用')).trim().slice(0, 1).toUpperCase();

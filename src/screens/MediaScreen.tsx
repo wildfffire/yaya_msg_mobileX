@@ -19,12 +19,11 @@ import {
   View,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import { applyOrientation, followSystem, isLandscapeSize } from '../utils/orientation';
+import { applyOrientation, followSystem } from '../utils/orientation';
 import { RouteProp, useFocusEffect, useNavigation, useRoute } from '@react-navigation/native';
 import { TabParamList } from '../navigation/types';
 import { useSettingsStore, useUiStore, useMemberStore } from '../store';
-import { setPipPlaying, setPipAspect, isPipActive } from '../utils/pip';
-import { useMiniPlayerStore } from '../store/miniPlayerStore';
+import { setPipAspect, isPipActive } from '../utils/pip';
 import { FadeInView } from '../components/Motion';
 import LivePulseDot from '../components/LivePulseDot';
 import ScreenHeader from '../components/ScreenHeader';
@@ -33,11 +32,10 @@ import { VODItem, Member } from '../types';
 import { formatTimestamp, formatDuration } from '../utils/format';
 import { errorMessage, normalizeUrl, pickText, unwrapList } from '../utils/data';
 import { thumbUrl } from '../utils/imageThumb';
-import { giftCost, giftImage, giftName, normalizeGiftList } from '../utils/gift';
 import { logInfo } from '../utils/runtimeLog';
 import pocketApi from '../api/pocket48';
 import { setLiveImmersiveMode } from '../native/LivePlayer';
-import { MediaPlaybackHost, type MediaPlaybackHostHandle, type PlayMedia } from '../player/session';
+import { MediaPlaybackHost, playMediaFromLiveItem, type MediaPlaybackHostHandle, type PlayMedia } from '../player/session';
 import { usePlayerStore } from '../player/store/playerStore';
 // 弹幕层（DanmakuOverlay / 弹幕列表 / 弹幕设置 / 直播输入条 / 礼物特效）已收口到
 // 统一播放宿主（src/player/session/MediaPlaybackHost），本页只保留公告正文的表情替换。
@@ -58,11 +56,10 @@ import { Skeleton } from '../components/Skeleton';
 import { usePalette, radii, radiiAlias } from '../theme';
 import { translate, useI18n } from '../i18n';
 import { GlassSurface } from '../components/GlassSurface';
-import { DarkSheetHandle, DarkSheetHeader } from '../components/DarkSheetHeader';
 import { GlassSegmented, GlassSegmentedScroll } from '../components/GlassSegmented';
 import { UserProfileSheet, type UserProfileTarget } from '../components/UserProfileSheet';
+import { pickPlayableUrl } from '../utils/playUrls';
 
-/** 回放列表加载占位：居中低调研度指示，无微光闪烁，避免「转圈 + 文字」混排打架 */
 type MediaRouteProp = RouteProp<TabParamList, 'Media'>;
 
 /**
@@ -74,77 +71,11 @@ type MediaRouteProp = RouteProp<TabParamList, 'Media'>;
  */
 const GRID_COVER_THUMB = 400;
 
-const PLAY_URL_FIELDS = [
-  'playStreamPath',
-  'playUrlPath',
-  'playPathUrl',
-  'streamUrl',
-  'streamURL',
-  'playUrl',
-  'urlPath',
-  'playPath',
-  'streamPath',
-  'path',
-  'src',
-  'pullStreamPath',
-  'liveStreamPath',
-  'livePlayStreamPath',
-  'streamPathHd',
-  'streamPathHigh',
-  'streamPathNormal',
-  'streamPathOrigin',
-  'url',
-  'liveUrl',
-  'm3u8Url',
-  'flvUrl',
-  'hlsUrl',
-  'videoUrl',
-  'recordUrl',
-  'mediaUrl',
-  'filePath',
-  'content.playStreamPath',
-  'content.playUrlPath',
-  'content.playPathUrl',
-  'content.streamUrl',
-  'content.playUrl',
-  'content.playPath',
-  'content.streamPath',
-  'content.pullStreamPath',
-  'content.liveStreamPath',
-  'content.livePlayStreamPath',
-  'content.url',
-  'data.playStreamPath',
-  'data.playUrlPath',
-  'data.playPathUrl',
-  'data.streamUrl',
-  'data.playUrl',
-  'data.playPath',
-  'data.streamPath',
-  'data.pullStreamPath',
-  'data.liveStreamPath',
-  'data.livePlayStreamPath',
-  'data.url',
-  'content.playStreams.0.streamPath',
-  'data.playStreams.0.streamPath',
-];
-
-function streamScore(url: string): number {
-  const lower = url.toLowerCase();
-  if (lower.includes('.m3u8') || lower.includes('format=hls')) return 100;
-  if (lower.startsWith('https://') && lower.includes('.flv')) return 60;
-  if (lower.startsWith('http://') && lower.includes('.flv')) return 50;
-  if (lower.startsWith('rtmp://')) return 20;
-  return 40;
-}
-
-function liveStreamScore(url: string): number {
-  const lower = url.toLowerCase();
-  if (lower.startsWith('rtmp://')) return 120;
-  if (lower.startsWith('https://') && lower.includes('.flv')) return 105;
-  if (lower.startsWith('http://') && lower.includes('.flv')) return 95;
-  if (lower.includes('.m3u8') || lower.includes('format=hls')) return 80;
-  return streamScore(url);
-}
+/**
+ * 直播列表条目的地址抽取（字段表 / 评分 / 排序）已抽到 `utils/playUrls`：
+ * 直播页与统一播放入口（player/session/playEntry）共用同一份，
+ * 不再让房间 / 历史 / 稍后再看各抄一套口径。
+ */
 
 /**
  * 为直播/录播项构造可搜索文本 + 数字串，支持「时间搜索」。
@@ -263,39 +194,7 @@ function CalendarSheet({
   );
 }
 
-function pickPlayableUrls(raw: any, preferLive = false): string[] {
-  const candidates: string[] = [];
-  const direct = normalizeUrl(pickText(raw, PLAY_URL_FIELDS));
-  if (direct) candidates.push(direct);
-  const streamList = unwrapList(raw, [
-    'streams',
-    'playStreams',
-    'liveStreams',
-    'urls',
-    'content.streams',
-    'content.playStreams',
-    'content.urls',
-    'data.streams',
-    'data.playStreams',
-    'content.liveStreams',
-    'content.streamList',
-    'content.playStreamList',
-    'data.liveStreams',
-    'data.streamList',
-    'data.playStreamList',
-    'data.urls',
-  ]);
-  for (const stream of streamList) {
-    const url = normalizeUrl(pickText(stream, PLAY_URL_FIELDS));
-    if (url) candidates.push(url);
-  }
-  const score = preferLive ? liveStreamScore : streamScore;
-  return Array.from(new Set(candidates.filter(Boolean))).sort((a, b) => score(b) - score(a));
-}
-
-function pickPlayableUrl(raw: any): string {
-  return pickPlayableUrls(raw)[0] || '';
-}
+// pickPlayableUrls / pickPlayableUrl 已迁到 utils/playUrls（见上方 import）。
 
 function normalizeLiveList(res: any): VODItem[] {
   const source = unwrapList(res, [
@@ -355,104 +254,8 @@ function mergeUniqueLiveItems(prev: VODItem[], next: VODItem[]) {
 /* 礼物归一化（normalizeGiftList / giftName / giftCost / giftImage）已抽到 utils/gift，
    直播页与房间礼物面板共用同一份口径 —— 官方接口返回的是分类数组，房间侧旧实现按平铺解析会显示空列表。 */
 
-function normalizeLiveRank(res: any): any[] {
-  let list = unwrapList(res, [
-    'content.rankList',
-    'content.userRankList',
-    'content.userRankingList',
-    'content.contributionList',
-    'content.list',
-    'content.data',
-    'content.data.list',
-    'content.data.rankList',
-    'data.rankList',
-    'data.userRankList',
-    'data.userRankingList',
-    'data.contributionList',
-    'data.list',
-    'rankList',
-    'userRankList',
-    'userRankingList',
-    'contributionList',
-    'list',
-  ]);
-  if (!list.length) {
-    const content = res?.content || res?.data || res;
-    if (content && typeof content === 'object') {
-      const found: any[] = [];
-      const walk = (node: any, depth = 0) => {
-        if (!node || depth > 5) return;
-        if (Array.isArray(node)) {
-          node.forEach((item) => walk(item, depth + 1));
-          return;
-        }
-        if (typeof node !== 'object') return;
-        const hasUser = pickText(node, ['nickName', 'nickname', 'userName', 'name', 'userInfo.nickname', 'userInfo.nickName', 'user.nickname', 'user.nickName']);
-        const hasValue = pickText(node, ['score', 'total', 'cost', 'money', 'giftValue', 'value', 'amount', 'contribution', 'count', 'giftNum']);
-        if (hasUser || hasValue || node.userInfo || node.user) found.push(node);
-        Object.values(node).forEach((value) => walk(value, depth + 1));
-      };
-      walk(content);
-      list = found;
-    }
-  }
-  return list.map((item: any, index: number) => ({
-    ...item,
-    userId: pickText(item, ['userId', 'uid', 'id', 'account', 'userInfo.userId', 'userInfo.id', 'user.userId', 'user.id', 'user.userIdStr', 'user.userAccount', 'memberInfo.userId', 'memberInfo.id']),
-    rank: Number(item.rank || item.no || item.index || index + 1),
-    name: pickText(item, [
-      'nickName',
-      'nickname',
-      'userName',
-      'name',
-      'senderName',
-      'userInfo.nickName',
-      'userInfo.nickname',
-      'userInfo.name',
-      'user.nickName',
-      'user.nickname',
-      'user.userName',
-      'user.name',
-      'memberInfo.nickName',
-      'memberInfo.nickname',
-    ], '\u7528\u6237 ' + (index + 1)),
-    avatar: normalizeUrl(pickText(item, [
-      'avatar',
-      'headImg',
-      'picPath',
-      'userInfo.avatar',
-      'userInfo.headImg',
-      'user.avatar',
-      'user.headImg',
-      'user.userAvatar',
-      'memberInfo.avatar',
-    ])),
-    value: pickText(item, ['score', 'total', 'cost', 'money', 'giftValue', 'value', 'amount', 'contribution', 'count', 'giftNum'], ''),
-  }));
-}
-
-function rankNameIsFallback(row: any, index: number) {
-  const name = String(row.name || '').trim();
-  const fallbackPrefix = '\u7528\u6237';
-  return !name || name === `${fallbackPrefix} ${index + 1}` || new RegExp(`^${fallbackPrefix}\\s*\\d+$`).test(name);
-}
-function profileFromUserRes(res: any) {
-  const info = res?.content?.userInfo || res?.content?.user || res?.content || res?.data?.userInfo || res?.data?.user || res?.data || res || {};
-  return {
-    name: pickText(info, [
-      'nickName', 'nickname', 'userName', 'name',
-      'profile.nickName', 'profile.nickname',
-      'userInfo.nickName', 'userInfo.nickname',
-      'user.nickName', 'user.nickname', 'user.userName',
-    ]),
-    avatar: normalizeUrl(pickText(info, [
-      'avatar', 'headImg', 'headUrl', 'picPath',
-      'profile.avatar', 'profile.headImg',
-      'userInfo.avatar', 'userInfo.headImg',
-      'user.avatar', 'user.headImg', 'user.userAvatar',
-    ])),
-  };
-}
+/* 贡献榜归一化 / 资料兜底已收口到 `utils/liveRank` + `components/LiveRankSheet`
+   （直播页与房间共用一份，见用户 2026-11-13：「房间点头像进的直播，贡献榜没有直播页修好的样子」）。 */
 
 function acceptUserId(item: any): string {
   return String(item?.userInfo?.userId || item?.user?.userId || item?.userId || item?.ownerId || item?.memberId || '');
@@ -533,15 +336,9 @@ export default function MediaScreen() {
   }, [media, memberLookup]);
   // 直播弹幕（云信聊天室连接 · 飘屏 · 输入条）与回放 LRC 弹幕已收口到统一播放宿主：
   // 见 src/player/session/usePlaybackDanmaku.ts —— 本页不再自建任何弹幕连接。
-  const [giftVisible, setGiftVisible] = useState(false);
-  const [gifts, setGifts] = useState<any[]>([]);
-  const [selectedGift, setSelectedGift] = useState<any | null>(null);
-  const [giftNum, setGiftNum] = useState('1');
-  const [giftStatus, setGiftStatus] = useState('');
-  const [balance, setBalance] = useState('');
+  // 礼物 / 贡献榜面板已整体内置到统一播放宿主（MediaPlaybackHost）：
+  // 本页只传「主播 id」，控制坞按钮与抽屉都由宿主提供，不再自己维护面板状态。
   const [hasMore, setHasMore] = useState(true);
-  const [rankVisible, setRankVisible] = useState(false);
-  const [rankRows, setRankRows] = useState<any[]>([]);
 
   // 续播读取与进度落盘已收口到统一播放宿主（services/replayProgress 统一存储，
   // 与房间/历史/稍后再看互通）：见 src/player/session/usePlaybackResume.ts。
@@ -551,7 +348,6 @@ export default function MediaScreen() {
   //   · 人数：直播=云信聊天室实时在线；回放=官方累计观看人次
   //     （src/player/session/usePlaybackOnlineStat.ts + MediaPlaybackHost 的 onlineStat）
 
-  const [rankStatus, setRankStatus] = useState('');
   // 公告面板已按用户要求（2026-11-11）从播放器整体删除（含顶栏/控制坞按钮与面板），
   // usePlaybackAnnouncement 保留文件但不再接线。
   /**
@@ -571,13 +367,8 @@ export default function MediaScreen() {
   // 关注成员 id 集合：「关注」tag 实时筛选（60s 同步一次）
   const [followedIds, setFollowedIds] = useState<Set<string>>(new Set());
 
-  // 画中画（悬浮窗）状态同步：播放器打开即置位（暂停/内核细节由播放器内部处理），
-  // 切后台自动进悬浮窗
-  useEffect(() => {
-    // 应用内小窗已接管 PiP 标志时不覆盖（防小窗切后台不进悬浮窗）
-    if (useMiniPlayerStore.getState().visible) return;
-    setPipPlaying(!!media);
-  }, [media]);
+  // 画中画（悬浮窗）标志由 FullscreenManager 统一维护（source + state + fullscreen），
+  // 本页不再重复 setPipPlaying（2026-11-13：两处写同一标志会互相覆盖）。
   // 搜索：选中成员后，搜索框转为「该成员的标题/日期」过滤
   const [selectedMember, setSelectedMember] = useState<Member | null>(null);
   /**
@@ -593,9 +384,8 @@ export default function MediaScreen() {
   /** 弹幕列表点发送者 → 用户资料卡（成员/粉丝同一个界面） */
   const [danmakuProfile, setDanmakuProfile] = useState<UserProfileTarget | null>(null);
   const screen = useWindowDimensions();
-  /** 播放器页是否横屏：公告偏移与礼物/贡献榜浮层都要按横屏重算 */
-  const isPlayerLandscape = isLandscapeSize(screen.width, screen.height);
-  // 公告面板的 top 偏移/动画（与控制条显隐联动）随之收进统一播放宿主。
+  // 礼物 / 贡献榜面板（含横屏抽屉判定）已收进统一播放宿主，本页不再需要横屏标志。
+  // 公告面板的 top 偏移/动画（与控制条显隐联动）也随之收进宿主。
 
   const GROUPS: { label: string; id: number; match: string }[] = [
     { label: '全部', id: 0, match: '' },
@@ -696,10 +486,7 @@ export default function MediaScreen() {
     const q = search.trim().toLowerCase();
     return members.filter((m) => memberSearchText(m).includes(q)).slice(0, 8);
   }, [members, search, selectedMember]);
-  const selectedGiftTotal = useMemo(
-    () => (selectedGift ? giftCost(selectedGift) * (Number(giftNum) || 1) : 0),
-    [giftNum, selectedGift],
-  );
+
 
   /**
    * 深链 / 房间直达播放（v2.6；2026-10-02 起改走统一播放宿主）：
@@ -1172,6 +959,11 @@ export default function MediaScreen() {
    * 公告补拉见 handleResolved）、快速起播、失败重试、代次守卫全部在宿主内完成 ——
    * 原来 100 多行的手写解析链与 playSeqRef 竞态守卫已删除。
    */
+  /**
+   * 直播页卡点播 —— 与房间 / 历史 / 稍后再看**同一个播放入口**
+   * （`player/session/playEntry.playMediaFromLiveItem`）。
+   * 本页只负责「页面态」：清错误、复位沉浸、清来源标记，然后把条目交给入口。
+   */
   const startPlay = (item: VODItem) => {
     const preferLive = tab === 'live';
     setError('');
@@ -1179,18 +971,9 @@ export default function MediaScreen() {
     setPendingResumeAt(0);
     // 列表内点播：来源是本站，退出播放留在直播页（清掉可能残留的首页来源标记）
     mediaFromRef.current = '';
-    const urls = pickPlayableUrls(item, preferLive);
-    setMedia({
-      kind: preferLive ? 'live' : 'replay',
-      url: urls[0] || '',
-      urls,
-      title: item.title || item.liveRoomTitle || t('直播 / 回放'),
-      cover: item.liveCover || item.coverPath,
-      liveId: String(item.liveId || ''),
-      // tab 预判直播/回放（与旧行为一致）：vod tab 一律按录播（可拖进度条）
-      isLive: preferLive,
+    setMedia(playMediaFromLiveItem(item, {
+      preferLive,
       // 成员名 + 队伍 + 数字 id：历史记录/稍后再看列表卡片要用（播放器不显示）
-      owner: String((item as any)?.nickname || (item as any)?.ownerName || ''),
       team: resolveTeam(
         memberLookup,
         {
@@ -1199,143 +982,20 @@ export default function MediaScreen() {
         },
         (item as any)?.team || '',
       ),
-      ownerId: String((item as any)?.userInfo?.userId || (item as any)?.userId || (item as any)?.ownerId || ''),
-      /**
-       * 电台直播（liveType=2，用户 2026-11-04）：
-       * 官方推流画面只有「成员离开」的占位图，播放器要用成员照片轮播作为画面
-       *（照片来自 getLiveOne → content.carousels，由播放宿主补拉）。
-       * 列表项已带 liveType → 首帧就是轮播形态，不会先闪一下那张占位图。
-       */
-      radio: preferLive && Number((item as any)?.liveType) === 2,
-      raw: item,
-    });
+      fallbackTitle: t('直播 / 回放'),
+    }));
   };
 
-  const openGiftPanel = async () => {
-    const cur = mediaRef.current;
-    if (!cur?.liveId) {
-      setGiftStatus(t('当前直播缺少 liveId，不能送礼'));
-      setGiftVisible(true);
-      return;
-    }
-    setGiftVisible(true);
-    setGiftStatus('');
-    setSelectedGift(null);
-    setGifts([]); // ⚠️【串台修复】先清空旧直播间的礼物格，避免新请求返回前显示上一间的列表
-    try {
-      const [giftRes, moneyRes] = await Promise.all([
-        pocketApi.getGiftList(String(cur.liveId)),
-        pocketApi.getUserMoney().catch(() => null),
-      ]);
-      const next = normalizeGiftList(giftRes);
-      setGifts(next);
-      setBalance(moneyRes?.content?.moneyTotal !== undefined ? String(moneyRes.content.moneyTotal) : '');
-      setGiftStatus(next.length ? t('已加载 {count} 个礼物', { count: next.length }) : t('礼物列表为空'));
-    } catch (err) {
-      setGifts([]);
-      setGiftStatus(t('加载礼物失败：{error}', { error: errorMessage(err) }));
-    }
-  };
-
-  const sendGift = async () => {
-    const cur = mediaRef.current;
-    if (!cur || !selectedGift) {
-      setGiftStatus(t('请先选择礼物'));
-      return;
-    }
-    const num = Math.max(1, Math.floor(Number(giftNum) || 1));
-    const targetUserId = acceptUserId(cur.raw);
-    if (!targetUserId) {
-      setGiftStatus(t('无法获取主播 ID，不能送礼'));
-      return;
-    }
-    setGiftStatus(t('正在发送...'));
-    try {
-      await pocketApi.sendGift({
-        giftId: String(selectedGift.giftId || selectedGift.id),
-        liveId: String(cur.liveId || ''),
-        acceptUserId: targetUserId,
-        giftNum: num,
-      });
-      /**
-       * ⚠️ 礼物公屏广播（用户反馈 2026-09-29：「我送礼物，主播看不到我送的」）。
-       * HTTP 送礼接口只扣款/入账；直播间里的礼物公屏**是客户端发到云信聊天室的**
-       *（官方客户端同款 PRESENT_NORMAL）—— 别人送的能看到，就是因为对方发了这条。
-       * 广播走统一播放宿主内的同一条云信连接（宿主 ref 暴露）。
-       * 广播失败一律静默：礼物已经送出，公屏失败不该把「已送出」变成失败提示。
-       */
-      const toName = pickText(cur.raw, [
-        'userInfo.nickName',
-        'userInfo.nickname',
-        'user.nickName',
-        'user.nickname',
-        'nickname',
-        'nickName',
-        'ownerName',
-        'title',
-      ]) || String((playingMember as any)?.ownerName || '');
-      playbackHostRef.current?.sendGiftBroadcast({
-        toUserId: targetUserId,
-        toName,
-        giftId: String(selectedGift.giftId || selectedGift.id),
-        giftName: giftName(selectedGift),
-        giftNum: num,
-        giftPic: giftImage(selectedGift),
-      });
-      setGiftStatus(t('已送出 {num} 个 {giftName}', { num, giftName: giftName(selectedGift) }));
-      const money = await pocketApi.getUserMoney().catch(() => null);
-      if (money?.content?.moneyTotal !== undefined) setBalance(String(money.content.moneyTotal));
-    } catch (err) {
-      setGiftStatus(t('送礼失败：{error}', { error: errorMessage(err) }));
-    }
-  };
-
-  const openRankPanel = async () => {
-    const cur = mediaRef.current;
-    if (!cur?.liveId) {
-      setRankRows([]);
-      setRankStatus(t('当前直播缺少 liveId，不能获取贡献榜'));
-      setRankVisible(true);
-      return;
-    }
-    setRankVisible(true);
-    setRankStatus('');
-    setRankRows([]); // ⚠️【串台修复】先清空旧直播间的榜单，避免新请求返回前显示上一间的贡献榜
-    try {
-      const res = await pocketApi.getLiveRank(String(cur.liveId));
-      const rows = normalizeLiveRank(res);
-      setRankRows(rows);
-      if (rows.some((row, index) => row.userId && (!row.avatar || rankNameIsFallback(row, index)))) {
-        setRankStatus(t('正在补充 {count} 位贡献用户资料...', { count: rows.length }));
-        const enriched = await Promise.all(rows.map(async (row, index) => {
-          if (!row.userId || (row.avatar && !rankNameIsFallback(row, index))) return row;
-          try {
-            const profile = profileFromUserRes(await pocketApi.getUserProfile(String(row.userId)));
-            return { ...row, name: profile.name || row.name, avatar: profile.avatar || row.avatar };
-          } catch {
-            return row;
-          }
-        }));
-        setRankRows(enriched);
-        setRankStatus(enriched.length ? t('已加载 {count} 位贡献用户', { count: enriched.length }) : t('贡献榜为空'));
-      } else {
-        setRankStatus(rows.length ? t('已加载 {count} 位贡献用户', { count: rows.length }) : t('贡献榜为空'));
-      }
-    } catch (err) {
-      setRankRows([]);
-      setRankStatus(t('贡献榜加载失败：{error}', { error: errorMessage(err) }));
-    }
-  };
-
+  /**
+   * 礼物 / 贡献榜：数据与 UI 全部在统一播放宿主内（usePlaybackGift + LiveGiftSheet / LiveRankSheet）。
+   * 本页只提供「主播 userId / 昵称」与资料卡回调，不再自己维护面板与送礼逻辑。
+   */
   useEffect(() => {
     const sub = DeviceEventEmitter.addListener('LivePlayerGiftRequested', () => {
       const current = mediaRef.current;
-      if (!current?.isLive) {
-        setGiftStatus(t('当前没有可送礼的直播上下文'));
-        setGiftVisible(true);
-        return;
-      }
-      openGiftPanel();
+      if (!current?.isLive) return;
+      // 打开宿主内置的送礼面板（与房间工具栏同一条路径）
+      playbackHostRef.current?.openGift();
     });
     return () => sub.remove();
   }, []);
@@ -1384,176 +1044,43 @@ export default function MediaScreen() {
    * 礼物 / 贡献榜**入口保持在这里**，要改的是它们点开后那个面板的观感（黑白 + 简洁）；
    * 「进入房间」已按用户要求从播放器功能里删除。
    */
-  const mediaExtraActions = useCallback((ctx: { isLive: boolean }) => ([
-    ...(ctx.isLive ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openGiftPanel() }] : []),
-    { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: () => openRankPanel() },
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  ]), [t]);
-
   if (media) {
     return (
       <View style={styles.playerPage}>
-        {/* 统一播放宿主（用户 2026-10-02）：解析（含解析中/失败 shell）、续播与进度、
-            弹幕（云信飘屏/输入条/弹幕列表/LRC）、在线人数、公告、小窗交棒全部由它完成。
-            本页只保留主直播页特有内容：
-              · 礼物 / 贡献榜 / 弹幕资料卡（afterPlayer）
-              · 控制坞按钮（extraActions：进入房间 / 礼物 / 贡献榜） */}
+        {/* 统一播放宿主：解析/续播/弹幕/在线人数/公告/小窗/**礼物 + 贡献榜**全部内置。
+            本页只声明「播什么 + 场景 + 主播是谁 + 资料卡回调」。 */}
         <MediaPlaybackHost
           ref={playbackHostRef}
+          /* 场景预设（用户 2026-11-13）：公告 + 直播弹幕 5s 轮询 + 回放弹幕提示都走宿主默认 */
+          scene="live"
           media={media}
           /* 点标题进房间：成员库反查到的 id 比 media.ownerId 更可靠（未登录/旧数据也能进） */
           roomMemberId={playingMember ? String(playingMember.id) : undefined}
-          onClose={() => { setPipPlaying(false); closePlayer(); }}
+          /* 送礼对象 = 主播 userId（宿主据此决定是否显示「礼物」按钮并发公屏广播） */
+          giftTargetUserId={acceptUserId(media.raw)}
+          giftTargetName={String(playingMember?.ownerName || pickText(media.raw, ['nickname', 'ownerName', 'userInfo.nickname', 'userInfo.nickName', 'title']) || '')}
+          onClose={closePlayer}
           initialPosition={pendingResumeAt}
-          /* 与历史行为一致：直播弹幕 HTTP 轮询兜底（5s）+ 回放弹幕到达 toast */
-          danmakuLivePollMs={5000}
-          danmakuVodNotice
           onOpenDanmakuProfile={(entry) => setDanmakuProfile({ nick: entry.nick, avatar: entry.avatar, userId: entry.userId != null ? String(entry.userId) : undefined })}
+          /* 贡献榜点某行 → 同一个用户资料卡 */
+          onOpenUserProfile={(target) => setDanmakuProfile({
+            nick: target.name,
+            avatar: target.avatar || '',
+            userId: target.userId,
+          })}
           onVideoSize={onVideoSize}
           /* 系统 PiP：快照会拍进浮层 → 隐藏弹幕列表/设置面板/公告面板（宿主统一判断） */
           hideSheets={inSystemPip}
-          /* 直播间公告（含录播）：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已按用户要求删除） */
-          announcement
-          extraActions={mediaExtraActions}
           afterPlayer={(
-            <>
-              {/* 弹幕列表点发送者 → 用户资料卡（含关注/取消关注 + 私信） */}
-              <UserProfileSheet
-                visible={!!danmakuProfile}
-                target={danmakuProfile}
-                onClose={() => setDanmakuProfile(null)}
-                onOpenChat={({ id, name }) => {
-                  setDanmakuProfile(null);
-                  navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
-                }}
-              />
-
-              <Modal visible={giftVisible} transparent animationType="slide" onRequestClose={() => setGiftVisible(false)}>
-                {/* 黑白实心抽屉（用户 2026-11-12）：与贡献榜同一套深色面板，
-                    横屏贴右侧并吃满高度（原来没套 landscape 布局 → 面板挤在左下半屏）。 */}
-                <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
-                  {/* 点左侧画面（竖屏则是面板上方的空白）关闭（用户 2026-11-12）：
-                      独立兄弟节点、排在面板之前 —— 包住面板会与内部 ScrollView 抢手势（一滑就关）。 */}
-                  <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setGiftVisible(false)} />
-                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
-                    {/* 与弹幕列表同一套头（用户 2026-11-12）：handle + 图标标题 + 关闭 × */}
-                    <DarkSheetHandle show={!isPlayerLandscape} />
-                    <DarkSheetHeader
-                      icon="gift-outline"
-                      title={t('直播送礼')}
-                      meta={balance ? t('余额 {balance}', { balance }) : undefined}
-                      onClose={() => setGiftVisible(false)}
-                    />
-                    {giftStatus ? (
-                      <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{giftStatus}</Text>
-                    ) : null}
-                    <ScrollView
-                      style={[styles.giftGrid, isPlayerLandscape ? styles.giftGridLandscape : null]}
-                      showsVerticalScrollIndicator={false}
-                    >
-                      <View style={styles.giftGridInner}>
-                        {gifts.map((gift) => {
-                          const active = String(selectedGift?.giftId || selectedGift?.id) === String(gift.giftId || gift.id);
-                          return (
-                            <TouchableOpacity
-                              key={String(gift.giftId || gift.id)}
-                              style={[
-                                styles.giftItem,
-                                {
-                                  backgroundColor: active ? 'rgba(255,255,255,0.16)' : 'rgba(255,255,255,0.06)',
-                                  borderColor: active ? 'rgba(255,255,255,0.9)' : 'transparent',
-                                },
-                              ]}
-                              onPress={() => setSelectedGift(gift)}
-                              activeOpacity={0.85}
-                            >
-                              {giftImage(gift) ? <Image source={{ uri: giftImage(gift) }} style={styles.giftImage} /> : <View style={[styles.giftImage, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
-                              <Text style={[styles.giftName, { color: 'rgba(255,255,255,0.9)' }]} numberOfLines={1}>{giftName(gift)}</Text>
-                              <Text style={[styles.giftCost, { color: 'rgba(255,255,255,0.55)' }]}>{t('{count} 鸡腿', { count: giftCost(gift) })}</Text>
-                            </TouchableOpacity>
-                          );
-                        })}
-                      </View>
-                    </ScrollView>
-                    <View style={styles.giftFooter}>
-                      <TextInput
-                        style={[styles.giftNum, { color: '#fff', borderColor: 'rgba(255,255,255,0.24)', backgroundColor: 'rgba(255,255,255,0.08)' }]}
-                        keyboardType="numeric"
-                        value={giftNum}
-                        onChangeText={setGiftNum}
-                        placeholderTextColor="rgba(255,255,255,0.4)"
-                      />
-                      <TouchableOpacity style={[styles.sendGiftBtn, { backgroundColor: '#fff' }]} onPress={sendGift} activeOpacity={0.85}>
-                        <Text style={[styles.sendGiftText, { color: '#111114' }]}>
-                          {selectedGift ? t('送出 · {count}', { count: selectedGiftTotal }) : t('选择礼物')}
-                        </Text>
-                      </TouchableOpacity>
-                    </View>
-                    <TouchableOpacity
-                      style={styles.rechargeBtn}
-                      onPress={() => {
-                        setGiftVisible(false);
-                        (navigation as any).navigate('RechargeScreen');
-                      }}
-                      activeOpacity={0.8}
-                    >
-                      <Text style={[styles.rechargeText, { color: 'rgba(255,255,255,0.6)' }]}>{t('余额不足？去充值鸡腿')}</Text>
-                    </TouchableOpacity>
-                  </View>
-                </View>
-              </Modal>
-              <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
-                {/* 横屏贴右 + 实心黑底（与弹幕列表同风格，用户 2026-11-09） */}
-                <View style={[styles.modalShade, isPlayerLandscape && styles.modalShadeLandscape]}>
-                  {/* 点左侧画面（竖屏则是面板上方的空白）关闭（用户 2026-11-12）：
-                      独立兄弟节点、排在面板之前 —— 不能包住面板（会与内部滚动列表抢手势）。 */}
-                  <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setRankVisible(false)} />
-                  <View style={[styles.giftPanel, isPlayerLandscape && styles.giftPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
-                    <DarkSheetHandle show={!isPlayerLandscape} />
-                    <DarkSheetHeader
-                      icon="trophy-outline"
-                      title={t('贡献榜')}
-                      meta={rankRows.length ? t('{n} 人', { n: rankRows.length }) : undefined}
-                      onClose={() => setRankVisible(false)}
-                    />
-                    {rankStatus ? (
-                      <Text style={[styles.giftStatus, { color: 'rgba(255,255,255,0.55)' }]} numberOfLines={1}>{rankStatus}</Text>
-                    ) : null}
-                    <ScrollView
-                      style={[styles.rankList, isPlayerLandscape ? styles.rankListLandscape : null]}
-                      showsVerticalScrollIndicator={false}
-                    >
-                      {rankRows.map((row, index) => (
-                        <TouchableOpacity
-                          key={String(row.userId || row.id || index)}
-                          style={[styles.rankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}
-                          activeOpacity={0.75}
-                          accessibilityRole="button"
-                          accessibilityLabel={row.name}
-                          onPress={() => {
-                            setRankVisible(false);
-                            setDanmakuProfile({
-                              nick: String(row.name || ''),
-                              avatar: String(row.avatar || ''),
-                              userId: row.userId ? String(row.userId) : undefined,
-                            });
-                          }}
-                        >
-                          {/* 黑白榜（用户 2026-11-09）：名次不用主题色，前三名白 0.95、其余白 0.5 */}
-                          <Text style={[styles.rankNo, { color: index < 3 ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)' }]}>{row.rank || index + 1}</Text>
-                          {row.avatar ? <Image source={{ uri: row.avatar }} style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} /> : <View style={[styles.rankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
-                          <View style={styles.rankInfo}>
-                            <Text style={[styles.rankName, { color: 'rgba(255,255,255,0.94)' }]} numberOfLines={1}>{row.name}</Text>
-                            <Text style={[styles.rankValue, { color: 'rgba(255,255,255,0.6)' }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
-                          </View>
-                          <MaterialCommunityIcons name="chevron-right" size={18} color="rgba(255,255,255,0.4)" />
-                        </TouchableOpacity>
-                      ))}
-                    </ScrollView>
-                  </View>
-                </View>
-              </Modal>
-            </>
+            <UserProfileSheet
+              visible={!!danmakuProfile}
+              target={danmakuProfile}
+              onClose={() => setDanmakuProfile(null)}
+              onOpenChat={({ id, name }) => {
+                setDanmakuProfile(null);
+                navigation.navigate('PrivateMessagesScreen', { targetUserId: id, targetName: name });
+              }}
+            />
           )}
         />
       </View>
@@ -2057,59 +1584,8 @@ const styles = StyleSheet.create({
   memberHitChip: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: radii.pill, borderWidth: 1 },
   memberHitText: { fontSize: 12, fontWeight: '700' },
   memberHitTeam: { fontSize: 9, marginLeft: 6, opacity: 0.85 },
-  /** 遮罩与弹幕列表统一（0.5） */
-  modalShade: { flex: 1, justifyContent: 'flex-end', backgroundColor: 'rgba(0,0,0,0.5)' },
-  /** 横屏：底板横排、面板贴右（贡献榜/礼物面板共用） */
-  modalShadeLandscape: { flexDirection: 'row', justifyContent: 'flex-end' },
-  /**
-   * ⚠️【显示不全修复 · 用户 2026-11-11】
-   * 面板必须 `flexShrink: 1`：RN 默认 0，内容超高时不会收缩，
-   * 底部「数量 + 送出 / 去充值」会被顶出屏幕（横屏尤其明显）。
-   * 上限从 82% 提到 88%，配合内部滚动区的 flexShrink 把高度让给底部操作行。
-   */
-  giftPanel: { maxHeight: '88%', flexShrink: 1, borderTopLeftRadius: 20, borderTopRightRadius: 20, paddingHorizontal: 14, paddingBottom: 14 },
-  /**
-   * 横屏：贡献榜/礼物面板贴右整列（与弹幕列表同一套抽屉，用户 2026-11-09）。
-   * 抽屉高度由底板 `alignItems: stretch` 撑到满高（maxHeight 100% 只是兜底），
-   * 因此内部滚动区用 flexGrow 吃满剩余高度，底部固定行始终贴底（见 giftGridLandscape）。
-   */
-  giftPanelLandscape: {
-    maxHeight: '100%', width: 420, maxWidth: '92%', flexShrink: 0,
-    borderTopRightRadius: 0, borderBottomRightRadius: 0,
-    borderBottomLeftRadius: 20,
-  },
-  giftHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
-  giftTitle: { fontSize: 18, fontWeight: '800' },
-  giftStatus: { fontSize: 12, marginBottom: 10 },
-  giftTip: { fontSize: 11, marginBottom: 6, textAlign: 'center', fontWeight: '600' },
-  giftGrid: { maxHeight: 360, flexShrink: 1 },
-  /**
-   * 横屏：抽屉是满高右栏 → 礼物宫格**吃满剩余高度**（flexGrow），底部「数量 + 送出 + 去充值」
-   * 始终贴底。原来只给 flexShrink，宫格长到固定 maxHeight 就停，面板底部留一大片空白
-   * （用户 2026-11-12 截图：礼物面板「去充值鸡腿」下面空了一大块）。
-   */
-  giftGridLandscape: { flexGrow: 1, flexShrink: 1, maxHeight: '100%' },
-  giftGridInner: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  giftItem: { width: '31%', padding: 8, borderRadius: radiiAlias.input, alignItems: 'center', borderWidth: StyleSheet.hairlineWidth },
-  giftItemActive: {},
-  giftImage: { width: 44, height: 44, borderRadius: radiiAlias.button, backgroundColor: '#ddd', marginBottom: 6 },
-  giftName: { fontSize: 11, fontWeight: '700' },
-  giftCost: { fontSize: 10, marginTop: 2 },
-  giftFooter: { flexDirection: 'row', gap: 10, paddingTop: 12 },
-  giftNum: { width: 82, borderRadius: radiiAlias.input, borderWidth: 1, paddingHorizontal: 12 },
-  sendGiftBtn: { flex: 1, borderRadius: radiiAlias.button, alignItems: 'center', justifyContent: 'center', minHeight: 44 },
-  sendGiftText: { fontSize: 14, fontWeight: '800' },
-  rechargeBtn: { marginTop: 10, alignItems: 'center', paddingVertical: 10 },
-  rechargeText: { fontSize: 13, fontWeight: '800' },
-  rankList: { maxHeight: 430, flexShrink: 1 },
-  /** 横屏：与礼物宫格同一口径 —— 榜单吃满剩余高度，面板底部不再留空白 */
-  rankListLandscape: { flexGrow: 1, flexShrink: 1, maxHeight: '100%' },
-  rankRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 9, borderBottomWidth: StyleSheet.hairlineWidth },
-  rankNo: { width: 32, fontSize: 15, fontWeight: '900' },
-  rankAvatar: { width: 38, height: 38, borderRadius: 20, marginRight: 10 },
-  rankInfo: { flex: 1 },
-  rankName: { fontSize: 14, fontWeight: '800' },
-  rankValue: { fontSize: 11, marginTop: 2 },
+  // 遮罩 / 礼物面板 / 贡献榜面板的样式已随组件迁到
+  // components/LiveGiftSheet 与 components/LiveRankSheet（直播页与房间共用同一份）
   // 日历筛选
   calBtn: { padding: 6, marginRight: 2, justifyContent: 'center' },
   calBtnActive: { borderRadius: radii.sm },

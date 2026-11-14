@@ -14,6 +14,7 @@ import { useI18n } from '../../i18n';
 import { usePalette } from '../../theme';
 import { useSettingsStore } from '../../store';
 import { ensureRoomListAvatar, useRoomListAvatarStore } from '../../services/roomListAvatar';
+import { previewTextOf, useRoomPreviewTextStore } from '../../services/roomPreviewText';
 import type { Member } from '../../types';
 import { messageText } from '../../utils/data';
 import { AVATAR_THUMB_WIDTH, thumbUrl } from '../../utils/imageThumb';
@@ -87,14 +88,11 @@ type RoomListRowProps = {
   /** 该房间「小房间侧」的未读条数（与大房间各自独立） */
   smallCount: number;
   /**
-   * 该侧「最新一条消息」的正文（由 5s 轮询从**详情页**拿到的，优先于列表接口的 msgContent）。
-   *
-   * 为什么需要（用户 2026-11-11：应籽言的几条回复在列表里不显示，仍是之前那句）：
-   * `last/message/get` 对引用消息返回的是**被引用原文**，不是回复正文 ——
-   * 详情页才是真正的「最后一条消息」。父级用字符串传值（memo 友好），空串 = 用 item 里的预览。
+   * 该侧「最新一条消息」的正文不再由父级传：本行按「成员 id + 侧」直接订阅
+   * `useRoomPreviewTextStore`，selector 返回**字符串**（用户 2026-11-13 预览延迟）。
+   * 详情页 / 圈组实时 / 列表快扫任一写入即刻到这一行，且只有文本真变的行重渲染；
+   * 空串时回退到 `item.lastMessage.msgContent`（列表接口对引用消息给的是被引用原文）。
    */
-  bigPreviewText?: string;
-  smallPreviewText?: string;
   onOpenRoom: (member: Member) => void;
   /** 点封面右上角的「直播中」角标 → 直接开播（看直播）；点封面/整行仍是进房间 */
   onOpenLive?: (member: Member) => void;
@@ -113,8 +111,6 @@ export const RoomListRow = React.memo(function RoomListRow({
   isOnMic,
   bigCount,
   smallCount,
-  bigPreviewText,
-  smallPreviewText,
   onOpenRoom,
   onOpenLive,
   onTogglePin,
@@ -133,6 +129,14 @@ export const RoomListRow = React.memo(function RoomListRow({
    */
   const listAvatarSource = useSettingsStore((s) => s.settings.room_list_avatar_source || 'official');
   const memberIdKey = String((item.member as any)?.id || item.memberId || '');
+  /**
+   * ★ 预览文本按「成员 id + 大/小侧」行内订阅（用户 2026-11-13 预览延迟）：
+   * 键口径与父级角标、轮询写入一致（memberId 优先）；selector 只返回字符串，
+   * store 其它房间写入时本行不重渲染，写入即刻显示不必等 FlatList 换 data。
+   */
+  const previewId = String(item.memberId || (item.member as any)?.id || '');
+  const bigPreviewText = useRoomPreviewTextStore((s) => previewTextOf(s.map, previewId, 'big'));
+  const smallPreviewText = useRoomPreviewTextStore((s) => previewTextOf(s.map, previewId, 'small'));
   const serverIdKey = String((item.member as any)?.serverId || '');
   const cachedAvatar = useRoomListAvatarStore((s) => s.map[memberIdKey]?.url || '');
   const officialAvatar = String(item.member?.avatar || '');

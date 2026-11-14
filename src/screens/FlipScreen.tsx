@@ -11,7 +11,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import PlayerScreen, { buildPocketHeaders } from '../player';
+import { InlineMediaPlayer, buildPocketHeaders } from '../player';
 import { RouteProp, useNavigation, useRoute } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import MemberPicker from '../components/MemberPicker';
@@ -684,16 +684,14 @@ export default function FlipScreen() {
 
                   {playingAnswerUrl === answerUrl && answerUrl ? (
                     <View style={styles.answerMediaCard}>
-                      {/* 统一播放器（重写）：翻牌答案 → 内嵌 PlayerScreen */}
-                      <PlayerScreen
-                        inline
+                      {/* 翻牌答案：内联小播放器（统一组件，不写观看历史） */}
+                      <InlineMediaPlayer
                         source={{
                           kind: flipAnswerType === 2 ? 'audio' : 'vod',
                           url: answerUrl,
                           headers: buildPocketHeaders(),
                         }}
                         meta={{ title: t('翻牌答案') }}
-                        features={{ kernelSwitch: true, rate: true }}
                       />
                     </View>
                   ) : null}

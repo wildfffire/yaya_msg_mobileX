@@ -67,9 +67,9 @@ const DEDUP_MS = 10_000;
  * 见 `scripts/watch-dedupe.test.mjs`）。这里原样再导出，既有调用方（record / persist migrate）
  * 与页面都不受影响。
  */
-import { historyKey, mergeHistoryItems } from '../utils/watchKeys';
+import { historyKey, isReplayableHistoryItem, mergeHistoryItems } from '../utils/watchKeys';
 
-export { historyKey, mergeHistoryItems };
+export { historyKey, mergeHistoryItems, isReplayableHistoryItem };
 
 interface WatchHistoryState {
   items: HistoryItem[];
@@ -146,17 +146,22 @@ export const useWatchHistoryStore = create<WatchHistoryState>()(
       name: 'yaya_watch_history_v1',
       storage: createJSONStorage(() => AsyncStorage),
       /**
-       * 版本 + 迁移（用户 2026-09-30：「同一个直播多次记录」「信息不全」）。
+       * 版本 + 迁移（用户 2026-09-30：「同一个直播多次记录」「信息不全」；
+       * 2026-11-13：「房间里的视频/表情包不要进历史」）。
        *
-       * 旧数据的 key 口径不统一（`replay:x` / `live:x` / `t:标题`）→ 同一直播裂成多条，
-       * 各条字段还互补。这里在读取持久化数据时**按新口径重新归并**：
-       * 合并后字段取并集、liveId 也保留下来，后续补全（封面/成员/队伍/时长）才有依据。
+       * v2：旧 key 口径不统一（`replay:x` / `live:x` / `t:标题`）→ 同一直播裂成多条，
+       *     读取时**按新口径重新归并**（字段取并集，保留 liveId 供后续补全）。
+       * v3：清掉「无来源、点开就失败」的旧记录（房间视频/表情/私信媒体被记成 `t:标题`）。
+       *     保留 replay / openlive / video / 带 liveId 的条目。
        * ⚠️ 刻意沿用同一个 storage name（不换 key）：换 name 会把用户已有的历史整份丢掉。
        */
-      version: 2,
+      version: 3,
       migrate: (persisted: any) => {
         const items = Array.isArray(persisted?.items) ? persisted.items : [];
-        return { ...(persisted || {}), items: mergeHistoryItems(items) };
+        return {
+          ...(persisted || {}),
+          items: mergeHistoryItems(items).filter(isReplayableHistoryItem),
+        };
       },
       partialize: (s) => ({ items: s.items }),
     },

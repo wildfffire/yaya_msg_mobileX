@@ -35,13 +35,16 @@ import { usePalette, withAlpha } from '../../theme';
 import { usePlayerStore } from '../store/playerStore';
 import { PlayerScreen } from '../PlayerScreen';
 import type { PlayerFeatures } from '../types';
-import { buildPocketHeaders } from '../resolve/streamResolver';
+import { buildPocketHeaders } from '../../utils/mediaHeaders';
 import { DanmakuOverlay } from '../../components/DanmakuOverlay';
 import { GiftEffectOverlay } from '../../components/GiftEffectOverlay';
 import { RadioPhotoCarousel, type RadioPhotoCarouselHandle } from '../../components/RadioPhotoCarousel';
 import DanmakuListSheet, { type DanmakuListEntry } from '../../components/DanmakuListSheet';
 import DanmakuSettingsSheet from '../../components/DanmakuSettingsSheet';
 import { LiveBarrageBoard } from '../../components/LiveBarrageBoard';
+// 播放周边抽屉（礼物 / 贡献榜）：四场景共用同一份 UI
+import { LiveGiftSheet } from '../../components/LiveGiftSheet';
+import { LiveRankSheet } from '../../components/LiveRankSheet';
 import { useDanmakuSettings } from '../../store/danmakuSettings';
 import { useMiniPlayerStore } from '../../store/miniPlayerStore';
 import type { LiveGiftBroadcast } from '../../services/pocketNim/types';
@@ -55,6 +58,7 @@ import { usePlaybackResume } from './usePlaybackResume';
 import { usePlaybackDanmaku } from './usePlaybackDanmaku';
 import { usePlaybackAnnouncement } from './usePlaybackAnnouncement';
 import { usePlaybackCarousel } from './usePlaybackCarousel';
+import { usePlaybackGift } from './usePlaybackGift';
 import type { PlaybackAction, PlaybackTopAction, PlayMedia, ResolvedMedia } from './types';
 
 /** extraActions 函数形式拿到的会话上下文 */
@@ -122,20 +126,58 @@ export interface MediaPlaybackHostProps {
   /** modal 模式：整页 Modal 覆盖（历史 / 稍后再看就地播放，硬件返回键自动关闭） */
   modal?: boolean;
   /**
+   * 场景预设（用户 2026-11-13「四场景统一调用直播页的入口」）。
+   *
+   * 只提供**默认值**，页面显式传的同名 prop 优先（undefined 才用场景默认）：
+   *   · live  —— 主直播页：公告开、直播弹幕 HTTP 轮询 5s、回放弹幕到达提示
+   *   · watch —— 历史 / 稍后再看 /「我的」横滑卡：与 live 同口径（页面自己加 modal）
+   *   · room  —— 房间内直播与回放：公告开、续播提示、不显示「进房间」（已在房间里）
+   *
+   * 页面因此只需声明「播什么 + 哪个场景」，能力清单不再各页抄一遍。
+   */
+  scene?: PlaybackScene;
+  /**
    * 顶栏标题点击进成员房间（用户 2026-11-04：直播 / 历史 / 稍后再看都要能进）。
    * 房间内播放传 false —— 已经在房间里，再跳一次会重复打开。
    */
   roomLink?: boolean;
   /** 成员 id 覆盖：页面已从成员库反查到更可靠的 id（如直播页的 playingMember）时传 */
   roomMemberId?: string;
+  /**
+   * 直播送礼 —— 播放周边能力全部内置宿主（用户 2026-11-13：
+   * 「四个场景的播放功能以后改一次全生效」）。
+   * 传主播 userId 即启用「礼物」按钮；空值不显示（回放 / 拿不到主播 id）。
+   */
+  giftTargetUserId?: string;
+  /** 主播昵称（礼物公屏广播展示用） */
+  giftTargetName?: string;
+  /**
+   * 贡献榜用的 liveId 覆盖（房间：`roomLiveId()`，含「未起播但成员正在直播」的索引兜底）。
+   * 不传则用解析结果的 liveId。
+   */
+  rankLiveId?: string;
+  /** 贡献榜点某行 → 资料卡（页面决定弹哪一种卡；不传则不可点） */
+  onOpenUserProfile?: (target: { userId?: string; name: string; avatar?: string }) => void;
+  /**
+   * 是否显示「贡献榜」按钮（默认：直播 / 回放 / 传了 rankLiveId 时显示）。
+   * 公演（openlive）等没有贡献榜数据源的场景显式传 false。
+   */
+  showRank?: boolean;
 }
 
-/** 宿主对外的命令式接口（场景需要时用：如房间送礼的云信公屏广播） */
+/** 宿主场景预设（见 MediaPlaybackHostProps.scene） */
+export type PlaybackScene = 'live' | 'room' | 'watch';
+
+/** 宿主对外的命令式接口（场景需要时用：如房间工具栏的礼物入口） */
 export interface MediaPlaybackHostHandle {
   /** 发送礼物公屏广播（送礼成功后调用；无云信连接时静默忽略） */
   sendGiftBroadcast: (gift: LiveGiftBroadcast) => void;
   /** 当前解析结果快照（未就绪时 null） */
   getResolved: () => ResolvedMedia | null;
+  /** 打开送礼面板（房间工具栏在播放中时用；未起播由页面自己的面板接管） */
+  openGift: () => void;
+  /** 打开贡献榜 */
+  openRank: () => void;
 }
 
 export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlaybackHostProps>(function MediaPlaybackHost({
@@ -149,23 +191,50 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
   children,
   features,
   style,
-  danmakuLivePollMs = 0,
-  danmakuVodNotice = false,
+  danmakuLivePollMs,
+  danmakuVodNotice,
   onOpenDanmakuProfile,
-  resumeNotice = false,
+  resumeNotice,
   initialPosition = 0,
   miniPlayerBackTo,
   showMiniPlayer = true,
   hideSheets = false,
   onVideoSize,
   modal = false,
-  announcement = false,
-  roomLink = true,
+  announcement,
+  roomLink,
   roomMemberId,
+  scene,
+  giftTargetUserId,
+  giftTargetName,
+  rankLiveId,
+  onOpenUserProfile,
+  showRank,
 }: MediaPlaybackHostProps, ref) {
   const { t } = useI18n();
   const palette = usePalette();
   const session = usePlaybackSession({ media, onResolved });
+  /**
+   * 场景预设 → 实际能力开关（显式 prop 优先，undefined 才取场景默认）。
+   * 四场景的差异只剩这些默认值，页面不再各写一份宿主配置。
+   */
+  const sceneDefaults = useMemo(() => ({
+    /** 公告：三个场景都开（用户 2026-10-02 明确「房间和观看历史里也要能看到」） */
+    announcement: scene !== undefined,
+    /** 直播弹幕 HTTP 轮询：主直播页 / 历史 / 稍后再看 5s（房间走云信，不轮询） */
+    danmakuLivePollMs: scene === 'live' || scene === 'watch' ? 5000 : 0,
+    /** 回放弹幕到达 toast：主直播页与 watch 场景保留 */
+    danmakuVodNotice: scene === 'live' || scene === 'watch',
+    /** 续播提示：只有房间需要（其它场景静默续播） */
+    resumeNotice: scene === 'room',
+    /** 标题/成员名进房间：房间内点自己会重复进房 → 关闭 */
+    roomLink: scene !== 'room',
+  }), [scene]);
+  const announceEnabled = announcement ?? sceneDefaults.announcement;
+  const danmakuPollMs = danmakuLivePollMs ?? sceneDefaults.danmakuLivePollMs;
+  const danmakuVodToast = danmakuVodNotice ?? sceneDefaults.danmakuVodNotice;
+  const resumeToast = resumeNotice ?? sceneDefaults.resumeNotice;
+  const allowRoomLink = roomLink ?? sceneDefaults.roomLink;
   const { resolved, status, error } = session;
   const isLive = !!resolved?.isLive;
 
@@ -173,19 +242,65 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
    * 官方「本场累计观看人次」（不是实时在线，见 usePlaybackOnlineStat 文件头实测记录）：
    * 直播 30s 轮询 / 回放取一次定值 + 成员回放反查兜底。
    */
+  /** 官方视频库（kind=video）的 id 不是 liveId：不要拿去查直播详情（否则每次开视频白打一次失败请求） */
+  const statLiveId = media?.kind === 'video' ? '' : String(resolved?.liveId || '');
   const accumulatedViews = usePlaybackOnlineStat({
     isLive,
-    liveId: String(resolved?.liveId || ''),
-    url: resolved?.url,
+    liveId: statLiveId,
+    url: media?.kind === 'video' ? undefined : resolved?.url,
     title: resolved?.title,
     memberId: media?.memberId,
   });
 
   /** 续播（统一存储 replayProgress） */
-  const resumeAt = usePlaybackResume({ resolved, initialPosition, notice: resumeNotice });
+  const resumeAt = usePlaybackResume({ resolved, initialPosition, notice: resumeToast });
 
+  /** 弹幕能力：视频库/公演传 `{ danmaku:false }` 时**不建连接、不轮询、不拉 LRC** */
+  const danmakuCapable = features?.danmaku !== false;
   /** 弹幕（云信 + LRC + 可选 HTTP 轮询） */
-  const danmaku = usePlaybackDanmaku({ resolved, livePollMs: danmakuLivePollMs, vodNotice: danmakuVodNotice });
+  const danmaku = usePlaybackDanmaku({
+    resolved,
+    livePollMs: danmakuPollMs,
+    vodNotice: danmakuVodToast,
+    enabled: danmakuCapable,
+  });
+  /**
+   * 云信连接引用（送礼公屏广播 / 房间工具栏礼物入口共用）。
+   * 放在这里是因为送礼 hook 要用它发广播，而 useImperativeHandle 也要用它。
+   */
+  const barrageRef = useRef(danmaku.barrage);
+  barrageRef.current = danmaku.barrage;
+
+  /* ── 播放周边能力：礼物 / 贡献榜（用户 2026-11-13：全部内置宿主）─────────
+     以前这两个面板和它们的数据逻辑分散在 MediaScreen / FollowedRoomsScreen，
+     改一处另一处不生效（「房间点头像进的直播，贡献榜还是没有直播页修好的样子」）。
+     现在：数据逻辑 = usePlaybackGift / utils/liveRank，UI = LiveGiftSheet / LiveRankSheet，
+     入口 = 宿主控制坞按钮 + 下面的两个抽屉，页面只传「主播 id / 资料卡回调」。 */
+  const [giftVisible, setGiftVisible] = useState(false);
+  const [rankVisible, setRankVisible] = useState(false);
+  const gift = usePlaybackGift({
+    liveId: String(resolved?.liveId || media?.liveId || ''),
+    targetUserId: String(giftTargetUserId || ''),
+    targetName: giftTargetName,
+    // 广播走宿主内同一条云信连接；没有连接时 sendGift 内部静默忽略
+    broadcast: (g) => {
+      try {
+        barrageRef.current?.sendGift?.(g)?.catch?.(() => undefined);
+      } catch { /* 公屏失败不影响送礼结果 */ }
+    },
+  });
+  /** gift.load 的 ref 镜像：让命令式接口保持稳定引用 */
+  const giftLoadRef = useRef(gift.load);
+  giftLoadRef.current = gift.load;
+  /** 打开送礼面板（控制坞按钮 / 房间工具栏共用同一条路径） */
+  const openGift = useCallback(() => {
+    setGiftVisible(true);
+    void giftLoadRef.current();
+  }, []);
+  /** 打开贡献榜（与直播页同一个面板组件） */
+  const openRank = useCallback(() => setRankVisible(true), []);
+  /** 贡献榜 liveId：房间可显式给（含「未起播但成员在播」的索引兜底），其它场景用解析结果 */
+  const rankId = String(rankLiveId || resolved?.liveId || media?.liveId || '');
 
   /**
    * 电台直播（`liveType = 2`）：官方推流画面只有「成员离开」占位图，
@@ -228,7 +343,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
   onCloseRef.current = onClose;
   const roomOpenMemberId = String(roomMemberId || media?.memberId || media?.ownerId || '');
   const memberAction = useMemo(() => {
-    if (!roomLink || !roomOpenMemberId) return undefined;
+    if (!allowRoomLink || !roomOpenMemberId) return undefined;
     return () => {
       try { onCloseRef.current?.(); } catch { /* 关播放器失败不阻塞进房 */ }
       setTimeout(() => {
@@ -237,7 +352,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
         } catch { /* 导航失败时播放器已关闭，用户仍可手动进房间 */ }
       }, 0);
     };
-  }, [roomLink, roomOpenMemberId, navigation]);
+  }, [allowRoomLink, roomOpenMemberId, navigation]);
 
   /**
    * 顶栏人数胶囊（用户 2026-11-01 定版口径）：
@@ -263,7 +378,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
 
   /** 直播间公告（直播与录播都拉；四场景同一份实现，见 usePlaybackAnnouncement） */
   const announce = usePlaybackAnnouncement({
-    enabled: announcement,
+    enabled: announceEnabled,
     liveId: String(resolved?.liveId || media?.liveId || ''),
   });
 
@@ -332,19 +447,38 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resolved, miniPlayerBackTo, onClose, carousel.radio]);
 
-  /** 控制坞按钮 = 场景按钮 + 通用（弹幕设置 / 弹幕列表 / 小窗）—— 与旧直播页/房间顺序一致 */
+  /**
+   * 控制坞按钮 = 场景追加 + **宿主内置**（礼物 / 贡献榜 / 弹幕设置 / 弹幕列表 / 小窗）。
+   *
+   * 礼物与贡献榜由宿主统一提供（用户 2026-11-13）：页面不再各自传 extraActions，
+   * 四个场景（直播页 / 房间 / 历史 / 稍后再看）改一次就全生效。
+   */
   const mergedActions = useMemo<PlaybackAction[]>(() => {
     const sceneActions = typeof extraActions === 'function'
       ? extraActions({ isLive, resolved })
       : (extraActions || []);
     const list: PlaybackAction[] = [...sceneActions];
-    list.push({ key: 'danmaku', icon: 'cog', label: t('弹幕设置'), onPress: () => setShowDanmakuSettings(true) });
-    list.push({ key: 'danmakuList', icon: 'format-list-bulleted', label: t('弹幕列表'), active: showDanmakuList, onPress: () => setShowDanmakuList((v) => !v) });
+    if (isLive && giftTargetUserId) {
+      list.push({ key: 'gift', icon: 'gift', label: t('礼物'), onPress: openGift });
+    }
+    /**
+     * 贡献榜：默认对「直播 / 回放」显示（房间可传 rankLiveId 兜底未起播的场景）；
+     * 官方视频库（video）/ 公演（openlive）没有贡献榜数据源 —— 页面可传 showRank={false}。
+     */
+    const rankOn = showRank ?? (isLive || media?.kind === 'replay' || !!rankLiveId);
+    if (rankOn) {
+      list.push({ key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: openRank });
+    }
+    /** 弹幕能力由 features 决定：视频库/公演传 `{ danmaku:false }` 时不显示这两个入口 */
+    if (danmakuCapable) {
+      list.push({ key: 'danmaku', icon: 'cog', label: t('弹幕设置'), onPress: () => setShowDanmakuSettings(true) });
+      list.push({ key: 'danmakuList', icon: 'format-list-bulleted', label: t('弹幕列表'), active: showDanmakuList, onPress: () => setShowDanmakuList((v) => !v) });
+    }
     if (showMiniPlayer) {
       list.push({ key: 'pip', icon: 'picture-in-picture-bottom-right-outline', label: t('小窗'), onPress: openMiniPlayer });
     }
     return list;
-  }, [extraActions, isLive, resolved, showDanmakuList, showMiniPlayer, openMiniPlayer, t]);
+  }, [extraActions, isLive, resolved, media?.kind, giftTargetUserId, rankLiveId, showRank, danmakuCapable, openGift, openRank, showDanmakuList, showMiniPlayer, openMiniPlayer, t]);
 
   /** 弹幕飘屏数据：直播=云信即时条目（+可选 HTTP 轮询时间轴）；回放=LRC 时间轴 */
   const overlayDanmaku = isLive ? danmaku.pollItems : danmaku.vodItems;
@@ -352,19 +486,19 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
   /** 飘屏可见（房间与直播页统一口径：只看持久化总开关；回放无弹幕时不挂） */
   const danmakuVisible = danmakuOn && (isLive || danmaku.vodItems.length > 0);
 
-  /** 命令式接口（房间送礼「云信公屏广播」等需要宿主内部连接的能力） */
+  /** 命令式接口（房间工具栏礼物入口 / 公屏广播等需要宿主内部状态的能力） */
   const resolvedRef = useRef<ResolvedMedia | null>(null);
   resolvedRef.current = resolved;
-  const barrageRef = useRef(danmaku.barrage);
-  barrageRef.current = danmaku.barrage;
   useImperativeHandle(ref, () => ({
-    sendGiftBroadcast: (gift: LiveGiftBroadcast) => {
+    sendGiftBroadcast: (g: LiveGiftBroadcast) => {
       try {
-        barrageRef.current?.sendGift?.(gift)?.catch?.(() => undefined);
+        barrageRef.current?.sendGift?.(g)?.catch?.(() => undefined);
       } catch { /* 公屏失败不影响送礼结果 */ }
     },
     getResolved: () => resolvedRef.current,
-  }), []);
+    openGift,
+    openRank,
+  }), [openGift, openRank]);
 
   /* ── 直播间公告（可选能力，四场景共用）────────────────────────────────
      用户 2026-10-02：「房间和观看历史里还是没有（公告）」——
@@ -400,7 +534,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
    * 有公告 → 展开/收起；无公告但直播 → 点一次拉取。
    */
   const announceTopAction = useMemo<PlaybackTopAction | undefined>(() => (
-    announcement && (announce.hasAnnouncement || isLive)
+    announceEnabled && (announce.hasAnnouncement || isLive)
       ? {
         icon: 'bullhorn',
         label: t('公告'),
@@ -411,7 +545,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
         },
       }
       : undefined
-  ), [announcement, announce.hasAnnouncement, announce.expanded, announce.toggle, announce.refresh, isLive, t]);
+  ), [announceEnabled, announce.hasAnnouncement, announce.expanded, announce.toggle, announce.refresh, isLive, t]);
 
   const handleRetry = useCallback(() => { session.retry(); }, [session]);
 
@@ -444,7 +578,7 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
   const body = !media ? null : (status !== 'ready' || !resolved) ? shell : (
     <>
       {/* 内置公告面板（announcement 开启时）：系统 PiP 快照会拍进浮层 → hideSheets 时隐藏 */}
-      {announcement && announce.expanded && !hideSheets ? (
+      {announceEnabled && announce.expanded && !hideSheets ? (
         <Animated.View
           style={[
             styles.announcePanel,
@@ -506,7 +640,6 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
           kernelSwitch: true,
           danmaku: true,
           rate: !resolved.isLive,
-          resume: !resolved.isLive,
           ...(features || {}),
         }}
         resumeAt={resumeAt}
@@ -573,6 +706,30 @@ export const MediaPlaybackHost = forwardRef<MediaPlaybackHostHandle, MediaPlayba
         />
         <DanmakuSettingsSheet visible={showDanmakuSettings} onClose={() => setShowDanmakuSettings(false)} />
       </PlayerScreen>
+      {/* 播放周边抽屉（控制坞「礼物 / 贡献榜」打开）：四场景同一份 UI 与数据逻辑 */}
+      <LiveGiftSheet
+        visible={giftVisible && !hideSheets}
+        onClose={() => setGiftVisible(false)}
+        gifts={gift.gifts}
+        balance={gift.balance}
+        status={gift.status}
+        selected={gift.selected}
+        num={gift.num}
+        onChangeNum={gift.setNum}
+        onSelect={gift.select}
+        onSend={() => { void gift.send(); }}
+        onRecharge={() => {
+          setGiftVisible(false);
+          try { navigation.navigate('RechargeScreen'); } catch { /* 导航失败时面板已关闭 */ }
+        }}
+      />
+      <LiveRankSheet
+        visible={rankVisible && !hideSheets}
+        liveId={rankId}
+        onClose={() => setRankVisible(false)}
+        missingLiveIdHint={t('当前直播缺少 liveId，不能获取贡献榜')}
+        onOpenProfile={onOpenUserProfile}
+      />
       {afterPlayer}
     </>
   );

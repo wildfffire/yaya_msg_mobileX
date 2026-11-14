@@ -28,7 +28,7 @@ export const APP_VERSION = '3.0.0';
  * `scripts/verify-version.js` 会拦下任何漂移（改版本时三处一起动：versionName 走语义版本，
  * versionCode / APP_BUILD 每出一个包必须递增）。
  */
-export const APP_BUILD = 3000047;
+export const APP_BUILD = 3000067;
 
 // 成员数据原始仓库（yk1z 的牙牙消息电脑版），数据由其维护并发布。
 export const MEMBER_DATA_SOURCE_URL = 'https://github.com/yk1z/yaya_msg';

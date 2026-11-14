@@ -243,11 +243,11 @@ try {
   await check('进出房间的浮层复位清单仍完整（漏一个 = 用户说的「变灰/遮罩」）', () => {
     // 与 scripts/room-churn-audit.js 同一份清单，这里再钉一次（两个脚本互相独立，任一处漏都能被抓到）
     //
-    // ⚠️ 2026-10-02 播放器统一：解析占位 / 弹幕列表 / 弹幕设置已收口到统一播放宿主
-    //（MediaPlaybackHost 内部 state，随 roomPlaying=null 卸载），房间页不再有这三个开关；
-    // 新增「房间播放器」本身（roomPlaying）：closeRoom 必须清（退房即停播并卸载宿主）。
+    // ⚠️ 2026-10-02 播放器统一 + 2026-11-13 面板收口：解析占位 / 弹幕列表 / 弹幕设置 /
+    // 贡献榜都在 MediaPlaybackHost 内部（随 roomPlaying=null 卸载），房间页不再有这些开关；
+    // 礼物面板只剩「未起播时工具栏送礼」这个本页实例，仍要复位；
+    // 「房间播放器」本身（roomPlaying）：closeRoom 必须清（退房即停播并卸载宿主）。
     const RESET_OPEN = [
-      'setRankVisible(false)',
       'setGiftVisible(false)',
       'setUserCard(null)',
       'setShowRoomReplay(false)',

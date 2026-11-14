@@ -106,6 +106,87 @@ export function messagePreview(msg: any): string {
 }
 
 /**
+ * 房间详情接口的列表字段候选（`/list/all` 与 `/list/homeowner` 同构）。
+ * 5s 轮询、回溯、预览快扫共用这一份，避免某个入口漏掉新字段。
+ */
+export const ROOM_DETAIL_LIST_KEYS = [
+  'content.messageList', 'content.message', 'content.messages', 'content.list',
+  'data.messageList', 'data.message', 'messageList', 'message', 'messages', 'list',
+];
+
+export interface FreshSideOptions {
+  /** 该侧上一轮消费到的游标 */
+  cur: MessageCursor;
+  /** 新出现的侧 + 已知已读基线：按「晚于已读基线」判新，而不是整页吞成基线 */
+  newSideWithFloor: boolean;
+  /** 房间级已读基线（服务器消息时间 ms） */
+  readFloor: number;
+  /** 本轮「算新」的时间下限（正常轮 = cur.time；续翻轮 = 回溯边界） */
+  countFloor: number;
+}
+
+/**
+ * 单侧「本轮算新」的消息筛选（从 pollRooms 单侧循环抽出，逻辑逐字不变）。
+ *
+ * 两个分支：
+ *   · `newSideWithFloor`：此前没有游标的侧，只要房间读过（readFloor>0），
+ *     晚于已读基线的消息就是真新消息；时间缺失（0）不算，防止把整页历史刷成未读。
+ *   · 正常轮：已消费过的 id（cur.keys）排除；时间明确早于 countFloor 的排除；
+ *     时间缺失（0）保留，交给 id 总账判重。
+ *
+ * 抽取只做过滤，`claimCountId` / `markCountConsumed` 仍由调用方执行。
+ */
+export function pickFreshSideMessages(
+  list: any[] | null | undefined,
+  opts: FreshSideOptions,
+): any[] {
+  const arr = Array.isArray(list) ? list : [];
+  if (opts.newSideWithFloor) {
+    return arr.filter((m) => {
+      const t = messageTime(m);
+      return t > 0 && t > opts.readFloor;
+    });
+  }
+  const seenBefore = new Set<string>(opts.cur.keys);
+  return arr.filter((m) => {
+    const mid = messageId(m);
+    if (!mid || seenBefore.has(mid)) return false;
+    const t = messageTime(m);
+    return !(t > 0 && opts.countFloor > 0 && t < opts.countFloor);
+  });
+}
+
+export interface CountableCandidateOptions {
+  /** 是否聊天类型（礼物/进房/公告不算） */
+  isChat: (msg: any) => boolean;
+  /** 服务器消息时间（ms） */
+  timeOf: (msg: any) => number;
+  /** 是否晚于「上次计数位置 / 已读基线」 */
+  isNewer: (time: number) => boolean;
+  /** 侧基线是否存在（不存在时，时间不明的消息不能当新消息） */
+  hasSideBaseline: boolean;
+}
+
+/**
+ * 30s 精确计数的「候选消息」筛选（从 useRoomUnreadCounters 抽出，逻辑逐字不变）。
+ *
+ * 只做过滤：聊天类型 → 时间门槛 → 是否晚于基线。真正拉 homeowner 表、
+ * 判房主、认领 id 仍留在调用方，方便逐步把两条计数通道收敛到同一套规则。
+ */
+export function pickCountableCandidates(
+  list: any[] | null | undefined,
+  opts: CountableCandidateOptions,
+): any[] {
+  return (Array.isArray(list) ? list : []).filter((m) => {
+    if (!opts.isChat(m)) return false;
+    const t = opts.timeOf(m);
+    // 只靠「房间已读基线」判新（侧基线为 0）时，时间不明的消息不当新消息
+    if (t <= 0 && !opts.hasSideBaseline) return false;
+    return opts.isNewer(t);
+  });
+}
+
+/**
  * 消息类型（各链路字段名不同：`bodys.messageType` / `msgType` / `messageType` / `type`）。
  *
  * ⚠️ 统一入口的原因：以前实时通道、30s 精确计数、5s 轮询各写一份取值+正则，
@@ -131,8 +212,11 @@ export function isCountableChatMessage(msg: any): boolean {
   return isCountableMessageType(messageTypeOf(msg));
 }
 
-/** 消息唯一键：优先稳定 id（含上游兼容别名），缺 id 才用「时间:正文」兜底 */
-export function messageId(msg: any): string {
+/**
+ * 只取稳定 id 字段（没有就返回空串，不生成「时间:正文」兜底键）。
+ * messageKey 统一到这一套优先级时用它，避免把兜底键当成稳定 id。
+ */
+export function stableMessageId(msg: any): string {
   if (!msg || typeof msg !== 'object') return '';
   for (const key of ID_KEYS) {
     const raw = (msg as any)[key];
@@ -140,6 +224,13 @@ export function messageId(msg: any): string {
     const s = String(raw).trim();
     if (s && s !== '0' && s !== 'undefined' && s !== 'null') return s;
   }
+  return '';
+}
+
+/** 消息唯一键：优先稳定 id（含上游兼容别名），缺 id 才用「时间:正文」兜底 */
+export function messageId(msg: any): string {
+  const stable = stableMessageId(msg);
+  if (stable) return stable;
   const t = messageTime(msg);
   const preview = messagePreview(msg);
   return t || preview ? `${t}:${preview}` : '';

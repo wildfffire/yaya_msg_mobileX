@@ -443,23 +443,15 @@ export const styles = StyleSheet.create({
   roomRankHandleWrap: { alignItems: 'center', paddingTop: 2, paddingBottom: 10 },
   roomRankHandle: { width: 40, height: 5, borderRadius: 3 },
   roomRankHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 },
-  roomRankClose: { width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center' },
-  roomRankTitle: { fontSize: 18, fontWeight: '900' },
+  /**
+   * 贡献榜的行样式已随面板组件迁到 `components/LiveRankSheet`
+   * （直播页与房间共用一份）；这里保留的 rank 样式只服务礼物面板（LiveGiftSheet 复用）。
+   */
   roomRankStatus: { fontSize: 12, marginBottom: 10 },
   roomRankList: { maxHeight: 420, flexShrink: 1 },
   /** 横屏：面板高度已定（100%），列表 flexGrow 吃满剩余空间 —— 固定 maxHeight 会只显示半屏 */
   roomRankListLandscape: { flexShrink: 1 },
-  roomRankRow: { flexDirection: 'row', alignItems: 'center', gap: 10, paddingVertical: 10, borderBottomWidth: StyleSheet.hairlineWidth },
-  roomRankNo: { width: 24, fontSize: 13, fontWeight: '900', textAlign: 'center' },
-  roomRankAvatar: { width: 34, height: 34, borderRadius: 17 },
-  roomRankInfo: { flex: 1, minWidth: 0 },
-  roomRankName: { fontSize: 13, fontWeight: '800' },
-  roomRankProgressTrack: { height: 4, borderRadius: 2, marginTop: 6, overflow: 'hidden' },
-  roomRankProgressFill: { height: 4, borderRadius: 2 },
-  roomRankValue: { fontSize: 11, fontWeight: '700', marginLeft: 6, flexShrink: 1 },
-  /** 榜单加载态：转圈 + 文案一行（用户 2026-11-02：点开不能是一片空白） */
-  roomRankLoadingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8, paddingVertical: 10 },
-  /** 骨架块（榜单行 / 礼物格共用） */
+  /** 骨架块（礼物格 / 面板加载态共用） */
   skeletonBox: { borderRadius: 6 },
   skeletonLine: { height: 10, borderRadius: 5, width: '78%', marginTop: 2 },
   skeletonLineShort: { height: 8, borderRadius: 4, width: '42%', marginTop: 6 },

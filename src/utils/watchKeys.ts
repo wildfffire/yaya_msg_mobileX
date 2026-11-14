@@ -59,6 +59,47 @@ export function historyKey(input: WatchKeyInput): string {
   return `t:${normTitle(input.title || '')}`;
 }
 
+/**
+ * 该播放源要不要写观看历史（用户 2026-11-13 定版）。
+ *
+ * **只有直播 / 直播回放 / 公演进历史**：
+ *   · 直播：`kind === 'live'`（口袋直播、公演直播、B 站直播）
+ *   · 直播回放：`ref.kind === 'replay'`
+ *   · 公演回放：`ref.kind === 'openlive'`
+ *
+ * 明确排除：房间视频消息（`kind === 'direct'`）、房间语音/电台节目（`audio`）、
+ * 官方视频库（`video`）、以及任何没有来源的临时播放 —— 这些内容没有「场次」概念，
+ * 记进历史既回放不了，也会把历史刷成「视频 / 表情 / 消息媒体」。
+ */
+export function shouldRecordHistory(source: {
+  kind?: string;
+  ref?: { kind?: string } | null;
+}): boolean {
+  const refKind = String(source?.ref?.kind || '');
+  if (refKind === 'replay' || refKind === 'openlive') return true;
+  return String(source?.kind || '') === 'live';
+}
+
+/**
+ * 历史条目是否**至少可回放一次**（迁移清理用）。
+ *
+ * 旧版本会把房间视频 / 表情 / 私信媒体记成 `t:标题`（无 ref、无 liveId），
+ * 点开必然解析失败。这里只保留带来源的条目：
+ *   · `ref.id` 存在（replay / openlive / video 都能按 id 重新解析）
+ *   · 或 `liveId` 存在（直播）
+ * 用户 2026-11-13：「房间里发的视频和表情包不要进入历史记录」——
+ * 新记录已由 shouldRecordHistory 拦住，这里负责把旧垃圾清掉。
+ */
+export function isReplayableHistoryItem(item: { ref?: { kind?: string; id?: string } | null; liveId?: string; key?: string }): boolean {
+  const refId = String(item?.ref?.id || '').trim();
+  const refKind = String(item?.ref?.kind || '').trim();
+  if (refId && (refKind === 'replay' || refKind === 'openlive' || refKind === 'video')) return true;
+  if (String(item?.liveId || '').trim()) return true;
+  // 旧数据的 key 里也可能带来源（replay:x / openlive:x / live:x / video:x）
+  const key = String(item?.key || '').trim();
+  return /^(replay|openlive|live|video):[^:]+$/i.test(key);
+}
+
 /** 历史条目的最小形状（避免这里 import store：保持纯模块） */
 export interface WatchHistoryLike {
   key?: string;

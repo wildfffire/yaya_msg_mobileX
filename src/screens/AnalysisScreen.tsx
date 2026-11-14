@@ -2,7 +2,7 @@ import React, { useMemo, useRef, useState } from 'react';
 import { PerfFlatList } from '../components/PerfFlatList';
 
 import { Image, Modal, ScrollView, StyleSheet, Text, TouchableOpacity, View } from 'react-native';
-import PlayerScreen, { buildPocketHeaders } from '../player';
+import { InlineMediaPlayer, PlayerScreen, buildPocketHeaders } from '../player';
 import { useNavigation } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../navigation/types';
@@ -721,11 +721,9 @@ export default function AnalysisScreen() {
                           </ScalePressable>
                         ) : null}
                         {flipPlayUrl === answerUrl && answerUrl ? (
-                          <PlayerScreen
-                            inline
+                          <InlineMediaPlayer
                             source={{ kind: isVoice ? 'audio' : 'vod', url: answerUrl, headers: buildPocketHeaders() }}
                             meta={{ title: t('翻牌答案') }}
-                            features={{ kernelSwitch: true, rate: true }}
                           />
                         ) : null}
                       </View>
@@ -764,6 +762,8 @@ export default function AnalysisScreen() {
               source={{ kind: 'vod', url: playMedia.url, headers: buildPocketHeaders() }}
               meta={{ title: t('视频') }}
               features={{ kernelSwitch: true, rate: true }}
+              /* 分析页的临时视频：没有可回放来源，不进观看历史 */
+              recordHistory={false}
               onClose={() => setPlayMedia(null)}
             />
           </View>

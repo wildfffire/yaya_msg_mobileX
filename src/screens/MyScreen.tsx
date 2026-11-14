@@ -14,7 +14,7 @@ import { formatTimestamp } from '../utils/format';
 import { useWatchLaterStore } from '../services/watchLater';
 import { useWatchHistoryStore } from '../services/watchHistory';
 import WatchCardStrip, { type WatchStripItem } from '../components/WatchCardStrip';
-import { MediaPlaybackHost } from '../player/session';
+import { MediaPlaybackHost, playMediaFromWatchLaterItem, playMediaFromHistoryItem } from '../player/session';
 import type { PlayMedia } from '../player/session';
 import {
   Linking,
@@ -114,46 +114,29 @@ export default function MyScreen() {
 
   /**
    * 横滑区数据：只取最近 12 条。
-   * media 的 kind/id 分派与 MediaListPage 的 playMedia 逐字一致，
-   * 点卡片直接交给统一播放宿主解析直播/回放，不跳列表页。
+   * 「播什么」交给统一播放入口（playMediaFromWatchLaterItem / playMediaFromHistoryItem），
+   * 与历史 / 稍后再看列表页、直播页、房间**同一套口径**，不再在这里抄一份 kind/id 分派。
    */
   const laterStripItems: WatchStripItem[] = watchLaterItems.slice(0, 12).map((it) => {
     const kind = String(it.kind || '');
-    const base = { title: it.title, cover: it.cover, owner: it.owner, team: it.team, ownerId: it.ownerId };
-    const media: PlayMedia = it.kind === 'video'
-      ? { ...base, kind: 'video', videoId: it.id }
-      : it.kind === 'openlive'
-        ? { ...base, kind: 'openlive', liveId: it.id }
-        : { ...base, kind: 'replay', liveId: it.id };
     return {
       key: it.key,
       title: it.title,
       cover: it.cover,
       label: it.audio || it.liveType === 2 ? t('电台') : kind === 'openlive' ? t('公演回放') : kind === 'replay' ? t('回放') : t('视频'),
       meta: formatTimestamp(it.at).slice(0, 16),
-      media,
+      media: playMediaFromWatchLaterItem(it),
     };
   });
   const historyStripItems: WatchStripItem[] = historyItems.slice(0, 12).map((it) => {
     const kind = String(it.ref?.kind || it.kind || '');
-    const base = { title: it.title, cover: it.cover, owner: it.owner, team: it.team, ownerId: it.ownerId };
-    const refKind = it.ref?.kind;
-    const refId = String(it.ref?.id || '');
-    const liveId = String(it.liveId || '');
-    const media: PlayMedia = refKind === 'video'
-      ? { ...base, kind: 'video', videoId: refId || liveId }
-      : refKind === 'openlive'
-        ? { ...base, kind: 'openlive', liveId: refId || liveId }
-        : refKind === 'replay'
-          ? { ...base, kind: 'replay', liveId: liveId || refId }
-          : { ...base, kind: 'live', liveId: liveId || refId };
     return {
       key: it.key,
       title: it.title,
       cover: it.cover,
       label: it.audio || it.liveType === 2 ? t('电台') : kind === 'openlive' ? t('公演回放') : kind === 'replay' ? t('回放') : t('视频'),
       meta: `${formatTimestamp(it.at).slice(0, 16)}${it.count > 1 ? ` · ${t('看过 {count} 次', { count: it.count })}` : ''}`,
-      media,
+      media: playMediaFromHistoryItem(it),
     };
   });
 
@@ -302,11 +285,10 @@ export default function MyScreen() {
       {playMedia ? (
         <MediaPlaybackHost
           modal
+          /* 场景预设（用户 2026-11-13）：与历史 / 稍后再看 / 主直播页同一口径 */
+          scene="watch"
           media={playMedia}
           onClose={() => setPlayMedia(null)}
-          announcement
-          danmakuLivePollMs={5000}
-          danmakuVodNotice
         />
       ) : null}
     </>

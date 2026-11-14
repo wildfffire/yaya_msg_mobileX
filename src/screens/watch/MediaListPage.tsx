@@ -23,7 +23,7 @@ import { useMemberStore } from '../../store';
 import { buildMemberLookup } from '../../utils/memberMatch';
 import { resolveWatchMeta } from '../../utils/watchMeta';
 import { formatDuration } from '../../utils/format';
-import { MediaPlaybackHost } from '../../player/session';
+import { MediaPlaybackHost, playMediaFromWatchEntry } from '../../player/session';
 import type { PlayMedia } from '../../player/session';
 import type { WatchLaterKind } from '../../services/watchLater';
 
@@ -130,25 +130,14 @@ export function MediaListPage({
   }, []);
   const closePlayback = useCallback(() => setPlayEntry(null), []);
 
-  /** 条目 → 统一播放条目（PlayMedia）：按来源分派解析链路（宿主内部处理） */
-  const playMedia = useMemo<PlayMedia | null>(() => {
-    if (!playEntry) return null;
-    const refKind = playEntry.refKind;
-    const refId = String(playEntry.refId || '');
-    const liveId = String(playEntry.liveId || '');
-    const base = {
-      title: playEntry.title,
-      cover: playEntry.cover,
-      owner: playEntry.owner,
-      team: playEntry.team,
-      ownerId: playEntry.ownerId,
-    };
-    if (refKind === 'video') return { ...base, kind: 'video', videoId: refId || liveId };
-    if (refKind === 'openlive') return { ...base, kind: 'openlive', liveId: refId || liveId };
-    if (refKind === 'replay') return { ...base, kind: 'replay', liveId: liveId || refId };
-    // 无 refKind：历史里的直播条目（或旧数据）——按直播解析
-    return { ...base, kind: 'live', liveId: liveId || refId };
-  }, [playEntry]);
+  /**
+   * 条目 → 统一播放条目（PlayMedia）：构造交给统一播放入口
+   *（player/session/playEntry），与直播页 / 房间 / 「我的」横滑卡完全同一套口径。
+   */
+  const playMedia = useMemo<PlayMedia | null>(
+    () => (playEntry ? playMediaFromWatchEntry(playEntry) : null),
+    [playEntry],
+  );
 
   return (
     <View style={styles.container}>
@@ -239,13 +228,10 @@ export function MediaListPage({
       {playMedia ? (
         <MediaPlaybackHost
           modal
+          /* 场景预设（用户 2026-11-13）：与主直播页同一口径（公告 / 直播弹幕 5s 轮询 / 回放弹幕提示） */
+          scene="watch"
           media={playMedia}
           onClose={closePlayback}
-          /* 直播间公告：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已删） */
-          announcement
-          /* 与主直播页同一口径：直播弹幕 HTTP 轮询兜底 + 回放弹幕到达 toast */
-          danmakuLivePollMs={5000}
-          danmakuVodNotice
         />
       ) : null}
     </View>

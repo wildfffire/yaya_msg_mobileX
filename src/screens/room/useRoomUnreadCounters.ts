@@ -26,8 +26,12 @@ import {
   isDetailFromSide,
   messageId,
   messageTypeOf,
+  pickCountableCandidates,
 } from '../../utils/roomMessageCursor';
 import { messageIdAliases } from '../../utils/notifyOwnerRules';
+import { claimMessageIds, pickIdolMessages } from '../../utils/roomIdolCountRules';
+import { claimUncountedOwnerPage } from '../../services/roomOwnerCount';
+import { countOwnerFeedUnread } from '../../services/roomOwnerFeed';
 import { roomChannelId, roomSideMessage, roomSideToken, type RoomMode } from './roomIdentity';
 import { getMessageTime, isOwnerMessageStrict, senderProfile } from './messageRules';
 import { ROOM_UNREAD_SIDES, roomUnreadKey } from '../../utils/roomUnreadRules';
@@ -72,9 +76,14 @@ const isChatTypeForCount = isCountableChatMessage;
  * 缓存久了会把这批新消息一直判成「不是房主」（最多延迟到下一次刷新）。
  */
 const OWNER_IDS_TTL_MS = 60_000;
-const ownerIdCache = new Map<string, { ids: Set<string>; at: number }>();
+/** page 一并缓存：homeowner 页本身也是补计数据源，不能只留 id 集合 */
+const ownerIdCache = new Map<string, { ids: Set<string>; page: any[]; at: number }>();
 
-async function fetchOwnerIdSet(member: any, side: RoomMode, channelId: string): Promise<Set<string> | null> {
+async function fetchOwnerIdSet(
+  member: any,
+  side: RoomMode,
+  channelId: string,
+): Promise<{ ids: Set<string>; page: any[] } | null> {
   try {
     const params: any = {
       channelId,
@@ -96,7 +105,7 @@ async function fetchOwnerIdSet(member: any, side: RoomMode, channelId: string): 
     for (const m of list) {
       for (const mid of messageIdAliases(m)) ids.add(mid);
     }
-    return ids.size ? ids : null;
+    return ids.size ? { ids, page: list } : null;
   } catch {
     return null;
   }
@@ -129,6 +138,25 @@ async function countNewMessagesForSide(
     const member = target.member || {};
     const channelId = roomChannelId(member, target.side);
     if (!channelId) return null;
+    /**
+     * ★ 第一位主计数源（用户 2026-11-13）：homeowner 全量流，每次都翻到
+     * 「上一次看到的位置」。成功就直接采用它的结果；返回 null（接口失败）时才
+     * 继续下面原 `/list/all` 精确计数 —— 原来的方案兜底，既有代码一行不动。
+     */
+    try {
+      const feed = await countOwnerFeedUnread({
+        key: target.key,
+        id: target.id,
+        side: target.side,
+        member,
+        readFloor: Number(readFloor) || 0,
+        source: '指纹',
+      });
+      if (feed && feed.ok) {
+        if (feed.newest > 0) seenAtPatch[target.key] = feed.newest;
+        return feed.counted;
+      }
+    } catch { /* 主源不可用 → 原方案兜底 */ }
     const params: any = {
       channelId,
       serverId: String(member?.serverId || ''),
@@ -188,29 +216,40 @@ async function countNewMessagesForSide(
       return 0;
     }
     // ★ 只数偶像（房主）的消息；同时礼物/进房/公告等非聊天类型也不算
-    const hasSideBaseline = Number(prevAt) > 0;
-    const candidates = msgs.filter((m: any) => {
-      if (!isChatTypeForCount(m)) return false;
-      const mt = getMessageTime(m);
-      // 只靠「房间已读基线」判新（侧基线为 0）时，时间不明的消息不当新消息 ——
-      // 否则一页没有 msgTime 字段的历史消息会被整页刷成未读（「5 条显示 13」的同类）
-      if (mt <= 0 && !hasSideBaseline) return false;
-      return isCountableUnreadMessage(mt, prevAt, floor);
+    // 候选筛选已抽到 roomMessageCursor.pickCountableCandidates（与 5s 侧共用判新口径）
+    const candidates = pickCountableCandidates(msgs, {
+      isChat: isChatTypeForCount,
+      timeOf: getMessageTime,
+      isNewer: (mt) => isCountableUnreadMessage(mt, prevAt, floor),
+      hasSideBaseline: Number(prevAt) > 0,
     });
-    let idolMsgs = candidates.filter((m: any) => isIdolOnly(m, member));
+    const isOwnerLocal = (m: any): boolean => isIdolOnly(m, member);
+    // ★ 高风险统一（用户 2026-11-13）：与 5s 共用 pickIdolMessages；
+    // 30s 保持「本地有命中就不拉服务端表」的省请求策略（serverOnlyWhenLocalEmpty）。
+    let idolMsgs = pickIdolMessages(candidates, {
+      isOwnerLocal,
+      serverOnlyWhenLocalEmpty: true,
+    });
     /** 本地认不出房主时的服务端补充（诊断用） */
     let serverOwnerHits = 0;
+    /** 本轮拿到的 homeowner 页：all 页 0 房主时它还要作为独立计数源 */
+    let ownerPageForCount: any[] | null = null;
     if (!idolMsgs.length && candidates.length) {
       const cached = ownerIdCache.get(target.key);
-      let ids: Set<string> | null = null;
+      let owner: { ids: Set<string>; page: any[] } | null = null;
       if (cached && Date.now() - cached.at < OWNER_IDS_TTL_MS) {
-        ids = cached.ids;
+        owner = { ids: cached.ids, page: cached.page };
       } else {
-        ids = await fetchOwnerIdSet(member, target.side, channelId);
-        if (ids) ownerIdCache.set(target.key, { ids, at: Date.now() });
+        owner = await fetchOwnerIdSet(member, target.side, channelId);
+        if (owner) ownerIdCache.set(target.key, { ...owner, at: Date.now() });
       }
-      if (ids && ids.size) {
-        idolMsgs = candidates.filter((m: any) => messageIdAliases(m).some((mid) => ids!.has(mid)));
+      if (owner && owner.ids.size) {
+        const serverIds = owner.ids;
+        idolMsgs = pickIdolMessages(candidates, {
+          isOwnerLocal,
+          isOwnerByServer: (m: any) => messageIdAliases(m).some((mid) => serverIds.has(mid)),
+          serverOnlyWhenLocalEmpty: true,
+        });
         serverOwnerHits = idolMsgs.length;
         logInfo(
           `[unread] 精确计数 ${target.id}#${target.side} 本地认不出房主，`
@@ -218,6 +257,7 @@ async function countNewMessagesForSide(
           'room.unread',
         );
       }
+      ownerPageForCount = owner?.page || null;
     }
     /**
      * ★ 仍是 0 条命中：把候选消息的**发送者**打出来（用户 2026-11-11
@@ -234,11 +274,34 @@ async function countNewMessagesForSide(
         'room.unread',
       );
     }
-    let n = 0;
-    for (const m of idolMsgs) {
-      // ★ id 总账：实时通道 / 5s 通知轮询已计过的同一条消息不再重复
-      if (!claimCountId(messageId(m))) continue;
-      n += 1;
+    // 统一走 claimMessageIds：与 5s 的 countFreshSide 同一认领语义
+    let n = claimMessageIds(idolMsgs.map((m) => messageId(m)), claimCountId);
+    /**
+     * ★ homeowner 页独立补计（与 5s 轮询同源，用户 2026-11-13 覃柯蒙案例）：
+     * all 页一条房主都没认出时，房主消息很可能已经被粉丝刷出这一页窗口，
+     * 直接数 homeowner 页里「晚于已读基线、且不在 all 页里」的房主聊天消息。
+     * 只在 all 页 0 命中的分支补，避免与既有通道重复计；共享按侧持久化游标防重启重计。
+     */
+    if (ownerPageForCount && ownerPageForCount.length && !idolMsgs.length && floor > 0) {
+      const excludeIds = new Set<string>();
+      for (const m of msgs) {
+        for (const id of messageIdAliases(m)) excludeIds.add(id);
+      }
+      // 补计的六步顺序（游标/差集/挑选/id 认领/累加/只前进）只有 roomOwnerCount 一处实现
+      const ownerPick = await claimUncountedOwnerPage({
+        key: target.key,
+        page: ownerPageForCount,
+        readFloor: floor,
+        excludeIds,
+      });
+      n += ownerPick.counted;
+      if (ownerPick.counted) {
+        logInfo(
+          `[unread] 精确计数 ${target.id}#${target.side} homeowner 补计 +${ownerPick.counted}`
+          + ` 页=${ownerPageForCount.length} 基线=${floor} 游标=${ownerPick.countedAt}`,
+          'room.unread',
+        );
+      }
     }
     if (newest > 0) seenAtPatch[target.key] = newest;
     logInfo(

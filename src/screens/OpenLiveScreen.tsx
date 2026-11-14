@@ -15,7 +15,8 @@ import {
   View,
 } from 'react-native';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
-import PlayerScreen, { buildPocketHeaders } from '../player';
+import { MediaPlaybackHost, type PlayMedia } from '../player';
+import { pickOpenLiveStreamUrl } from './watch/resolvePlayUrl';
 import { Member } from '../types';
 import MemberPicker from '../components/MemberPicker';
 import { useSettingsStore, useUiStore, useMemberStore } from '../store';
@@ -148,37 +149,8 @@ function mergeOpenLive(prev: OpenLiveItem[], next: OpenLiveItem[]) {
   return merged;
 }
 
-function scoreStream(url: string) {
-  const lower = url.toLowerCase();
-  if (lower.includes('.mp4')) return 100;
-  if (lower.includes('.m3u8')) return 90;
-  if (lower.includes('.flv')) return 70;
-  if (lower.startsWith('rtmp://')) return 60;
-  return 40;
-}
-
-function pickPlayableUrl(res: any) {
-  const streams = unwrapList(res, ['content.playStreams', 'content.streams', 'data.playStreams', 'playStreams']);
-  const highQuality = streams.find((stream: any) => Number(stream?.streamType) === 2);
-  const highQualityUrl = normalizeUrl(pickText(highQuality, ['streamPath', 'playStreamPath', 'url', 'playUrl']));
-  if (highQualityUrl) return highQualityUrl;
-  const urls = [
-    ...streams.map((item) => normalizeUrl(pickText(item, ['streamPath', 'playStreamPath', 'url', 'playUrl', 'flv', 'm3u8']))),
-    normalizeUrl(pickText(res, [
-      'content.playStreamPath',
-      'content.streamPath',
-      'content.playUrl',
-      'content.url',
-      'data.playStreamPath',
-      'data.streamPath',
-      'data.playUrl',
-      'playStreamPath',
-      'streamPath',
-      'url',
-    ])),
-  ].filter(Boolean);
-  return Array.from(new Set(urls)).sort((a, b) => scoreStream(b) - scoreStream(a))[0] || '';
-}
+// 公演地址抽取（高清优先）已收口到 screens/watch/resolvePlayUrl.pickOpenLiveStreamUrl：
+// 公演页、历史/稍后再看的公演回放共用同一套口径（以前两处各写一份，可能一边高清一边标清）。
 
 function shortMemberName(member?: Member | null) {
   return String(member?.ownerName || '').replace(/^(SNH48|GNZ48|BEJ48|CKG48|CGT48)-/, '');
@@ -306,7 +278,8 @@ export default function OpenLiveScreen() {
 
   const resolveStream = async (item: OpenLiveItem) => {
     const detail = await pocketApi.getOpenLiveOne(item.liveId);
-    const url = pickPlayableUrl(detail);
+    // 公演地址抽取唯一实现（高清优先），历史/稍后再看同一口径
+    const url = pickOpenLiveStreamUrl(detail);
     if (!url) throw new Error(t('没有解析到播放地址'));
     return url;
   };
@@ -353,7 +326,7 @@ export default function OpenLiveScreen() {
     (async () => {
       try {
         const detail = await pocketApi.getOpenLiveOne(liveId);
-        const url = pickPlayableUrl(detail);
+        const url = pickOpenLiveStreamUrl(detail);
         if (!url) throw new Error(t('没有解析到播放地址'));
         setPlaying({
           url,
@@ -454,16 +427,17 @@ export default function OpenLiveScreen() {
      *
      * 现改走 `extraActions`（进右上「…」播放器功能面板）：不再遮挡画面，且真正可点。
      */
-    const externalAction = {
+    /** 外部打开：地址取宿主解析结果（页面不再自己解析，可能没有 playing.url） */
+    const externalAction = (url: string) => ({
       key: 'external',
       icon: 'open-in-new',
       label: t('外部打开'),
       onPress: () => {
-        const target = String(playing.url || '');
+        const target = String(url || '');
         if (!target) return;
         Linking.openURL(target).catch(() => showToast(t('这个链接无法直接打开。')));
       },
-    };
+    });
     /** 成员榜入口（用户 2026-11-08）：只在公演直播/回放里出现，普通成员直播没有这份数据 */
     const membersAction = {
       key: 'participants',
@@ -478,22 +452,33 @@ export default function OpenLiveScreen() {
         void loadParticipants(playing.liveId, playing.title);
       },
     };
-    // 统一播放器（重写）：公演回放 → PlayerScreen（控制条/全屏/内核切换/错误重试内置）
+    /**
+     * 公演直播/回放 → 统一播放宿主（与直播页/房间/历史同一个播放器）。
+     * 地址已经按「高清优先」解析好 → 宿主快速起播；没有地址则由宿主按 liveId 重新解析。
+     * 公演没有弹幕/贡献榜数据源：features 关弹幕 + showRank={false}。
+     */
+    const playMedia: PlayMedia = {
+      kind: 'openlive',
+      url: playing.url,
+      liveId: playing.liveId,
+      isLive: !!playing.isLive,
+      title: playing.title,
+      owner: playing.owner,
+      team: playing.team,
+      ownerId: playing.ownerId,
+      raw: playing,
+    };
     return (
       <View style={styles.playerPage}>
-        <PlayerScreen
-          source={{
-            // 公演直播走 live 语义（无进度条）；公演回放仍是 vod（可拖）
-            kind: playing.isLive ? 'live' : 'vod',
-            url: playing.url,
-            headers: buildPocketHeaders(),
-            // 来源引用：历史记录/稍后再看可凭 liveId 重新解析（地址有时效）
-            ref: playing.liveId ? { kind: 'openlive', id: playing.liveId } : undefined,
-          }}
-          meta={{ title: playing.title, owner: playing.owner, team: playing.team, ownerId: playing.ownerId }}
-          features={{ kernelSwitch: true, rate: true }}
-          extraActions={[externalAction, membersAction]}
+        <MediaPlaybackHost
+          media={playMedia}
           onClose={() => setPlaying(null)}
+          /* 公演没有弹幕源 / 贡献榜数据源 */
+          features={{ danmaku: false }}
+          showRank={false}
+          /* 已经在公演播放页，成员名点击不再跳成员房间 */
+          roomLink={false}
+          extraActions={(ctx) => [externalAction(ctx.resolved?.url || ''), membersAction]}
         />
         {membersVisible ? (
           <Modal visible transparent animationType="fade" onRequestClose={() => setMembersVisible(false)}>

@@ -65,13 +65,14 @@ for (const file of [ROOM, PLAYER_SCREEN, 'src/player/chrome/FullscreenManager.ts
 
 // 3) 房间浮层复位清单（openRoom 与 closeRoom 都要有）
 //
-// ⚠️ 2026-10-02 播放器统一后清单变化：
-//   · 解析占位 / 弹幕列表抽屉 / 弹幕设置面板 已收口到统一播放宿主
+// ⚠️ 2026-10-02 播放器统一 / 2026-11-13 播放周边面板收口后清单变化：
+//   · 解析占位 / 弹幕列表 / 弹幕设置 / **贡献榜** 已收口到统一播放宿主
 //     （MediaPlaybackHost 内部 state，随 roomPlaying=null 一起卸载）——
-//     房间页不再有这三个开关，无法也不需要在 openRoom/closeRoom 里复位；
-//   · 新增「房间播放器」本身（roomPlaying）：closeRoom 必须清（退房即停播 + 卸载宿主）。
+//     房间页不再有这些开关，无法也不需要在 openRoom/closeRoom 里复位；
+//   · 礼物面板只剩「未起播时工具栏送礼」这一个本页实例（起播后由宿主内置），
+//     所以 setGiftVisible(false) 仍必须复位；
+//   · 「房间播放器」本身（roomPlaying）：closeRoom 必须清（退房即停播 + 卸载宿主）。
 const ROOM_RESET_CALLS = [
-  ['setRankVisible(false)', '贡献榜 Modal（0.45 黑幕）'],
   ['setGiftVisible(false)', '礼物面板 Modal'],
   ['setUserCard(null)', '用户资料卡 Modal'],
   ['setShowRoomReplay(false)', '回放抽屉'],

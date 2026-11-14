@@ -93,16 +93,23 @@ try {
     assert.ok(item && item.kind === 'gift');
   });
 
-  await check('静态守卫：两个送礼入口都补发了公屏广播', () => {
-    // ⚠️ 2026-10-02 播放器统一：送礼公屏广播改走统一播放宿主暴露的
-    // sendGiftBroadcast（宿主内部持有唯一一条云信连接），两个页面分别经宿主 ref 调用。
+  await check('静态守卫：送礼只有一个实现，且必带公屏广播', () => {
+    /**
+     * ⚠️ 2026-11-13 播放功能模块化：送礼（HTTP + 公屏广播）只剩 `usePlaybackGift` 一处，
+     * 直播页 / 房间（播放中与未起播）全部走它。
+     * 以前的守卫要求「两个页面各自调用 sendGiftBroadcast」—— 那正是两份实现分叉的土壤。
+     */
+    const hook = readFileSync(join(root, 'src/player/session/usePlaybackGift.ts'), 'utf8');
+    assert.ok(hook.includes('pocketApi.sendGift('), '统一送礼 hook 没有调用送礼接口');
+    assert.ok(/broadcast\?\.\(\{\s*\n?\s*toUserId/.test(hook), '送礼后没有发公屏广播 —— 主播又会看不到');
+    // 宿主把 hook 的 broadcast 接到云信连接（唯一一条聊天室连接）
+    const host = readFileSync(join(root, 'src/player/session/MediaPlaybackHost.tsx'), 'utf8');
+    assert.ok(/sendGift\?\.\(g\)/.test(host), '宿主未把 broadcast 接到云信 sendGift');
+    // 页面不得再自己调送礼接口（避免又出现第二份实现）
     for (const file of ['src/screens/MediaScreen.tsx', 'src/screens/FollowedRoomsScreen.tsx']) {
       const source = readFileSync(join(root, file), 'utf8');
-      assert.ok(/sendGiftBroadcast\(\{\s*\n?\s*toUserId/.test(source), `${file} 送礼后没有调用公屏广播 —— 主播又会看不到`);
+      assert.ok(!/pocketApi\.sendGift\(/.test(source), `${file} 又自己写了送礼调用 —— 应统一走 usePlaybackGift`);
     }
-    // 宿主把 sendGiftBroadcast 转成云信 sendGift（唯一实现处）
-    const host = readFileSync(join(root, 'src/player/session/MediaPlaybackHost.tsx'), 'utf8');
-    assert.ok(host.includes('sendGiftBroadcast') && /sendGift\?\.\(gift\)/.test(host), '宿主未把 sendGiftBroadcast 接到云信 sendGift');
     const chatroom = readFileSync(join(root, 'src/services/pocketNim/chatroom.ts'), 'utf8');
     assert.ok(chatroom.includes('buildLiveGiftExt'), 'chatroom 未使用 buildLiveGiftExt');
     assert.ok(chatroom.includes('async sendGift('), 'chatroom 缺少 sendGift');

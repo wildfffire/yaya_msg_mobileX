@@ -9,7 +9,7 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import PlayerScreen, { buildPocketHeaders } from '../player';
+import { MediaPlaybackHost, type PlayMedia } from '../player';
 import officialMediaApi from '../api/officialMedia';
 import { useI18n } from '../i18n';
 import { useSettingsStore, useMemberStore } from '../store';
@@ -80,7 +80,6 @@ export default function VideoLibraryScreen() {
   const { t } = useI18n();
   const [videos, setVideos] = useState<any[]>([]);
   const [playing, setPlaying] = useState<any | null>(null);
-  const [playUrl, setPlayUrl] = useState('');
   const [status, setStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -133,46 +132,40 @@ export default function VideoLibraryScreen() {
     load(false);
   };
 
-  const play = async (item: any) => {
-    setPlaying(item);
-    setPlayUrl('');
-    setStatus(t('正在解析视频地址...'));
-    try {
-      const res = await officialMediaApi.getVideo(String(item.videoId || item.id));
-      const data = res?.content?.data || res?.content || res?.data || {};
-      const url = mediaUrl(String(data.filePath || data.videoPath || data.url || ''));
-      if (!url) throw new Error(t('未返回视频文件地址'));
-      setPlayUrl(url);
-      setStatus(t('正在播放：{title}', { title: item.title || data.title || t('视频') }));
-    } catch (error) {
-      setStatus(t('播放失败：{error}', { error: errorMessage(error) }));
-    }
-  };
+  /** 点卡片 → 交给统一播放宿主（解析/续播/小窗/错误壳都在宿主内，本页不再自己解析） */
+  const play = (item: any) => setPlaying(item);
 
-  if (playUrl) {
+  /**
+   * 官方视频 → PlayMedia：只声明「是哪条视频」，地址由宿主按 videoId 重新解析
+   *（地址带时效，绝不缓存）。
+   */
+  const playMedia = React.useMemo<PlayMedia | null>(() => {
+    if (!playing) return null;
+    return {
+      kind: 'video',
+      videoId: String(playing.videoId || playing.id || ''),
+      title: playing.title || t('视频'),
+      cover: videoCoverUrl(playing) || playing.cover,
+      // 官方视频若带归属成员：一并写进历史（列表卡片要显示成员名 + 队伍徽章）
+      owner: pickMemberNickname(playing),
+      team: resolveTeam(memberLookup, {
+        userId: pickMemberUserId(playing),
+        name: pickMemberNickname(playing),
+      }),
+      ownerId: pickMemberUserId(playing),
+      raw: playing,
+    };
+  }, [playing, t, memberLookup]);
+
+  if (playMedia) {
     return (
       <View style={styles.playerPage}>
-        {/* 统一播放器（重写）：官方视频 → PlayerScreen（控制条/全屏/内核切换/错误重试内置） */}
-        <PlayerScreen
-          source={{
-            kind: 'vod',
-            url: playUrl,
-            headers: buildPocketHeaders(),
-            // 来源引用：历史记录/稍后再看可凭 videoId 重新解析地址（播放地址有时效）
-            ref: { kind: 'video', id: String(playing?.videoId || playing?.id || '') },
-          }}
-          meta={{
-            title: playing?.title || t('视频'),
-            // 官方视频若带归属成员：一并写进历史（列表卡片要显示成员名 + 队伍徽章）
-            owner: pickMemberNickname(playing),
-            team: resolveTeam(memberLookup, {
-              userId: pickMemberUserId(playing),
-              name: pickMemberNickname(playing),
-            }),
-            ownerId: pickMemberUserId(playing),
-          }}
-          features={{ kernelSwitch: true, rate: true }}
-          onClose={() => setPlayUrl('')}
+        {/* 统一播放宿主：视频库与直播/回放/历史共用同一个播放器与同一套周边能力 */}
+        <MediaPlaybackHost
+          media={playMedia}
+          onClose={() => setPlaying(null)}
+          /* 官方视频没有弹幕源：隐藏弹幕按钮（贡献榜/礼物也不适用） */
+          features={{ danmaku: false }}
         />
       </View>
     );

@@ -1,37 +1,25 @@
 /**
- * 统一播放器（重写）：
- * 页面只需声明「播什么、带哪些功能」，内核路由/控制层/全屏/续播/内核切换内部完成。
+ * 播放器统一入口（页面只从这里 import）。
  *
  * 分层：
- *  - resolve/streamResolver：统一流判定（分类/候选提取/内核选择/防盗链头）—— 兼容矩阵见分析文档 3.5
+ *  - PlayerScreen：唯一 UI 组装（控制层/全屏/PiP/内核路由内部完成）
+ *  - session/MediaPlaybackHost：四场景（主直播 / 房间 / 历史 / 稍后再看）唯一播放入口
+ *      —— 解析、续播、弹幕、在线人数、小窗、公告、礼物、贡献榜都在里面
+ *  - session/playEntry：「播什么」的唯一构造点
  *  - store/playerStore：全局单例状态
- *  - core/PlayerCore：内核路由（Native=RNV / Exo=LiveExoView / Web=flv.js+hls.js）
- *  - chrome/PlayerChrome + FullscreenManager：唯一控制层与全屏/PiP 管理
- *  - PlayerScreen：组装入口
+ *
+ * ⚠️ 2026-11-13：原先还从 `resolve/streamResolver.ts` 导出一整套流判定
+ *（classifyUrl / pickPlayableUrls / streamScore / needsNativeExo / resolveSource …），
+ * 实测**没有任何外部调用方**，真正的实现都在 `screens/room/mediaRules.ts` 与
+ * `utils/playUrls.ts`；那份代码已删除，只保留防盗链头并从 `utils/mediaHeaders` 复用。
  */
 export { PlayerScreen } from './PlayerScreen';
-/**
- * 统一播放会话层（用户 2026-10-02）：四场景（主直播 / 房间内 / 历史 / 稍后再看）
- * 以后只调用 `MediaPlaybackHost` —— 解析、续播、弹幕、在线人数、小窗都在里面。
- * 详细说明见 src/player/session/index.ts。
- */
+export { InlineMediaPlayer } from './InlineMediaPlayer';
 export { MediaPlaybackHost } from './session';
 export type { MediaPlaybackHostProps, MediaPlaybackHostHandle, PlayMedia, ResolvedMedia } from './session';
 export { default as usePlayerStore } from './store/playerStore';
-export { PlayerCore } from './core/PlayerCore';
-export { PlayerChrome } from './chrome/PlayerChrome';
-export { FullscreenManager, formatPlayTime } from './chrome/FullscreenManager';
-export { default as streamResolver } from './resolve/streamResolver';
-export {
-  classifyUrl,
-  streamScore,
-  pickPlayableUrls,
-  needsNativeExo,
-  isLiveStreamUrl,
-  isPlayableMediaUrl,
-  buildPocketHeaders,
-  resolveSource,
-} from './resolve/streamResolver';
+/** 口袋防盗链头（唯一来源：utils/mediaHeaders；页面 source.headers 用） */
+export { POCKET_MEDIA_HEADERS, buildPocketHeaders } from '../utils/mediaHeaders';
 export type {
   StreamKind,
   PlayerSource,

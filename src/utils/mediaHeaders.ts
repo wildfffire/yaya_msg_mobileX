@@ -14,3 +14,16 @@ export const POCKET_MEDIA_HEADERS: Record<string, string> = {
   Referer: 'https://h5.48.cn/',
   Origin: 'https://h5.48.cn',
 };
+
+/**
+ * 返回一份可安全修改的副本（播放器 source.headers 用）。
+ *
+ * 用户 2026-11-13：原来播放器侧另有一份 `streamResolver.buildPocketHeaders`，
+ * 与本文件三个头逐字相同 —— 改 UA/Referer 时漏一处就是「视频放不出/时长拿不到」。
+ * 现在只保留这一份，播放器层直接复用。
+ */
+export function buildPocketHeaders(cookie?: string): Record<string, string> {
+  const headers: Record<string, string> = { ...POCKET_MEDIA_HEADERS };
+  if (cookie) headers.Cookie = cookie;
+  return headers;
+}

@@ -45,16 +45,23 @@ export function usePlaybackDanmaku({
   livePollMs = 0,
   /** 回放 LRC 到达时 toast（「弹幕 N 条」/「该视频暂无弹幕」，主直播页现状） */
   vodNotice = false,
+  /**
+   * 该场景是否有弹幕能力（默认 true）。官方视频库 / 公演没有弹幕源：
+   * 传 false 时**不建云信连接、不轮询、不拉 LRC**（否则公演直播会拿公演 liveId 去连聊天室）。
+   */
+  enabled = true,
 }: {
   resolved: ResolvedMedia | null;
   livePollMs?: number;
   vodNotice?: boolean;
+  enabled?: boolean;
 }): PlaybackDanmaku {
   const { t } = useI18n();
-  const isLive = !!resolved?.isLive;
+  const active = enabled ? resolved : null;
+  const isLive = !!active?.isLive;
   const liveId = String(
-    resolved?.liveId
-    || (resolved && !resolved.isLive ? liveIdFromUrl(String(resolved.url || '')) : '')
+    active?.liveId
+    || (active && !active.isLive ? liveIdFromUrl(String(active.url || '')) : '')
     || '',
   );
 

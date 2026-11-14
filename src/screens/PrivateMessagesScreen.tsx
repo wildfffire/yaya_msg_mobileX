@@ -18,7 +18,7 @@ import {
   View,
 } from 'react-native';
 import * as ImagePicker from 'expo-image-picker';
-import PlayerScreen from '../player';
+import { InlineMediaPlayer } from '../player';
 import { useNavigation, useRoute } from '@react-navigation/native';
 import { StackNavigationProp } from '@react-navigation/stack';
 import { RootStackParamList } from '../navigation/types';
@@ -893,8 +893,7 @@ export default function PrivateMessagesScreen() {
             )
           ) : null}
           {media && playUrl === media.url ? (
-            <PlayerScreen
-              inline
+            <InlineMediaPlayer
               source={{ kind: media.type === 'audio' ? 'audio' : 'vod', url: media.url }}
               meta={{ title: t('消息媒体') }}
             />
@@ -951,8 +950,7 @@ export default function PrivateMessagesScreen() {
               )
             ) : !hasText ? <Text style={[styles.msgText, mine && { color: palette.onTint }, !mine && { color: palette.label }]}>{t('[空消息]')}</Text> : null}
             {playUrl === media?.url ? (
-              <PlayerScreen
-                inline
+              <InlineMediaPlayer
                 source={{ kind: media!.type === 'audio' ? 'audio' : 'vod', url: media!.url }}
                 meta={{ title: t('消息媒体') }}
               />

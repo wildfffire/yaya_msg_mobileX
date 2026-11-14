@@ -513,6 +513,8 @@ export default function PhotosScreen() {
               source={{ kind: 'vod', url: playing.url, headers: POCKET_MEDIA_HEADERS }}
               meta={{ title: playing.title }}
               features={{ kernelSwitch: true, rate: true }}
+              /* 相册里的临时视频：没有可回放来源，不进观看历史 */
+              recordHistory={false}
               onClose={() => setPlaying(null)}
             />
           </View>

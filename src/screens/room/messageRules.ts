@@ -20,6 +20,7 @@ import {
 } from '../../utils/data';
 import { memberIdKeys, normMemberName } from '../../utils/memberMatch';
 import { isOwnerSender } from '../../utils/notifyOwnerRules';
+import { stableMessageId } from '../../utils/roomMessageCursor';
 import { deepFindText, getMessageTime, sortMessagesNewestFirst } from './timeRules';
 export { KNOWN_TIME_KEYS, asTimestamp, capText, deepFindText, getMessageTime, normMs, sortMessagesNewestFirst } from './timeRules';
 
@@ -339,17 +340,12 @@ export function userCardFromUserRes(res: any) {
 export function messageKey(item: any) {
   if (!item) return `empty-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   /**
-   * ⚠️ `msgIdClient` / `msgIdServer` 必须在内（用户 2026-11-09 反馈「房间新消息数量不对」）：
-   * HTTP 历史消息的 id 字段就是 `msgIdClient`（API 文档：msgIdServer / msgIdClient / bodys / …），
-   * 而实时通道的 `uuid` 取的是 `message.msgIdClient`（见 services/pocketNim/qchat.ts）。
-   * 这里漏了 msgIdClient 时，**同一条消息**在实时通道是 `msgIdClient` 键、在历史/静默刷新里
-   * 退化成「时间+发送者+正文」键 → 两条键 → 合并去重失效（列表出现重复行），
-   * 浮标也会把它当成一条新消息重复计数。
-   * 顺序：客户端 id 优先（两端同源），服务端 id 次之，最后才是 uuid / 近似键。
+   * ★ 统一实现（用户 2026-11-13）：聊天去重键与计数/游标共用同一套稳定 id 优先级。
+   * `stableMessageId` 是唯一 id 来源（MESSAGE_ID_KEYS）；没有稳定 id 时才退回
+   *「时间+发送者+正文」兜底，保证「无 id 消息」的聊天去重行为不变。
    */
-  const direct = item.id || item.msgId || item.messageId || item.clientMsgId
-    || item.msgIdClient || item.uuid || item.msgUuid || item.msgIdServer;
-  if (direct) return String(direct);
+  const stable = stableMessageId(item);
+  if (stable) return stable;
   const profile = senderProfile(item, {} as Member);
   const body = messageBody(item);
   const text = firstTextFrom([body, item], ['text', 'message', 'msgContent', 'content', 'bodys', 'body']);
@@ -358,9 +354,6 @@ export function messageKey(item: any) {
   // 无稳定 id 时以 时间+发送者+内容 作近似键，足以区分不同消息并拦截同批重复。
   return String(`${getMessageTime(item)}-${profile.id || profile.name || ''}-${text || media || JSON.stringify(body).slice(0, 120)}`);
 }
-
-
-
 
 /** 下一页时间戳。`_list` 仅保留签名（调用方按位置传列表） */
 export function getNextTime(res: any, _list: any[]): number {

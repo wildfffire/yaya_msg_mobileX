@@ -88,20 +88,18 @@ export type DanmakuSource =
   | { type: 'lrc'; lrcUrl: string; liveId?: string }
   | { type: 'ws'; roomId: string };
 
-/** 功能开关：页面声明需要哪些能力，PlayerChrome 按需渲染 */
+/**
+ * 功能开关：页面声明需要哪些能力，PlayerChrome 按需渲染。
+ *
+ * ⚠️ 2026-11-13 清理：`gift / rank / quality / resume` 四个字段**从未被任何组件读取**
+ * （礼物/贡献榜已内置宿主；续播由 usePlaybackResume 统一；B站画质走 extraActions.options），
+ * 已删除，避免页面以为传了有用。
+ */
 export interface PlayerFeatures {
   /** 倍速（1/1.5/2） */
   rate?: boolean;
-  /** 弹幕开关 + 弹幕设置 */
+  /** 弹幕开关 + 弹幕设置（宿主还会据此隐藏控制坞的弹幕按钮） */
   danmaku?: boolean;
-  /** 直播送礼面板（口袋） */
-  gift?: boolean;
-  /** 贡献榜（口袋） */
-  rank?: boolean;
-  /** 画质切换（B站） */
-  quality?: boolean;
-  /** 续播记忆 */
-  resume?: boolean;
   /** 内核互切（原生 <-> 网页） */
   kernelSwitch?: boolean;
 }

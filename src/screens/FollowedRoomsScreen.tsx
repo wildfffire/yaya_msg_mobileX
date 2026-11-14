@@ -14,8 +14,10 @@ import {
 import { resolveRoomLiveMedia, roomMedia } from './room/mediaResolve';
 // 媒体卡片组件（VideoCoverCard / LiveCoverImage / AudioMediaCard）只在 RoomChatMessageRow 内使用
 import { RoomChatMessageRow } from './room/RoomChatMessageRow';
-import { RoomGiftSheet } from './room/RoomGiftSheet';
 import { RoomListRow } from './room/RoomListRow';
+// 房间工具栏送礼用同一个抽屉组件（播放中的礼物/贡献榜由宿主内置）
+import { LiveGiftSheet } from '../components/LiveGiftSheet';
+import { buildChannelToRoomMap } from './room/roomChannelMap';
 import { Animated, AppState, RefreshControl, useWindowDimensions } from 'react-native';
 import Reanimated, { Easing as ReEasing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 import { PerfFlatList } from '../components/PerfFlatList';
@@ -26,15 +28,19 @@ import { loadSelfProfile } from '../services/pocketNim/credentials';
 import { getNimSessionEpoch, subscribeNimSession } from '../services/pocketNim/session';
 import { NetworkImage } from '../components/NetworkImage';
 import MemberReplaySheet, { type MemberReplayItem } from '../components/MemberReplaySheet';
-import { useIsLandscape } from '../hooks/useIsLandscape';
 import { isPipActive } from '../utils/pip';
 // 引用（回复）消息：字段口径/截断规则唯一实现在 utils/roomReply（发送侧与消息行共用）
 import { rememberOwnReplyQuote, type RoomReplyTarget } from '../utils/roomReply';
 import { flushRoomUnreadPersist, useRoomUnreadStore } from '../services/roomUnread';
 // 三条计数通道（实时 / 5s 通知轮询 / 30s 指纹）共用同一份消息 id 总账
 import { claimCountId, markCountConsumed } from '../services/roomCountLedger';
+// 分侧「上次看到的位置」：进房 / 一键已读写消息 id，下拉刷新一次性翻到该位置
+import { markSeen, markSeenAll } from '../services/roomSeenStore';
+import { flushOwnerFeedUnread } from '../services/messagePollers';
+// 列表预览快扫：与 5s 通知轮询解耦，15s 内把大/小房间真实最新正文拉回列表
+import { refreshRoomListPreviews } from '../services/roomPreviewRefresh';
 // isDetailFromSide：识别「小房间请求回退到大房间频道」的串味数据（三处：首屏/上拉/静默刷新）
-import { isDetailFromSide, messageId } from '../utils/roomMessageCursor';
+import { isDetailFromSide, messageId, messageTime as cursorMessageTime } from '../utils/roomMessageCursor';
 import { fetchMemberRadioUrl } from '../services/radio';
 import { checkMaskWords } from '../services/maskWords';
 import { usePalette } from '../theme';
@@ -48,7 +54,7 @@ import { essenceUnseenIds, normalizeEssenceList, type RoomEssenceMessage } from 
 import { useResolvedTheme } from '../hooks/useAppTheme';
 import { useKeyboardHeight } from '../hooks/useKeyboardHeight';
 // 拆分第一步：媒体识别的纯函数与类型已移到独立模块（可单独跑单元测试）
-import { roomTapIsVod, type RoomMedia } from './room/mediaRules';
+import type { RoomMedia } from './room/mediaRules';
 import {
   buildMemberIdSet,
   buildMemberIndex,
@@ -76,7 +82,6 @@ import {
   findLastMessage,
   findSmallLastMessage,
   liveEntryForMember,
-  normalizeLiveRank,
   messageToken,
   roomChannelId,
   roomLastActivity,
@@ -136,24 +141,29 @@ import {
 import { useI18n } from '../i18n';
 import { logInfo, logWarn } from '../utils/runtimeLog';
 import pocketApi from '../api/pocket48';
-import { MediaPlaybackHost, type MediaPlaybackHostHandle, type PlayMedia } from '../player/session';
+import {
+  MediaPlaybackHost,
+  playMediaFromRoomMedia,
+  playMediaFromRoomReplay,
+  usePlaybackGift,
+  type MediaPlaybackHostHandle,
+  type PlayMedia,
+} from '../player/session';
 import { useMiniPlayerStore } from '../store/miniPlayerStore';
 import ZoomImageModal from '../components/ZoomImageModal';
 // 成员档案内容（与「成员档案」页同一份实现）：点偶像头像后**就地**显示在资料卡里
 import { MemberArchiveContent, useMemberArchive } from '../components/MemberArchiveView';
 import { enqueueDownload } from '../services/downloads';
-import { giftImage, giftName, normalizeGiftList } from '../utils/gift';
 import { memberSearchText } from '../utils/members';
 import { getBgDisplayUri, ensureBgCached } from '../services/roomBgCache';
 // 房间元数据（房间名/背景原图地址）跨启动缓存：冷启动首进房也能第一帧显示背景（用户 2026-11-12 进房提速）
 import { getRoomMetaCached, putRoomMetaCache } from '../services/roomMetaCache';
-import { previewTextOf, useRoomPreviewTextStore } from '../services/roomPreviewText';
+import { useRoomPreviewTextStore } from '../services/roomPreviewText';
 import { resolveLastSeenTarget } from '../utils/roomLastSeen';
 // 房间列表排序（用户 2026-11-09）：置顶 → 新消息在上（可关）→ 自定义/按队伍/按字母
 import { sortRooms, type RoomSortMode } from '../utils/roomListSort';
 import MaterialCommunityIcons from 'react-native-vector-icons/MaterialCommunityIcons';
 import { GlassSurface } from '../components/GlassSurface';
-import { DarkSheetHandle, DarkSheetHeader } from '../components/DarkSheetHeader';
 import { GlassSegmented } from '../components/GlassSegmented';
 /**
  * 「房主发言采样」：某侧 homeowner 接口（服务端按房主过滤 = 「只看偶像」的数据源）的返回统计。
@@ -747,6 +757,8 @@ const route = useRoute<any>();
    *（src/player/session/MediaPlaybackHost）——本页不再自己维护任何播放器内核状态。
    */
   const [roomPlaying, setRoomPlaying] = useState<PlayMedia | null>(null);
+  /** 统一播放宿主 ref：礼物面板（宿主内置）/ 公屏广播等命令式入口都从这里走 */
+  const playbackHostRef = useRef<MediaPlaybackHostHandle | null>(null);
 
   /**
    * ⚠️【玻璃折射】把房间背景图挂进 blur 目标层。
@@ -769,8 +781,6 @@ const route = useRoute<any>();
   );
   /** 房间内「直播回放」抽屉（该成员的历史直播回放列表，点条目就地用房间播放器播放） */
   const [showRoomReplay, setShowRoomReplay] = useState(false);
-  /** 当前是否横屏：房间内的送礼/贡献榜/菜单浮层要按横屏收窄内部滚动区 */
-  const isRoomLandscape = useIsLandscape();
   const { height: winH } = useWindowDimensions();
   /**
    * 资料卡高度 = **固定接近满屏**（用户 2026-10-02：「哪里明显变大了，就是你不要管顶栏，全遮了也没事」）。
@@ -785,11 +795,7 @@ const route = useRoute<any>();
    * （关闭区 + 把按钮抬离系统手势条）。
    */
   const userCardHeight = Math.max(320, Math.round(winH) - 44);
-  /**
-   * 贡献榜列表的确定高度上限（用户 2026-11-12 截图定位）：
-   * 只给 flexShrink 时面板高度由内容决定，超出屏幕的部分被直接裁掉 → 名单少显示几个人。
-   */
-  const roomRankListH = Math.max(180, Math.round(winH) - 150);
+  // 贡献榜列表高度上限已随面板组件迁到 components/LiveRankSheet（两场景共用）。
   // 直播弹幕（云信飘屏/输入条/列表）、回放 LRC 弹幕、弹幕设置面板、礼物特效层：
   // 已全部收口到统一播放宿主（见 JSX 的 MediaPlaybackHost），本页不再自建弹幕连接。
 
@@ -817,10 +823,13 @@ const route = useRoute<any>();
   /** ★ 角标 / 上浮 / tab 的唯一数据源（用户 2026-11-10「只要一套」） */
   const roomUnreadCounts = useRoomUnreadStore((s) => (selectedRoom ? EMPTY_UNREAD_MAP : s.counts));
   /**
-   * 列表预览正文（来自详情页，见 services/roomPreviewText.ts）：
-   * 只影响显示，不参与计数；用字符串传进行（memo 友好）。
+   * ⚠️ 列表预览正文不在页面层订阅整张表（用户 2026-11-13「预览有延迟」）：
+   * 以前页面顶层订阅整张预览表，store 一变就整屏重渲染，
+   * 而 FlatList 既没有 extraData、30s tick 指纹不变时又复用行对象引用 ——
+   * 新正文写进 store 后最长要等下一轮 setFollowed 才会被 renderItem 读到。
+   * 现在由 `RoomListRow` 按「成员 id + 侧」直接订阅字符串：写入即刻到那一行，
+   * 且只有文本真变了的那一行重渲染（React.memo 语义不变）。
    */
-  const roomPreviewMap = useRoomPreviewTextStore((s) => s.map);
   // 「上次看到这里」与 30s 精确计数直接读 store（getState()），不需要订阅这两张表，
   // 否则每次 markSeen / 推进基线都会让整个列表重排一次。
   useEffect(() => { useRoomUnreadStore.getState().hydrate(); }, []);
@@ -917,26 +926,11 @@ const route = useRoute<any>();
    * ⚠️ 大房间 channelId 与小房间 yklzId 是**两个不同的 channelId**，正好用来判「消息来自哪一侧」；
    * 两者都不可能为空时才分别登记。同一 channelId 同时被两条记录占用时后写覆盖（历史行为）。
    */
-  const channelToRoom = useMemo(() => {
-    /** member 带上：实时消息要按它做「只计偶像（房主）发言」的判定（用户 2026-11-10） */
-    const map: Record<string, { id: string; side: RoomUnreadSide; member: any }> = {};
-    for (const it of followed) {
-      const mid = String(it.memberId || (it.member as any)?.id || '');
-      if (!mid) continue;
-      const member = it.member as any;
-      /**
-       * ⚠️ 大房间要同时登记 `channelId` **和** `serverId`（用户 2026-11-09：「列表显示 1，
-       * 实际发了很多」）：圈组实时消息里的 `channelId` 到底对应成员的哪个字段没有文档，
-       * 只登记 channelId 时，若推送里带的是 serverId → 每条消息都映射不到房间 →
-       * 实时计数全丢，角标只剩「30s 指纹一轮 +1」。
-       */
-      const bigIds = [member?.channelId, member?.serverId].map((v) => String(v || '')).filter(Boolean);
-      const small = String(member?.yklzId || '');
-      for (const id of bigIds) map[id] = { id: mid, side: 'big', member };
-      if (small) map[small] = { id: mid, side: 'small', member };
-    }
-    return map;
-  }, [followed]);
+  /**
+   * channelId/serverId/yklzId →（成员 + 大/小侧）反查表：
+   * 实现与「大房间双 id 登记」的坑见 room/roomChannelMap.ts（纯函数，可单测）。
+   */
+  const channelToRoom = useMemo(() => buildChannelToRoomMap(followed), [followed]);
   const channelToRoomRef = useRef(channelToRoom);
   channelToRoomRef.current = channelToRoom;
   /** 「实时消息映射不到房间」的诊断节流（tag room.unread） */
@@ -1002,6 +996,20 @@ const route = useRoute<any>();
             );
           }
           continue;
+        }
+        /**
+         * ★ 列表预览走实时通道（用户 2026-11-13「房间列表两条消息有延迟」）：
+         * 圈组推送一到就把房主本人这句写进预览 store，不必等 30s 列表 tick 或
+         * 60s 详情 sweep。只写严格判定的偶像发言，粉丝消息不顶预览；
+         * 正在看的房间也写（退房回到列表时应当是最新一句）。
+         * 这里只碰展示文本，不碰角标 / 游标 / id 总账。
+         */
+        if (hit.member && isOwnerMessageStrict(m as any, hit.member)) {
+          useRoomPreviewTextStore.getState().setPreview(hit.id, hit.side, {
+            text: messageText(qchatToRoomMessage(m as any)),
+            msgId: messageId(m),
+            msgTime: cursorMessageTime(m),
+          });
         }
         // 正在看这个房间：不进角标，但要把这条消息认领掉
         // （退房后 5s 轮询拉到同一条详情时不能再补计一次）
@@ -1099,18 +1107,12 @@ const route = useRoute<any>();
   /** 房间发言输入框引用：进入引用态后自动聚焦（否则用户还要多点一下才看见光标） */
   const roomInputRef = useRef<TextInput>(null);
 
-  const [rankVisible, setRankVisible] = useState(false);
-  // 房间直播送礼（与 Media 页同 API；roomPlayer 面板此前漏接）
+  /**
+   * 房间礼物面板的可见性。
+   * ⚠️ 只用于「**未起播**时从工具栏送礼」这一种情况：起播后礼物/贡献榜面板
+   * 由统一播放宿主内置（MediaPlaybackHost），房间不再自己维护那套状态。
+   */
   const [giftVisible, setGiftVisible] = useState(false);
-  const [giftStatus, setGiftStatus] = useState('');
-  const [giftBalance, setGiftBalance] = useState('');
-  const [giftList, setGiftList] = useState<any[]>([]);
-  const [giftLoading, setGiftLoading] = useState(false);
-  const [giftSel, setGiftSel] = useState<any>(null);
-  const [giftNum, setGiftNum] = useState(1);
-  const [rankRows, setRankRows] = useState<any[]>([]);
-  const [rankStatus, setRankStatus] = useState('');
-  const [rankLoading, setRankLoading] = useState(false);
   /**
    * 用户资料卡：房间内点「非成员」头像（粉丝）时弹出。
    * 成员（含房主）直接跳「成员档案」页 —— 见 openSenderProfile。
@@ -1268,80 +1270,25 @@ const route = useRoute<any>();
     return String(entry?.liveId || '');
   }, [roomPlaying, selectedRoom]);
 
-  const openRoomGiftPanel = useCallback(async () => {
+  /**
+   * 房间送礼：数据 + 面板与直播页**完全同一套**（usePlaybackGift + LiveGiftSheet）。
+   * 起播中 → 宿主内置面板（ref.openGift）；未起播 → 用本页这个实例（工具栏入口）。
+   */
+  const roomGift = usePlaybackGift({
+    liveId: roomLiveId(),
+    targetUserId: String((selectedRoom as any)?.id || ''),
+    targetName: String((selectedRoom as any)?.ownerName || ''),
+    // 起播后宿主连接已在；未起播时没有连接，广播自然静默
+    broadcast: (g) => playbackHostRef.current?.sendGiftBroadcast(g),
+  });
+  const openRoomGiftPanel = useCallback(() => {
+    if (roomPlaying) {
+      playbackHostRef.current?.openGift();
+      return;
+    }
     setGiftVisible(true);
-    setGiftStatus('');
-    setGiftSel(null);
-    setGiftNum(1);
-    // 串台：先清掉上一场的礼物格，避免新请求返回前显示旧列表
-    setGiftList([]);
-    const liveId = roomLiveId();
-    if (!liveId) {
-      setGiftStatus(t('当前没有可送礼的直播'));
-      return;
-    }
-    setGiftLoading(true);
-    try {
-      const [giftRes, moneyRes] = await Promise.all([
-        pocketApi.getGiftList(liveId).catch(() => null),
-        pocketApi.getUserMoney().catch(() => null),
-      ]);
-      const gifts = normalizeGiftList(giftRes);
-      setGiftList(gifts);
-      const money = moneyRes?.content?.moneyTotal ?? moneyRes?.data?.moneyTotal ?? '';
-      if (money !== '' && money !== undefined && money !== null) setGiftBalance(String(money));
-      setGiftStatus(gifts.length ? t('已加载 {count} 个礼物', { count: gifts.length }) : t('礼物列表为空'));
-    } catch (err) {
-      setGiftList([]);
-      setGiftStatus(t('加载礼物失败：{error}', { error: errorMessage(err) }));
-    } finally {
-      setGiftLoading(false);
-    }
-  }, [roomLiveId, t]);
-
-  const sendRoomGift = useCallback(async () => {
-    if (!giftSel) {
-      setGiftStatus(t('请先选择礼物'));
-      return;
-    }
-    const num = Math.max(1, Math.floor(Number(giftNum) || 1));
-    // 主播 = 房间主人（member.id）；礼物入账到主播账号
-    const ownerId = String((selectedRoom as any)?.id || '');
-    const liveId = roomLiveId();
-    if (!liveId) {
-      setGiftStatus(t('当前没有可送礼的直播'));
-      return;
-    }
-    setGiftStatus(t('正在发送...'));
-    try {
-      await pocketApi.sendGift({
-        giftId: String(giftSel.giftId || giftSel.id),
-        liveId,
-        acceptUserId: ownerId,
-        giftNum: num,
-      });
-      /**
-       * ⚠️ 礼物公屏广播（用户反馈 2026-09-29：「我送礼物，主播看不到我送的」）。
-       * HTTP 送礼接口只扣款/入账；礼物公屏是客户端发到云信聊天室的，
-       * 房间内的直播同样必须补这一条，否则主播与观众都看不到。
-       * 失败静默：礼物已送出，公屏失败不该变成「送礼失败」。
-       */
-      // 礼物公屏广播走统一播放宿主内的云信连接（房间内已不再自建弹幕连接）
-      playbackHostRef.current?.sendGiftBroadcast({
-        toUserId: ownerId,
-        toName: String((selectedRoom as any)?.ownerName || ''),
-        giftId: String(giftSel.giftId || giftSel.id),
-        giftName: giftName(giftSel),
-        giftNum: num,
-        giftPic: giftImage(giftSel),
-      });
-      setGiftStatus(t('已送出 {num} 个 {giftName}', { num, giftName: giftName(giftSel) }));
-      const money = await pocketApi.getUserMoney().catch(() => null);
-      if (money?.content?.moneyTotal !== undefined) setGiftBalance(String(money.content.moneyTotal));
-    } catch (err) {
-      setGiftStatus(t('送礼失败：{error}', { error: errorMessage(err) }));
-    }
-  }, [roomLiveId, selectedRoom, giftSel, giftNum, t]);
+    void roomGift.load();
+  }, [roomPlaying, roomGift.load]);
 
   /**
    * 进入引用（回复）态：长按别人消息时由 `RoomChatMessageRow` 回传「昵称 + 原文摘要 + msgId」。
@@ -1494,7 +1441,6 @@ const route = useRoute<any>();
      * ⚠️ 弹幕列表 / 弹幕设置 / 解析占位 现在都在统一播放宿主内部（随 roomPlaying=null 卸载），
      * 无需（也无法）在这里单独复位。
      */
-    setRankVisible(false);
     setGiftVisible(false);
     setUserCard(null);
     setShowRoomReplay(false);
@@ -1529,7 +1475,6 @@ const route = useRoute<any>();
     if (selectedRoom) return undefined;
     const timer = setTimeout(() => {
       const stale = [
-        rankVisible && '贡献榜',
         giftVisible && '礼物面板',
         !!userCard && '用户资料卡',
         showRoomReplay && '回放抽屉',
@@ -1539,7 +1484,6 @@ const route = useRoute<any>();
       ].filter(Boolean);
       if (!stale.length) return;
       logInfo(`[room] 不在房间但仍有残留层（${stale.join('、')}）→ 强制复位`, 'room');
-      setRankVisible(false);
       setGiftVisible(false);
       setUserCard(null);
       setShowRoomReplay(false);
@@ -1551,7 +1495,7 @@ const route = useRoute<any>();
     }, 1500);
     return () => clearTimeout(timer);
   }, [
-    selectedRoom, rankVisible, giftVisible, userCard, showRoomReplay,
+    selectedRoom, giftVisible, userCard, showRoomReplay,
     fullImageUrl, roomPlaying, playingMedia,
   ]);
 
@@ -1705,6 +1649,11 @@ const route = useRoute<any>();
         lastSmallMessage: findSmallLastMessage(lastMsgs, item.member),
       }));
       setFollowed(followedRows);
+      /**
+       * 首屏/重拉后立刻补一轮真实正文：列表接口的 msgContent 对回复消息只给
+       * 「[回复消息]」，等 60s 详情 sweep 才变就是用户看到的「预览延迟」。
+       */
+      void refreshRoomListPreviews(followedRows, { force: true });
       // 上麦检测：扫描关注成员房间语音状态（静默，失败忽略）。结果写入 onMicStore 供
       // 房间列表「上麦中」徽标与房间内上麦按钮共用。
       const onMicInputs = followedMembers
@@ -1844,6 +1793,14 @@ const route = useRoute<any>();
       roomsRefreshBusyRef.current = false;
       setRoomsRefreshing(false);
     });
+    /**
+     * ★ 手动刷新（用户 2026-11-13「一定要一次性翻到上次看到的位置为止」）：
+     * 对每一侧跑 force 主计数 —— 忽略常规 8 页预算与跨轮断点，一次翻到该侧
+     * 「上次看到的那条消息 id」；与列表刷新并行，不阻塞 12s 收圈。
+     */
+    void flushOwnerFeedUnread(followedRef.current).catch(() => {});
+    // 手动刷新同时把大/小房间两条预览一次性拉到最新（不等分片轮转）
+    void refreshRoomListPreviews(followedRef.current, { force: true });
   }, [loadFollowed]);
 
   /**
@@ -1884,11 +1841,29 @@ const route = useRoute<any>();
       if (state !== 'active') return;
       // activeChannelRef 非空即「当前在房间里」（openRoom 写入、closeRoom 清空）——房间里自带轮询，列表不必刷
       if (activeChannelRef.current) return;
+      // 回前台立即把两条预览拉到最新：快扫不受 8s 全量 tick 节流限制（自身有 inflight 保护）
+      void refreshRoomListPreviews(followedRef.current, { force: true });
       if (!shouldRunTick(lastTickRef.current, Date.now(), TICK_MIN_INTERVAL_MS)) return;
       loadFollowedRef.current?.(true);
     });
     return () => sub.remove();
   }, []);
+
+  /**
+   * 列表预览分片快扫（用户 2026-11-13「两条消息有些延迟」）：
+   * 5s 扫一片、3 片 = 15s 覆盖全部关注房间的大/小两侧；只在列表页前台可见时跑。
+   * 与 30s tick / 5s 通知轮询彼此独立：不拉直播列表、不做指纹计数、不推进消息游标。
+   */
+  useEffect(() => {
+    if (selectedRoom || !isFocused) return undefined;
+    let active = true;
+    const run = () => {
+      if (!active || AppState.currentState !== 'active') return;
+      void refreshRoomListPreviews(followedRef.current);
+    };
+    const id = setInterval(run, 5000);
+    return () => { active = false; clearInterval(id); };
+  }, [selectedRoom, isFocused]);
 
   // 列表页实时刷新：关注成员的直播状态 + 上麦状态，每 30s 静默刷新（仅列表视图时）
   // 列表页实时刷新：关注成员的直播状态 + 上麦状态 + 最新消息，每 30s 静默刷新（仅列表视图时）。
@@ -2065,7 +2040,6 @@ const route = useRoute<any>();
      * 这些开关不会自己关，黑幕 + 弹窗会跟着用户到新房间 ——
      * 视觉上就是「遮罩盖住顶栏以下、点哪儿都没反应」（用户 2026-09-30 反馈）。
      */
-    setRankVisible(false);
     setGiftVisible(false);
     setUserCard(null);
     setShowRoomReplay(false);
@@ -2354,11 +2328,20 @@ const route = useRoute<any>();
         // ⚠️ 0 条也要记（sampled=true, count=0）：服务端确认"该侧没有房主发言"，
         //    与"从未采样"必须区分 —— 否则 0 条时会退回宽松判定而永不提示。
         let latestSample = 0;
+        let newestOwner: any = null;
         for (const m of sorted) {
           ownerMsgKeysRef.current.add(messageKey(m));
           const ms = getMessageTime(m);
           if (ms > latestSample) latestSample = ms;
+          if (!newestOwner || ms >= getMessageTime(newestOwner)) newestOwner = m;
         }
+        /**
+         * ★ 分侧「上次看到的位置」（用户 2026-11-13 一次性改好）：
+         * 进房默认「只看偶像」→ `sorted` 就是 homeowner 页的房主消息，
+         * 记下用户实际看到的最新**那一条的 id**（不是列表预览时间戳）。
+         * 主计数层据此翻页到该 id 为止，同秒连发 / 缺时间字段 / 粉丝刷屏都不会漏。
+         */
+        if (newestOwner) markSeen(roomUnreadKey(String(room.id || ''), nextMode), newestOwner);
         setOwnerSampleBySide((prev) => ({ ...prev, [nextMode]: { sampled: true, count: sorted.length, latestMs: latestSample } }));
       } else if (wantFans) {
         /**
@@ -2818,39 +2801,19 @@ const route = useRoute<any>();
       setPlayingMedia(null);
       return;
     }
-    const memberHints = {
+    /**
+     * 「播什么」交给统一播放入口（`player/session/playEntry`）——
+     * 与直播页 / 历史 / 稍后再看同一套构造，本页不再自己拼 PlayMedia。
+     * 返回 null = 语音 / 图片：保持原有气泡内联播放 / 大图查看，不进大播放器。
+     */
+    const next = playMediaFromRoomMedia(media, {
       owner: String(selectedRoom?.ownerName || ''),
       team: String((selectedRoom as any)?.team || ''),
       ownerId: String(selectedRoom?.id || ''),
       memberId: String(selectedRoom?.id || ''),
-    };
-    if (media.type === 'live' || media.liveId) {
-      setRoomPlaying({
-        kind: media.replayHint ? 'replay' : 'live',
-        url: String(media.url || ''),
-        title: String(media.title || ''),
-        cover: media.cover,
-        liveId: String(media.liveId || ''),
-        // 带地址时按房间既有口径预判直播/回放（rtmp/flv=直播；m3u8/mp4 二义按回放）；
-        // 无地址时交给宿主按解析结果判定（与历史/稍后再看同一条链路）
-        ...(media.url ? { isLive: !roomTapIsVod(media) } : {}),
-        ...(media.type === 'audio' ? { audioOnly: true } : {}),
-        ...memberHints,
-      });
-      return;
-    }
-    if (media.type === 'video') {
-      // 房间视频消息：自带地址直接播放（不做网络解析）
-      setRoomPlaying({
-        kind: 'direct',
-        url: String(media.url || ''),
-        title: String(media.title || ''),
-        cover: media.cover,
-        ...memberHints,
-      });
-      return;
-    }
-    setPlayingMedia(media);
+    });
+    if (next) setRoomPlaying(next);
+    else setPlayingMedia(media);
   }, [playingMedia, selectedRoom, showToast, t]);
   /** playMedia 的 ref 镜像：声明在前的 effect（进房自动开播）经它调用，避免 TDZ */
   const playMediaRef = useRef(playMedia);
@@ -2864,21 +2827,15 @@ const route = useRoute<any>();
    */
   const playRoomReplay = useCallback((item: MemberReplayItem) => {
     setShowRoomReplay(false);
-    setRoomPlaying({
-      kind: 'replay',
-      url: '',
-      title: String(item.title || ''),
-      cover: item.cover,
-      liveId: String(item.liveId || ''),
+    // 构造交给统一播放入口：kind='replay' 明示录播（与历史/稍后再看里同一条回放链路）
+    setRoomPlaying(playMediaFromRoomReplay(item, {
       owner: String(selectedRoom?.ownerName || ''),
       team: String((selectedRoom as any)?.team || ''),
       ownerId: String(selectedRoom?.id || ''),
       memberId: String(selectedRoom?.id || ''),
-    });
+    }));
   }, [selectedRoom]);
 
-  /** 统一播放宿主 ref：送礼的云信公屏广播走宿主内部同一条聊天室连接 */
-  const playbackHostRef = useRef<MediaPlaybackHostHandle | null>(null);
   /** 小窗回大窗回跳参数：带上成员 id，回大窗落回她的房间（而不是直播 tab） */
   const miniPlayerBackTo = useMemo(
     () => ({ roomMemberId: String(selectedRoom?.id || '') }),
@@ -2895,42 +2852,8 @@ const route = useRoute<any>();
     [roomPlaying, selectedRoom, liveNow],
   );
 
-  const openRoomRankPanel = useCallback(async () => {
-    setRankVisible(true);
-    setRankStatus('');
-    setRankRows([]); // ⚠️【串台修复】先清空旧场次的榜单，避免新请求返回前显示上一场的贡献榜
-    const liveId = roomLiveId();
-    if (!liveId) {
-      setRankStatus(t('该直播来源暂不支持贡献榜（如快捷开播/分享卡）'));
-      return;
-    }
-    setRankLoading(true);
-    try {
-      const res = await pocketApi.getLiveRank(liveId);
-      const rows = normalizeLiveRank(res);
-      setRankRows(rows);
-      setRankStatus(rows.length ? t('已加载 {count} 位贡献用户', { count: rows.length }) : t('贡献榜为空'));
-    } catch (error) {
-      setRankRows([]);
-      setRankStatus(t('贡献榜加载失败：{msg}', { msg: errorMessage(error) }));
-    } finally {
-      setRankLoading(false);
-    }
-  }, [roomLiveId, t]);
-
-  /**
-   * 「…」面板里的功能项（用户 2026-11-12 澄清）：
-   * 礼物 / 贡献榜入口保持在这里，改的是它们点开后面板的观感（黑白 + 简洁）。
-   */
-  const roomExtraActions = useCallback(
-    (ctx: { isLive: boolean }) => ([
-      ...(ctx.isLive
-        ? [{ key: 'gift', icon: 'gift', label: t('礼物'), onPress: () => openRoomGiftPanel() }]
-        : []),
-      { key: 'rank', icon: 'trophy', label: t('贡献榜'), onPress: openRoomRankPanel },
-    ]),
-    [t, openRoomGiftPanel, openRoomRankPanel],
-  );
+  // 「…」面板里的礼物 / 贡献榜入口由统一播放宿主内置（MediaPlaybackHost 的 mergedActions），
+  // 房间不再传 extraActions —— 与直播页同一份实现（用户 2026-11-13）。
 
   const downloadMedia = useCallback(async (media: RoomMedia) => {
     try {
@@ -3036,6 +2959,8 @@ const route = useRoute<any>();
         const token = roomSideToken(row, side as RoomMode);
         const key = roomUnreadKey(id, side);
         if (token && key) tokens[key] = token;
+        // ★ 一键已读没有具体消息 id 可记：把该侧时间基线推到列表活动时间（id 置空后主计数层走时间兜底）
+        markSeenAll(key, baselines[id]);
       }
     }
     useRoomUnreadStore.getState().markAllRead(baselines, tokens);
@@ -4287,107 +4212,30 @@ const route = useRoute<any>();
           <View style={[styles.roomPlayerPage, { backgroundColor: '#000' }]}>
             <MediaPlaybackHost
               ref={playbackHostRef}
+              /* 场景预设（用户 2026-11-13）：公告 + 续播提示默认开、不显示「进房间」（已在房间里） */
+              scene="room"
               media={roomPlaying}
               onClose={closeRoomPlayer}
-              /* 已经在房间里：标题点击不要再跳一次房间（用户 2026-11-04 的标题进房功能只在外部场景启用） */
-              roomLink={false}
-              extraActions={roomExtraActions}
+              /* 送礼对象 = 房间主人（主播）：宿主据此显示「礼物」按钮并发公屏广播 */
+              giftTargetUserId={String((selectedRoom as any)?.id || '')}
+              giftTargetName={String((selectedRoom as any)?.ownerName || '')}
+              /* 贡献榜 liveId：房间口径（在播这一场 → 直播中索引兜底） */
+              rankLiveId={roomLiveId()}
               /* 弹幕列表 / 飘屏点发送者 → 房间内用户资料卡（用户 2026-11-12） */
               onOpenDanmakuProfile={(entry) => openSenderProfile({
                 id: entry.userId != null ? String(entry.userId) : '',
                 name: entry.nick,
                 avatar: entry.avatar || '',
               })}
-              /* 直播间公告（房间内也要能看到）：宿主统一拉取 + 面板 + 顶栏按钮（控制坞入口已删） */
-              announcement
-              /* 房间续播提示：「上次看到 mm:ss，已自动续播」（宿主统一 toast） */
-              resumeNotice
+              /* 贡献榜点某行 → 同一个房间内资料卡 */
+              onOpenUserProfile={(target) => openSenderProfile({
+                id: String(target.userId || ''),
+                name: target.name,
+                avatar: target.avatar || '',
+              })}
               /* 小窗回大窗回跳：带上成员 id，落回她的房间 */
               miniPlayerBackTo={miniPlayerBackTo}
             />
-            <Modal visible={rankVisible} transparent animationType="slide" onRequestClose={() => setRankVisible(false)}>
-              {/* 横屏：贡献榜贴右（与弹幕列表同一套抽屉布局，用户 2026-11-09） */}
-              <View style={[styles.roomModalShade, isRoomLandscape && styles.roomModalShadeLandscape]}>
-                {/* 点遮罩关闭：**独立兄弟节点、排在面板之前**。
-                    不能把面板包进 Touchable —— 会成为响应者、和面板内 ScrollView 抢手势，
-                    上游就是因此出现「滑一下就关 / 划不动」（本次借鉴定版）。 */}
-                <TouchableOpacity style={StyleSheet.absoluteFill} activeOpacity={1} onPress={() => setRankVisible(false)} />
-                {/* 实心黑底（与弹幕列表同风格）：玻璃层会透出房间画面，用户 2026-11-09 反馈「背景是房间的背景」 */}
-                <View style={[styles.roomRankPanel, isRoomLandscape && styles.roomRankPanelLandscape, { backgroundColor: 'rgba(18,18,20,0.97)' }]}>
-                  {/* 与弹幕列表同一套头（用户 2026-11-12） */}
-                  <DarkSheetHandle show={!isRoomLandscape} />
-                  <DarkSheetHeader
-                    icon="trophy-outline"
-                    title={t('贡献榜')}
-                    meta={rankRows.length ? t('{n} 人', { n: rankRows.length }) : undefined}
-                    onClose={() => setRankVisible(false)}
-                  />
-                  {rankLoading ? (
-                    <View style={styles.roomRankLoadingRow}>
-                      <ActivityIndicator size="small" color={'rgba(255,255,255,0.85)'} />
-                      <Text style={[styles.roomRankStatus, { color: 'rgba(255,255,255,0.6)', marginBottom: 0 }]}>{t('正在加载...')}</Text>
-                    </View>
-                  ) : rankStatus ? (
-                    <Text style={[styles.roomRankStatus, { color: 'rgba(255,255,255,0.55)' }]}>{rankStatus}</Text>
-                  ) : null}
-                  <ScrollView
-                    style={[styles.roomRankList, isRoomLandscape ? [styles.roomRankListLandscape, { maxHeight: roomRankListH }] : null]}
-                    showsVerticalScrollIndicator={false}
-                  >
-                    {rankLoading && !rankRows.length ? (
-                      /* 骨架行：点开不再是一片空白（上游 v2.7.7 同款修复） */
-                      [0, 1, 2, 3, 4].map((i) => (
-                        <View key={`rank-skeleton-${i}`} style={styles.roomRankRow}>
-                          <View style={[styles.roomRankNo, styles.skeletonBox, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />
-                          <View style={[styles.roomRankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />
-                          <View style={styles.roomRankInfo}>
-                            <View style={[styles.skeletonLine, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />
-                            <View style={[styles.skeletonLineShort, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />
-                          </View>
-                        </View>
-                      ))
-                    ) : !rankRows.length ? (
-                      <Text style={[styles.roomRankEmpty, { color: 'rgba(255,255,255,0.45)' }]}>{t('暂无贡献记录')}</Text>
-                    ) : (() => {
-                      // 归一化进度条：取最高贡献值作为基准
-                      const maxValue = rankRows.reduce((max, r) => Math.max(max, Number(r.value) || 0), 0);
-                      return rankRows.map((row, index) => {
-                        const valNum = Number(row.value) || 0;
-                        const progress = maxValue > 0 ? Math.max(0, Math.min(1, valNum / maxValue)) : 0;
-                        return (
-                          <TouchableOpacity
-                            key={String(row.userId || row.id || index)}
-                            style={[styles.roomRankRow, { borderBottomColor: 'rgba(255,255,255,0.08)' }]}
-                            activeOpacity={0.75}
-                            accessibilityRole="button"
-                            accessibilityLabel={row.name}
-                            onPress={() => {
-                              setRankVisible(false);
-                              openSenderProfile({
-                                id: String(row.userId || row.id || ''),
-                                name: String(row.name || ''),
-                                avatar: String(row.avatar || ''),
-                              });
-                            }}
-                          >
-                            {/* 黑白榜（用户 2026-11-09）：名次不再用主题色，前三名白 0.95、其余白 0.5 */}
-                            <Text style={[styles.roomRankNo, { color: index < 3 ? 'rgba(255,255,255,0.95)' : 'rgba(255,255,255,0.5)' }]}>{row.rank || index + 1}</Text>
-                            {row.avatar ? <NetworkImage source={{ uri: row.avatar }} style={[styles.roomRankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} thumbnail={180} /> : <View style={[styles.roomRankAvatar, { backgroundColor: 'rgba(255,255,255,0.12)' }]} />}
-                            <View style={styles.roomRankInfo}>
-                              <Text style={[styles.roomRankName, { color: 'rgba(255,255,255,0.94)' }]} numberOfLines={1}>{row.name}</Text>
-                              <View style={[styles.roomRankProgressTrack, { backgroundColor: 'rgba(255,255,255,0.12)' }]}>
-                                <View style={[styles.roomRankProgressFill, { width: `${progress * 100}%`, backgroundColor: 'rgba(255,255,255,0.85)' }]} />
-                              </View>
-                            </View>
-                            <Text style={[styles.roomRankValue, { color: 'rgba(255,255,255,0.6)' }]} numberOfLines={1}>{row.value ? t('贡献 {value}', { value: row.value }) : t('贡献用户')}</Text>
-                          </TouchableOpacity>
-                        );
-                      });
-                    })()}
-                  </ScrollView>
-                </View>
-              </View>
-            </Modal>
           </View>
         ) : null}
         {/* 直播解析占位层已删除（用户 2026-10-02）：
@@ -4471,23 +4319,26 @@ const route = useRoute<any>();
             downloadMedia({ type: 'image', url, title: '' } as any);
           }}
         />
-        {/* 房间送礼面板（用户 2026-11-02）：渲染在播放器**之外** ——
-            工具栏的礼物入口在没起播时也能打开，大/小房间共用同一个实例 */}
-        <RoomGiftSheet
-          visible={giftVisible}
-          onClose={() => setGiftVisible(false)}
-          loading={giftLoading}
-          gifts={giftList}
-          balance={giftBalance}
-          status={giftStatus}
-          selected={giftSel}
-          num={giftNum}
-          onChangeNum={setGiftNum}
-          onSelect={(g) => { setGiftSel(g); setGiftNum(1); }}
-          onSend={sendRoomGift}
-          onRecharge={() => { setGiftVisible(false); (navigation as any).navigate('RechargeScreen'); }}
-          landscape={isRoomLandscape}
-        />
+        {/* 房间工具栏送礼：**只在没起播时**用这个实例（起播后由宿主内置面板接管，
+            与直播页同一份 UI + 同一份数据逻辑 usePlaybackGift）。 */}
+        {!roomPlaying ? (
+          <LiveGiftSheet
+            visible={giftVisible}
+            onClose={() => setGiftVisible(false)}
+            gifts={roomGift.gifts}
+            balance={roomGift.balance}
+            status={roomGift.status}
+            selected={roomGift.selected}
+            num={roomGift.num}
+            onChangeNum={roomGift.setNum}
+            onSelect={roomGift.select}
+            onSend={() => { void roomGift.send(); }}
+            onRecharge={() => {
+              setGiftVisible(false);
+              (navigation as any).navigate('RechargeScreen');
+            }}
+          />
+        ) : null}
         {/* 用户资料卡（房间内点非成员头像）：口袋48 user/info 拉昵称/头像/等级/签名 */}
         <Modal visible={!!userCard} transparent animationType="slide" onRequestClose={() => setUserCard(null)}>
           <View style={styles.roomModalShade}>
@@ -5169,9 +5020,8 @@ const route = useRoute<any>();
             // ★ 单一数据源：只把两侧的累计条数传进行；指纹/时间判据不再参与渲染
             const bigCount = roomSideCountOf(id, 'big');
             const smallCount = roomSideCountOf(id, 'small');
-            // 预览正文：详情页的最新一条优先（列表接口对「回复/引用」给的是被引用原文）
-            const bigPreviewText = previewTextOf(roomPreviewMap, id, 'big');
-            const smallPreviewText = previewTextOf(roomPreviewMap, id, 'small');
+            // 预览正文由 RoomListRow 按「成员 id + 侧」自己订阅 store：
+            // 快扫 / 实时一写入即刻到行，不必等 setFollowed 换 data 引用
             /**
              * ★ 行状态在这里算成**基本类型**再传下去（用户 2026-10-01 性能优化）：
              * `liveNow` 每 30s、`onMicMap` 每次上麦扫描写回都会换新对象 ——
@@ -5195,8 +5045,6 @@ const route = useRoute<any>();
               isOnMic={!isLiveNow && !!onMicMap[mid]}
               bigCount={bigCount}
               smallCount={smallCount}
-              bigPreviewText={bigPreviewText}
-              smallPreviewText={smallPreviewText}
               onOpenRoom={openRoom}
               onOpenLive={openMemberLive}
               onTogglePin={togglePin}

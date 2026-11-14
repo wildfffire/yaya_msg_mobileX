@@ -245,7 +245,10 @@ try {
       '角标必须只读 roomUnreadCounts');
     assert.ok(!screen.includes('roomServerFloor'), '服务端未读地板不能再作为显示数据源');
     assert.ok(screen.includes('claimCountId(messageId(m))'), '实时通道要用 id 总账');
-    assert.ok(counters.includes('claimCountId('), '精确计数要用 id 总账');
+    assert.ok(
+      counters.includes('claimMessageIds(') && counters.includes('claimCountId'),
+      '精确计数要用 id 总账（统一认领入口 claimMessageIds）',
+    );
     assert.ok(counters.includes('if (n === null) continue;'), '详情失败不能推进指纹/基线');
     assert.ok(!screen.includes('realtimeCountedRef'), '整数相减口径已删除');
   });

@@ -9,6 +9,7 @@ import { FullscreenManager } from './chrome/FullscreenManager';
 import { PlayerScreenProps } from './types';
 import { logInfo } from '../utils/runtimeLog';
 import { useWatchHistoryStore } from '../services/watchHistory';
+import { shouldRecordHistory } from '../utils/watchKeys';
 
 interface Props extends PlayerScreenProps {
   /** 弹幕 overlay 等附加层插槽（由页面挂 DanmakuOverlay） */
@@ -21,6 +22,15 @@ interface Props extends PlayerScreenProps {
   resumeAt?: number;
   /** 错误重试回调（直播流地址时效：页面重新解析而非重播同 URL） */
   onRetry?: () => void;
+  /**
+   * 是否写入「观看历史」（默认 true）。
+   *
+   * 两层过滤：
+   *   ① 本开关：内联/临时播放（翻牌答案、私信、分析页、相册）传 false；
+   *   ② 历史白名单 `utils/watchKeys.shouldRecordHistory`：**只有直播 / 直播回放 / 公演**。
+   *      房间视频消息（direct）、语音、官方视频库都自动排除。
+   */
+  recordHistory?: boolean;
   /** 直播弹幕输入条：渲染进播放器底部控制坞（随控制条自动隐藏/呼出） */
   barrageInput?: ReactNode;
   /** 右上角成员名点击（进入成员房间）：不传 = 只展示不可点 */
@@ -61,7 +71,7 @@ function isHorizontalDrag(dx: number, dy: number) {
  *   onClose={() => ...}
  * />
  */
-export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], topLeftAction, onClose, children, inline = false, onVideoSize, resumeAt, onRetry, barrageInput, swipeHandlers, memberAction }: Props) {
+export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, features = {}, extraActions = [], topLeftAction, onClose, children, inline = false, onVideoSize, resumeAt, onRetry, recordHistory = true, barrageInput, swipeHandlers, memberAction }: Props) {
   // 播放错误自动重解析（假死/URL 失效场景）：RTMP 流 URL 带 wsSecret 且多为单次有效，
   // 原生重连同 URL 只会再拿一帧；有 onRetry（页面重新解析新地址）时自动触发，同源最多 2 次。
   const dbgState = usePlayerStore((s) => s.state);
@@ -126,28 +136,34 @@ export function PlayerScreen({ source, meta, danmaku = { type: 'none' }, feature
      * 不需要每个入口页面各自埋点。只记来源（ref/liveId）与标题，
      * **不记播放地址**（地址有时效，历史页点击时重新解析，见 services/watchHistory.ts）。
      */
-    try {
-      useWatchHistoryStore.getState().record({
-        kind: source.kind,
-        ref: source.ref,
-        /**
-         * liveId 兜底（用户 2026-09-30：「同一个直播多次记录」）：
-         * `replay` / `openlive` 的 `ref.id` 就是 liveId —— 带上它，同一直播无论从哪个入口播
-         * 都会归到同一条记录（见 services/watchHistory.historyKey 的统一口径）。
-         */
-        liveId: source.liveId
-          || ((source.ref?.kind === 'replay' || source.ref?.kind === 'openlive') ? String(source.ref?.id || '') : '')
-          || '',
-        title: String(meta?.title || ''),
-        cover: meta?.cover,
-        // 成员 / 队伍 / 是否音频：历史列表卡片要显示（页面在 meta 里传，拿不到就留空）
-        owner: meta?.owner,
-        team: meta?.team,
-        // 成员数字 id：历史/稍后再看事后补成员名与队伍的**稳定依据**（见 utils/memberMatch）
-        ownerId: meta?.ownerId,
-        audio: source.kind === 'audio' || !!source.audioOnly,
-      });
-    } catch {}
+    /**
+     * 观看历史白名单（用户 2026-11-13）：只有直播 / 直播回放 / 公演。
+     * 房间视频消息（direct）、语音、官方视频库、临时播放都不记 —— 见 utils/watchKeys。
+     */
+    if (recordHistory && shouldRecordHistory(source)) {
+      try {
+        useWatchHistoryStore.getState().record({
+          kind: source.kind,
+          ref: source.ref,
+          /**
+           * liveId 兜底（用户 2026-09-30：「同一个直播多次记录」）：
+           * `replay` / `openlive` 的 `ref.id` 就是 liveId —— 带上它，同一直播无论从哪个入口播
+           * 都会归到同一条记录（见 services/watchHistory.historyKey 的统一口径）。
+           */
+          liveId: source.liveId
+            || ((source.ref?.kind === 'replay' || source.ref?.kind === 'openlive') ? String(source.ref?.id || '') : '')
+            || '',
+          title: String(meta?.title || ''),
+          cover: meta?.cover,
+          // 成员 / 队伍 / 是否音频：历史列表卡片要显示（页面在 meta 里传，拿不到就留空）
+          owner: meta?.owner,
+          team: meta?.team,
+          // 成员数字 id：历史/稍后再看事后补成员名与队伍的**稳定依据**（见 utils/memberMatch）
+          ownerId: meta?.ownerId,
+          audio: source.kind === 'audio' || !!source.audioOnly,
+        });
+      } catch { /* 历史失败不影响播放 */ }
+    }
     try { logInfo(`[player] PlayerScreen open kind=${source.kind} url=${String(source.url).slice(0, 90)}`, 'player.screen'); } catch {}
     return () => {
       /**
