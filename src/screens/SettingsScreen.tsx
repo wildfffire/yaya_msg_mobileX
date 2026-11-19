@@ -31,6 +31,8 @@ import { getMemberDataMeta, updateMemberData, type MemberDataMeta } from '../ser
 import { toMs } from '../utils/format';
 import { APP_VERSION, APP_BUILD } from '../constants';
 import { clearAppCache } from '../services/cacheCleaner';
+// 手动「检查更新」与新版本提醒走同一条链路（弹窗 + 系统通知），用户 2026-11-19
+import { announceUpdateIfNeeded } from '../services/updateNotice';
 import { setPipEnabled } from '../utils/pip';
 import ScreenHeader from '../components/ScreenHeader';
 // 通知设置面板（用户 2026-11-09）：软件外/软件内、私信/房间、房间三态、免打扰
@@ -196,18 +198,23 @@ export default function SettingsScreen() {
   const hasUpdate = useUpdateStore((s) => s.hasUpdate);
   const REPO_URL = 'https://github.com/wildfffire/yaya_msg_mobileX';
 
-  /** 版本 chip：有更新直接开下载页，否则主动检查一次（从「我的」页搬来） */
+  /**
+   * 版本 chip：有更新 → 直接弹「发现新版本」（弹窗 + 系统通知，与启动检测同一条链路）；
+   * 没有则强制检查一次，查到新版本同样弹窗。用户 2026-11-19 要求能点一下复测通知。
+   */
   const checkVersion = () => {
     const { hasUpdate: up, latestUrl } = useUpdateStore.getState();
     if (up && latestUrl) {
-      Linking.openURL(latestUrl).catch(() => {});
-    } else {
-      useUpdateStore.getState().checkUpdate(true).then((has) => {
-        const next = useUpdateStore.getState();
-        if (has && next.hasUpdate && next.latestUrl) Linking.openURL(next.latestUrl).catch(() => {});
-        else showToast(t('已是最新版本'));
-      }).catch(() => showToast(t('已是最新版本')));
+      announceUpdateIfNeeded({ force: true }).catch(() => {});
+      return;
     }
+    useUpdateStore.getState().checkUpdate(true).then((has) => {
+      if (!has) {
+        showToast(t('已是最新版本'));
+        return;
+      }
+      announceUpdateIfNeeded({ force: true }).catch(() => {});
+    }).catch(() => showToast(t('已是最新版本')));
   };
 
   const openRepo = () => Linking.openURL(REPO_URL).catch(() => showToast(t('这个链接无法直接打开。')));

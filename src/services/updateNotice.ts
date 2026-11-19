@@ -53,9 +53,10 @@ export function shouldAnnounceUpdate(
 
 /**
  * 检测到更新后调用：弹窗 + 系统通知，同一个版本只做一次。
+ * `force: true`（用户主动点版本号）忽略「已提醒过」的去重 —— 方便随时复测与用户自助确认。
  * 返回是否真的提醒了（已提醒/无更新/并发调用 → false）。
  */
-export async function announceUpdateIfNeeded(): Promise<boolean> {
+export async function announceUpdateIfNeeded(options: { force?: boolean } = {}): Promise<boolean> {
   const state = useUpdateStore.getState();
   if (!state.hasUpdate || !state.latestUrl) return false;
   if (announcing) return false;
@@ -63,7 +64,7 @@ export async function announceUpdateIfNeeded(): Promise<boolean> {
   try {
     const notified = await readNotified();
     const latest = { build: state.latestBuild, tag: state.latestTag };
-    if (!shouldAnnounceUpdate(notified, latest)) {
+    if (!options.force && !shouldAnnounceUpdate(notified, latest)) {
       logInfo(`[update] 已是提醒过的版本 tag=${latest.tag} build=${latest.build}`, LOG_TAG);
       return false;
     }

@@ -8,6 +8,7 @@
  *   yayamsg://video/1234567890123   → 播放该场次（直播/回放，按 Media 页现有深链逻辑）
  *   yayamsg://invoice               → 电子发票
  *   yayamsg://update                → 打开发新版本的下载页（系统更新通知点按用）
+ *   yayamsg://checkupdate           → 强制检查更新并弹「发现新版本」（复测通知用）
  *
  * ⚠️ id 一律按**字符串**处理：liveId/channelId 都是长数字，转 Number 会丢精度
  *   （与 Seine 排期 liveId 那个坑同源，见 utils/network 的 parseJsonExact）。
@@ -19,6 +20,8 @@ export type DeepLinkTarget =
   | { type: 'video'; id: string; title?: string }
   | { type: 'invoice' }
   | { type: 'update' }
+  /** demo=true：不依赖线上 Release，直接模拟一次新版本提醒（真机复测通知用） */
+  | { type: 'checkupdate'; demo: boolean }
   | null;
 
 export const DEEP_LINK_SCHEME = 'yayamsg';
@@ -54,6 +57,8 @@ export function parseDeepLink(url: unknown): DeepLinkTarget {
   if (head === 'invoice') return { type: 'invoice' };
   // 新版本通知：点按直接去下载页（不需要 id）
   if (head === 'update') return { type: 'update' };
+  // 强制检查更新（复测用）：adb / 二维码触发，绕过限流与去重
+  if (head === 'checkupdate') return { type: 'checkupdate', demo: params.get('demo') === '1' };
   return null;
 }
 
@@ -62,6 +67,7 @@ export function buildDeepLink(target: Exclude<DeepLinkTarget, null>, params?: Re
   const base = `${DEEP_LINK_SCHEME}://`;
   if (target.type === 'invoice') return `${base}invoice`;
   if (target.type === 'update') return `${base}update`;
+  if (target.type === 'checkupdate') return `${base}checkupdate${target.demo ? '?demo=1' : ''}`;
   const tail = target.type === 'video' && target.title
     ? `?title=${encodeURIComponent(target.title)}`
     : target.type === 'pm' && target.name

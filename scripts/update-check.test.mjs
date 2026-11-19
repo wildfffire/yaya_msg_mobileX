@@ -24,14 +24,18 @@ async function check(name, fn) {
 
 const read = (p) => readFileSync(join(root, p), 'utf8');
 
+/** tsc 编译后的深链模块（下面的静态检查也会用到，故在 try 外声明） */
+let linkMod;
+
 try {
   execSync(
-    `npx tsc "${join(root, 'src', 'utils', 'updateRules.ts')}"`
+    `npx tsc "${join(root, 'src', 'utils', 'updateRules.ts')}" "${join(root, 'src', 'utils', 'deepLinkRules.ts')}"`
     + ` --rootDir "${root}" --outDir "${tmp}" --module commonjs --target es2019 --moduleResolution node --skipLibCheck`,
     { cwd: root, stdio: 'inherit' },
   );
   const mod = await import(pathToFileURL(join(tmp, 'src', 'utils', 'updateRules.js')).href);
   const { parseReleaseTag, evaluateUpdate, compareVersions, releaseLabel } = mod;
+  linkMod = await import(pathToFileURL(join(tmp, 'src', 'utils', 'deepLinkRules.js')).href);
 
   await check('tag 解析：v3.0.0-b3000075 → 3.0.0 / 3000075', () => {
     const info = parseReleaseTag('v3.0.0-b3000075');
@@ -102,6 +106,22 @@ await check('提醒服务：弹窗 + 系统通知 + 同版本只提醒一次', (
   // 判重按 build 优先、老 tag 退化按 tag
   assert.match(svc, /notified\.build < latest\.build/);
   assert.match(svc, /notified\.tag !== latest\.tag/);
+});
+
+await check('深链：yayamsg://checkupdate（含 ?demo=1）', () => {
+  assert.deepEqual(linkMod.parseDeepLink('yayamsg://checkupdate'), { type: 'checkupdate', demo: false });
+  assert.deepEqual(linkMod.parseDeepLink('yayamsg://checkupdate?demo=1'), { type: 'checkupdate', demo: true });
+  assert.equal(linkMod.buildDeepLink({ type: 'checkupdate', demo: true }), 'yayamsg://checkupdate?demo=1');
+  assert.deepEqual(linkMod.parseDeepLink('yayamsg://update'), { type: 'update' });
+  // 未知/非法仍然拒绝
+  assert.equal(linkMod.parseDeepLink('yayamsg://checkupdateX'), null);
+});
+
+await check('设置页点版本号复用同一条提醒链路（force 可复测）', () => {
+  const svc = read('src/services/updateNotice.ts');
+  assert.match(svc, /options\.force/);
+  const settings = read('src/screens/SettingsScreen.tsx');
+  assert.match(settings, /announceUpdateIfNeeded\(\{ force: true \}\)/);
 });
 
 await check('系统通知点按走 yayamsg://update（https 塞给原生会点了没反应）', () => {

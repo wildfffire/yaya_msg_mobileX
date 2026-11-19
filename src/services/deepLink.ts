@@ -8,11 +8,13 @@
  * 解析规则在 utils/deepLinkRules（纯函数 + 单测），这里只负责「跳」。
  */
 import { Linking } from 'react-native';
-import { UPDATE_DOWNLOAD_URL } from '../constants';
+import { UPDATE_DOWNLOAD_URL, APP_BUILD, APP_VERSION } from '../constants';
 import { navigationRef } from '../navigation';
 import { useRoomPresenceStore } from '../store/notice';
 import { parseDeepLink, buildDeepLink, type DeepLinkTarget } from '../utils/deepLinkRules';
 import { logWarn } from '../utils/runtimeLog';
+import { useUpdateStore } from '../store';
+import { announceUpdateIfNeeded } from './updateNotice';
 
 /** 执行跳转；返回是否成功（导航未就绪时 false，调用方可稍后重试） */
 export function navigateDeepLink(target: DeepLinkTarget): boolean {
@@ -48,6 +50,32 @@ export function navigateDeepLink(target: DeepLinkTarget): boolean {
          *    系统不会交给浏览器，App 内也没有对应路由 → 点了没反应。
          */
         Linking.openURL(UPDATE_DOWNLOAD_URL).catch(() => {});
+        return true;
+      case 'checkupdate':
+        /**
+         * 强制检查更新（用户 2026-11-19 要求能复测通知）：
+         *   adb shell am start -a android.intent.action.VIEW -d "yayamsg://checkupdate" com.yk1z.yayamsg
+         * 绕过 6h 限流与「已提醒过」去重，查到新版本立即弹窗 + 系统通知。
+         * 加 `?demo=1` 时不依赖线上 Release，直接模拟「本地 build+1」的新版本：
+         *   adb shell am start -a android.intent.action.VIEW -d "yayamsg://checkupdate?demo=1" com.yk1z.yayamsg
+         * 用于发版前真机验证弹窗/系统通知链路（不会改真实 Release）。
+         */
+        if (target.demo) {
+          const nextBuild = APP_BUILD + 1;
+          useUpdateStore.setState({
+            hasUpdate: true,
+            latestVersion: `v${APP_VERSION} · Build ${nextBuild}`,
+            latestTag: `v${APP_VERSION}-b${nextBuild}`,
+            latestBuild: nextBuild,
+            latestNotes: '这是一条测试更新提醒：用于验证「发现新版本」弹窗与系统通知链路是否正常。',
+            latestUrl: UPDATE_DOWNLOAD_URL,
+          });
+          announceUpdateIfNeeded({ force: true }).catch(() => {});
+          return true;
+        }
+        useUpdateStore.getState().checkUpdate(true)
+          .then((has) => (has ? announceUpdateIfNeeded({ force: true }) : null))
+          .catch(() => {});
         return true;
       default:
         return false;
