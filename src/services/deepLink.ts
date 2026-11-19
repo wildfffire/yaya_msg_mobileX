@@ -8,7 +8,7 @@
  * 解析规则在 utils/deepLinkRules（纯函数 + 单测），这里只负责「跳」。
  */
 import { Linking } from 'react-native';
-import { UPDATE_DOWNLOAD_URL, APP_BUILD, APP_VERSION } from '../constants';
+import { UPDATE_RELEASE_PAGE, APP_BUILD, APP_VERSION } from '../constants';
 import { navigationRef } from '../navigation';
 import { useRoomPresenceStore } from '../store/notice';
 import { parseDeepLink, buildDeepLink, type DeepLinkTarget } from '../utils/deepLinkRules';
@@ -49,7 +49,9 @@ export function navigateDeepLink(target: DeepLinkTarget): boolean {
          * ⚠️ 不能直接把 https 地址塞给通知：原生强制 setClass(MainActivity)，
          *    系统不会交给浏览器，App 内也没有对应路由 → 点了没反应。
          */
-        Linking.openURL(UPDATE_DOWNLOAD_URL).catch(() => {});
+        // 直接去 GitHub Release 的附件直链（点了就下载 APK）；冷启动时 store 还没检查过 →
+        // 退回项目 Release 页面，绝不跳第三方页面。
+        Linking.openURL(useUpdateStore.getState().latestUrl || UPDATE_RELEASE_PAGE).catch(() => {});
         return true;
       case 'checkupdate':
         /**
@@ -68,9 +70,11 @@ export function navigateDeepLink(target: DeepLinkTarget): boolean {
             latestTag: `v${APP_VERSION}-b${nextBuild}`,
             latestBuild: nextBuild,
             latestNotes: '这是一条测试更新提醒：用于验证「发现新版本」弹窗与系统通知链路是否正常。',
-            latestUrl: UPDATE_DOWNLOAD_URL,
+            // 模拟提醒不指向具体附件（假 build 的直链必然 404）→ 项目 Release 页面
+            latestUrl: UPDATE_RELEASE_PAGE,
           });
-          announceUpdateIfNeeded({ force: true }).catch(() => {});
+          // ★ 不写去重键：模拟的 build 不能把下一次真实版本的通知吃掉
+          announceUpdateIfNeeded({ force: true, persist: false }).catch(() => {});
           return true;
         }
         useUpdateStore.getState().checkUpdate(true)

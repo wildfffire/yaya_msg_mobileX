@@ -18,10 +18,17 @@ export const MEMBERS_URL = 'https://data.gnz.hk/members.json';
 export const APP_VERSION = '3.0.0';
 
 /**
- * 新版本下载页（夸克网盘 + GitHub 双渠道）。
- * 页内链接可随时改，**不需要重新发版**；更新弹窗与系统通知都跳这里。
+ * 新版本跳转基准：**直接接本项目的 GitHub Release**（用户 2026-11-19 明确：
+ * 不要第三方下载页，点开就是项目 Release 的版本，点了直接下载 APK）。
+ *
+ * 优先用 Release 附件直链（`/releases/download/<tag>/<asset>`，点击即下载）；
+ * 拿不到 tag/附件名时退回 Release 页面，绝不跳去外部页面。
  */
-export const UPDATE_DOWNLOAD_URL = 'https://010push.a23xyz.xyz/app/';
+export const UPDATE_RELEASE_REPO = 'https://github.com/wildfffire/yaya_msg_mobileX';
+/** 兜底：最新 Release 页面（拿不到附件直链时） */
+export const UPDATE_RELEASE_PAGE = `${UPDATE_RELEASE_REPO}/releases/latest`;
+/** 附件直链前缀：拼上 tag 与附件名就是「点了直接下载」 */
+export const UPDATE_RELEASE_DOWNLOAD_BASE = `${UPDATE_RELEASE_REPO}/releases/download`;
 
 /**
  * 构建号（Build）= Android versionCode。
@@ -34,7 +41,7 @@ export const UPDATE_DOWNLOAD_URL = 'https://010push.a23xyz.xyz/app/';
  * `scripts/verify-version.js` 会拦下任何漂移（改版本时三处一起动：versionName 走语义版本，
  * versionCode / APP_BUILD 每出一个包必须递增）。
  */
-export const APP_BUILD = 3000076;
+export const APP_BUILD = 3000078;
 
 // 成员数据原始仓库（yk1z 的牙牙消息电脑版），数据由其维护并发布。
 export const MEMBER_DATA_SOURCE_URL = 'https://github.com/yk1z/yaya_msg';

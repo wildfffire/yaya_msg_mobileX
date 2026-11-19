@@ -98,3 +98,29 @@ export function releaseLabel(tag: unknown): string {
   if (!version) return '';
   return info.build > 0 ? `v${version} · Build ${info.build}` : `v${version}`;
 }
+
+/**
+ * Release 附件名（与出包脚本 scripts/build-apk.js 的命名一致）：
+ *   yaya-msg-mobile-v3.0.0-b3000078-v8a.apk
+ * 用于在不调 GitHub API 的情况下拼出「点了直接下载」的直链。
+ */
+export function releaseApkAssetName(tag: unknown): string {
+  const info = parseReleaseTag(tag);
+  if (!info.tag || !info.version) return '';
+  return info.build > 0
+    ? `yaya-msg-mobile-v${info.version}-b${info.build}-v8a.apk`
+    : `yaya-msg-mobile-v${info.version}-v8a.apk`;
+}
+
+/**
+ * GitHub Release 附件直链（点击即下载 APK）。
+ * `downloadBase` 形如 `https://github.com/<owner>/<repo>/releases/download`。
+ * tag/附件名不完整时返回空串，调用方退回 Release 页面。
+ */
+export function releaseApkUrl(tag: unknown, downloadBase: string): string {
+  const info = parseReleaseTag(tag);
+  const asset = releaseApkAssetName(tag);
+  const base = String(downloadBase || '').replace(/\/+$/, '');
+  if (!info.tag || !asset || !base) return '';
+  return `${base}/${encodeURIComponent(info.tag)}/${asset}`;
+}

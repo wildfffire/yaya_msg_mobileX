@@ -34,7 +34,7 @@ try {
     { cwd: root, stdio: 'inherit' },
   );
   const mod = await import(pathToFileURL(join(tmp, 'src', 'utils', 'updateRules.js')).href);
-  const { parseReleaseTag, evaluateUpdate, compareVersions, releaseLabel } = mod;
+  const { parseReleaseTag, evaluateUpdate, compareVersions, releaseLabel, releaseApkAssetName, releaseApkUrl } = mod;
   linkMod = await import(pathToFileURL(join(tmp, 'src', 'utils', 'deepLinkRules.js')).href);
 
   await check('tag 解析：v3.0.0-b3000075 → 3.0.0 / 3000075', () => {
@@ -80,6 +80,17 @@ try {
     assert.equal(releaseLabel('v3.0.0-b3000075'), 'v3.0.0 · Build 3000075');
     assert.equal(releaseLabel('v3.1.0'), 'v3.1.0');
   });
+
+  await check('Release 附件直链：点了直接下载 APK（不经过任何第三方页）', () => {
+    const base = 'https://github.com/wildfffire/yaya_msg_mobileX/releases/download';
+    assert.equal(releaseApkAssetName('v3.0.0-b3000078'), 'yaya-msg-mobile-v3.0.0-b3000078-v8a.apk');
+    assert.equal(
+      releaseApkUrl('v3.0.0-b3000078', base),
+      `${base}/v3.0.0-b3000078/yaya-msg-mobile-v3.0.0-b3000078-v8a.apk`,
+    );
+    assert.equal(releaseApkUrl('', base), '');
+    assert.equal(releaseApkUrl('v3.0.0-b3000078', ''), '');
+  });
 } finally {
   try { rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
 }
@@ -87,7 +98,9 @@ try {
 await check('store 用构建号判定（不再只比 APP_VERSION）', () => {
   const store = read('src/store/index.ts');
   assert.match(store, /evaluateUpdate\(tag,\s*APP_VERSION,\s*APP_BUILD\)/);
-  assert.match(store, /import \{ APP_BUILD, APP_VERSION/);
+  assert.match(store, /APP_BUILD/);
+  assert.match(store, /APP_VERSION/);
+  assert.match(store, /from '\.\.\/constants'/);
 });
 
 await check('启动 / 回前台都会检测并提醒', () => {
@@ -106,6 +119,9 @@ await check('提醒服务：弹窗 + 系统通知 + 同版本只提醒一次', (
   // 判重按 build 优先、老 tag 退化按 tag
   assert.match(svc, /notified\.build < latest\.build/);
   assert.match(svc, /notified\.tag !== latest\.tag/);
+  // 模拟提醒（?demo=1）绝不写去重键，否则假 build 会吃掉下一个真实版本的通知
+  assert.match(svc, /options\.persist !== false/);
+  assert.match(read('src/services/deepLink.ts'), /persist: false/);
 });
 
 await check('深链：yayamsg://checkupdate（含 ?demo=1）', () => {
@@ -131,7 +147,26 @@ await check('系统通知点按走 yayamsg://update（https 塞给原生会点�
   const rules = read('src/utils/deepLinkRules.ts');
   assert.match(rules, /head === 'update'/);
   const link = read('src/services/deepLink.ts');
-  assert.match(link, /case 'update'[\s\S]{0,900}UPDATE_DOWNLOAD_URL/);
+  // 点按去 GitHub Release（优先 store 的附件直链，冷启动退回 Release 页面）
+  assert.match(link, /case 'update'[\s\S]{0,900}latestUrl \|\| UPDATE_RELEASE_PAGE/);
+});
+
+await check('更新地址只接 GitHub Release（禁止第三方下载页）', () => {
+  const constants = read('src/constants/index.ts');
+  assert.match(constants, /UPDATE_RELEASE_DOWNLOAD_BASE/);
+  assert.equal(/010push|a23xyz/.test(constants), false);
+  for (const f of [
+    'src/store/index.ts',
+    'src/services/deepLink.ts',
+    'src/services/updateNotice.ts',
+    'src/components/UpdatePromptModal.tsx',
+    'App.tsx',
+  ]) {
+    assert.equal(/010push|a23xyz/.test(read(f)), false, `${f} 仍引用第三方下载页`);
+  }
+  const store = read('src/store/index.ts');
+  assert.match(store, /browser_download_url/);
+  assert.match(store, /releaseApkUrl\(tag, UPDATE_RELEASE_DOWNLOAD_BASE\)/);
 });
 
 await check('弹窗组件与四份字典文案齐全', () => {

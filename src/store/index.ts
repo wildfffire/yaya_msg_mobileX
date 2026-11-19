@@ -1,9 +1,14 @@
 import { create } from 'zustand';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppSettings, Member } from '../types';
-import { APP_BUILD, APP_VERSION, UPDATE_DOWNLOAD_URL } from '../constants';
+import {
+  APP_BUILD,
+  APP_VERSION,
+  UPDATE_RELEASE_DOWNLOAD_BASE,
+  UPDATE_RELEASE_PAGE,
+} from '../constants';
 import { DEFAULT_SETTINGS } from '../services/settings';
-import { evaluateUpdate, parseReleaseTag } from '../utils/updateRules';
+import { evaluateUpdate, parseReleaseTag, releaseApkUrl } from '../utils/updateRules';
 
 interface SettingsState {
   settings: AppSettings;
@@ -149,7 +154,6 @@ AsyncStorage.getItem(ANNOUNCEMENT_SEEN_KEY)
 const GITHUB_RELEASES_URL = 'https://api.github.com/repos/wildfffire/yaya_msg_mobileX/releases/latest';
 // 降级源：GitHub release 页面 HTML（无 API 匿名限流；共享出口 IP 触发 403 时自动切换）
 const GITHUB_RELEASES_PAGE = 'https://github.com/wildfffire/yaya_msg_mobileX/releases/latest';
-// 更新跳转链接：统一指向用户自建下载页（见 constants 的 UPDATE_DOWNLOAD_URL）
 const UPDATE_TIMEOUT = 8000;
 /**
  * 检查结果持久化，6h 内不重复打 GitHub API（未认证限流 60/h，冷启全打会快速耗尽）。
@@ -177,7 +181,7 @@ interface UpdateState {
   latestBuild: number;
   /** release 正文摘要（GitHub API 才有；页面降级源为空） */
   latestNotes: string;
-  /** 新版本下载地址（自建下载页，双渠道） */
+  /** 新版本下载地址：GitHub Release 附件直链（点了直接下载 APK），拿不到时退回 Release 页面 */
   latestUrl: string;
   /** 本次会话已检查的时间戳，0 表示未检查 */
   lastCheckedAt: number;
@@ -218,17 +222,24 @@ export const useUpdateStore = create<UpdateState>((set) => ({
     const lastTs = Math.max(lastCheckedAt, persistedTs);
     if (!force && lastTs && Date.now() - lastTs < UPDATE_CHECK_INTERVAL) return false;
     updateChecking = true;
-    const finish = (has: boolean, tag: string, notes = '') => {
+    const finish = (has: boolean, tag: string, notes = '', assetUrl = '') => {
       const now = Date.now();
       const info = parseReleaseTag(tag);
+      /**
+       * 用户 2026-11-19：**直接接 GitHub Release**（不再跳第三方下载页）。
+       * 优先用 API 里的附件直链（点了直接下载 APK）；降级源拿不到附件时按
+       * 出包命名规则拼直链；两者都不行才退回 Release 页面。
+       */
+      const downloadUrl = has
+        ? (assetUrl || releaseApkUrl(tag, UPDATE_RELEASE_DOWNLOAD_BASE) || UPDATE_RELEASE_PAGE)
+        : '';
       set({
         hasUpdate: has,
         latestVersion: has ? `v${info.version}${info.build > 0 ? ` · Build ${info.build}` : ''}` : '',
         latestTag: has ? tag : '',
         latestBuild: has ? info.build : 0,
         latestNotes: has ? notes : '',
-        // 有更新时统一跳自建下载页（页内可随时切夸克/GitHub，无需发版）
-        latestUrl: has ? UPDATE_DOWNLOAD_URL : '',
+        latestUrl: downloadUrl,
         lastCheckedAt: now,
       });
       AsyncStorage.setItem(UPDATE_LAST_CHECK_KEY, String(now)).catch(() => {});
@@ -237,6 +248,7 @@ export const useUpdateStore = create<UpdateState>((set) => ({
       // 源1：GitHub API（未认证匿名限流 60/h，共享出口 IP 时可能 403）
       let tag = '';
       let notes = '';
+      let assetUrl = '';
       try {
         const res = await Promise.race([
           fetch(GITHUB_RELEASES_URL, { headers: { Accept: 'application/vnd.github+json', 'User-Agent': 'yaya-msg-mobile' } }),
@@ -246,6 +258,11 @@ export const useUpdateStore = create<UpdateState>((set) => ({
         const data: any = await res.json();
         tag = String(data.tag_name || data.name || '');
         notes = String(data.body || '').replace(/\r\n/g, '\n').trim().slice(0, UPDATE_NOTES_MAX);
+        // 附件直链：优先 arm64-v8a / universal 的 APK（与出包约定一致）
+        const assets: any[] = Array.isArray(data.assets) ? data.assets : [];
+        const apk = assets.find((a) => /\.apk$/i.test(String(a?.name || '')) && /arm64-v8a|universal/i.test(String(a?.name || '')))
+          || assets.find((a) => /\.apk$/i.test(String(a?.name || '')));
+        if (apk?.browser_download_url) assetUrl = String(apk.browser_download_url);
       } catch {
         // 源2：GitHub release 页面 HTML（无 API 匿名限流）：重定向 URL 提取 tag
         const UA = 'Mozilla/5.0 (Linux; Android 12) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36';
@@ -262,7 +279,7 @@ export const useUpdateStore = create<UpdateState>((set) => ({
       // ★ 按构建号判定（tag 里的 -b3000075）：只比语义版本会把「装了最新包的用户」
       //   也永远判成有更新（见 utils/updateRules 的注释）。
       const verdict = evaluateUpdate(tag, APP_VERSION, APP_BUILD);
-      finish(verdict.hasUpdate, tag, notes);
+      finish(verdict.hasUpdate, tag, notes, assetUrl);
       return verdict.hasUpdate;
     } catch {
       // 检查失败（网络不通/两个源都不可用）：视为无更新，不抛错不打扰
