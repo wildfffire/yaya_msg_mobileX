@@ -7,6 +7,7 @@
  *   yayamsg://room/12345            → 进该成员的房间（大房间）
  *   yayamsg://video/1234567890123   → 播放该场次（直播/回放，按 Media 页现有深链逻辑）
  *   yayamsg://invoice               → 电子发票
+ *   yayamsg://update                → 打开发新版本的下载页（系统更新通知点按用）
  *
  * ⚠️ id 一律按**字符串**处理：liveId/channelId 都是长数字，转 Number 会丢精度
  *   （与 Seine 排期 liveId 那个坑同源，见 utils/network 的 parseJsonExact）。
@@ -17,6 +18,7 @@ export type DeepLinkTarget =
   | { type: 'pm'; id: string; name?: string }
   | { type: 'video'; id: string; title?: string }
   | { type: 'invoice' }
+  | { type: 'update' }
   | null;
 
 export const DEEP_LINK_SCHEME = 'yayamsg';
@@ -50,6 +52,8 @@ export function parseDeepLink(url: unknown): DeepLinkTarget {
   if (head === 'pm') return validId ? { type: 'pm', id, name: params.get('name') || '' } : null;
   if (head === 'video') return validId ? { type: 'video', id, title: params.get('title') || '' } : null;
   if (head === 'invoice') return { type: 'invoice' };
+  // 新版本通知：点按直接去下载页（不需要 id）
+  if (head === 'update') return { type: 'update' };
   return null;
 }
 
@@ -57,6 +61,7 @@ export function parseDeepLink(url: unknown): DeepLinkTarget {
 export function buildDeepLink(target: Exclude<DeepLinkTarget, null>, params?: Record<string, string>): string {
   const base = `${DEEP_LINK_SCHEME}://`;
   if (target.type === 'invoice') return `${base}invoice`;
+  if (target.type === 'update') return `${base}update`;
   const tail = target.type === 'video' && target.title
     ? `?title=${encodeURIComponent(target.title)}`
     : target.type === 'pm' && target.name

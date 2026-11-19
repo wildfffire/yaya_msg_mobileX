@@ -8,6 +8,7 @@
  * 解析规则在 utils/deepLinkRules（纯函数 + 单测），这里只负责「跳」。
  */
 import { Linking } from 'react-native';
+import { UPDATE_DOWNLOAD_URL } from '../constants';
 import { navigationRef } from '../navigation';
 import { useRoomPresenceStore } from '../store/notice';
 import { parseDeepLink, buildDeepLink, type DeepLinkTarget } from '../utils/deepLinkRules';
@@ -38,6 +39,15 @@ export function navigateDeepLink(target: DeepLinkTarget): boolean {
         // 房间页在 Tab 里：先把目标写进 presence store（房间页消费后自进房）
         useRoomPresenceStore.getState().requestRoom(target.id);
         navigationRef.navigate('Main', { screen: 'Rooms' } as any);
+        return true;
+      case 'update':
+        /**
+         * 新版本通知（用户 2026-11-19）：系统通知栏点按 → 原生模块用 ACTION_VIEW
+         * 构造 `yayamsg://update` 回到 MainActivity，这里统一跳自建下载页。
+         * ⚠️ 不能直接把 https 地址塞给通知：原生强制 setClass(MainActivity)，
+         *    系统不会交给浏览器，App 内也没有对应路由 → 点了没反应。
+         */
+        Linking.openURL(UPDATE_DOWNLOAD_URL).catch(() => {});
         return true;
       default:
         return false;

@@ -23,6 +23,13 @@ import {
 } from '../utils/roomMessageCursor';
 import { mapLimit } from '../utils/asyncPool';
 import { logInfo } from '../utils/runtimeLog';
+import { roomUnreadKey } from '../utils/roomUnreadRules';
+import {
+  activeRefreshRound,
+  isCrossSideChannel,
+  sharedAllPage,
+  waitSharedSideReady,
+} from './roomRefreshShare';
 import {
   buildPreviewSides,
   pickPreviewMessage,
@@ -59,14 +66,31 @@ export async function refreshRoomListPreviews(
   let updated = 0;
   try {
     await mapLimit(picked, PREVIEW_CONCURRENCY, async (s) => {
+      // 已被服务端明确回退到别的频道的侧：独立拉取只会重复付 3.4s 串行回退，结果仍被丢弃
+      if (isCrossSideChannel(s.channelId)) return;
       try {
-        const res: any = await pocketApi.getRoomMessages({
-          channelId: s.channelId,
-          serverId: s.serverId,
-          nextTime: 0,
-          limit: PREVIEW_PAGE_LIMIT,
-          fetchAll: true,
-        });
+        /**
+         * ★ 本轮下拉刷新：直接消费预热阶段拉到的共享 `/list/all` 页，不再自己发一次请求。
+         * 共享页带着原始 res，下面两道校验（label / 本侧频道）一行没动；
+         * 没有共享页时（5s 分片、回前台、预热失败）照原路径独立拉取。
+         */
+        const round = activeRefreshRound();
+        const sideKey = roomUnreadKey(s.id, s.side);
+        // 本轮刷新：只等这一侧的预热完成，就能直接消费共享页（慢侧不拖整轮）
+        if (round > 0) await waitSharedSideReady(round, sideKey);
+        const shared = round > 0 ? sharedAllPage(round, sideKey) : null;
+        let res: any;
+        if (shared) {
+          res = shared.res;
+        } else {
+          res = await pocketApi.getRoomMessages({
+            channelId: s.channelId,
+            serverId: s.serverId,
+            nextTime: 0,
+            limit: PREVIEW_PAGE_LIMIT,
+            fetchAll: true,
+          });
+        }
         /**
          * 只认 `/list/all` 命中页：`owner-fallback` 页可能停在很久以前的房主发言，
          * 拿它当「最新一条」会把列表预览拽回过去（与 60s 详情预览同一条纪律）。
@@ -74,7 +98,7 @@ export async function refreshRoomListPreviews(
         if (!String(res?._request?.label || '').startsWith('all')) return;
         // 小房间请求若被服务端回退到大房间频道，宁可这轮不写，也不能大小房间串味
         if (!isDetailFromSide(res?._request?.payload?.channelId, s.channelId)) return;
-        const list = unwrapList(res, ROOM_DETAIL_LIST_KEYS);
+        const list = shared ? shared.list : unwrapList(res, ROOM_DETAIL_LIST_KEYS);
         const hit = pickPreviewMessage(list, {
           isChat: isCountableChatMessage,
           isOwner: (m: any) => isOwnerMessageStrict(m, s.member),

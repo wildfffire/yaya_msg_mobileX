@@ -18,6 +18,12 @@ export const MEMBERS_URL = 'https://data.gnz.hk/members.json';
 export const APP_VERSION = '3.0.0';
 
 /**
+ * 新版本下载页（夸克网盘 + GitHub 双渠道）。
+ * 页内链接可随时改，**不需要重新发版**；更新弹窗与系统通知都跳这里。
+ */
+export const UPDATE_DOWNLOAD_URL = 'https://010push.a23xyz.xyz/app/';
+
+/**
  * 构建号（Build）= Android versionCode。
  *
  * 用户 2026-10-05 要求：设置页在版本名**下面**单独显示一行，显示为 `Build 3000000` ——
@@ -28,7 +34,7 @@ export const APP_VERSION = '3.0.0';
  * `scripts/verify-version.js` 会拦下任何漂移（改版本时三处一起动：versionName 走语义版本，
  * versionCode / APP_BUILD 每出一个包必须递增）。
  */
-export const APP_BUILD = 3000067;
+export const APP_BUILD = 3000075;
 
 // 成员数据原始仓库（yk1z 的牙牙消息电脑版），数据由其维护并发布。
 export const MEMBER_DATA_SOURCE_URL = 'https://github.com/yk1z/yaya_msg';

@@ -32,6 +32,7 @@ import { messageIdAliases } from '../../utils/notifyOwnerRules';
 import { claimMessageIds, pickIdolMessages } from '../../utils/roomIdolCountRules';
 import { claimUncountedOwnerPage } from '../../services/roomOwnerCount';
 import { countOwnerFeedUnread } from '../../services/roomOwnerFeed';
+import { isCrossSideChannel } from '../../services/roomRefreshShare';
 import { roomChannelId, roomSideMessage, roomSideToken, type RoomMode } from './roomIdentity';
 import { getMessageTime, isOwnerMessageStrict, senderProfile } from './messageRules';
 import { ROOM_UNREAD_SIDES, roomUnreadKey } from '../../utils/roomUnreadRules';
@@ -138,6 +139,12 @@ async function countNewMessagesForSide(
     const member = target.member || {};
     const channelId = roomChannelId(member, target.side);
     if (!channelId) return null;
+    /**
+     * ★ 真机 b3000073：主计数对已知串味侧返回 null 后，旧路径的 fetchOwnerIdSet
+     * 和 /list/all 兜底会再各发一次 3.9s 串行回退（结果仍被防串味丢弃）。
+     * 这里按「详情失败」直接返回 null，指纹与基线都不推进，与原失败语义一致。
+     */
+    if (isCrossSideChannel(channelId)) return null;
     /**
      * ★ 第一位主计数源（用户 2026-11-13）：homeowner 全量流，每次都翻到
      * 「上一次看到的位置」。成功就直接采用它的结果；返回 null（接口失败）时才

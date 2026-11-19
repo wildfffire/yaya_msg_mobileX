@@ -36,7 +36,8 @@ import { flushRoomUnreadPersist, useRoomUnreadStore } from '../services/roomUnre
 import { claimCountId, markCountConsumed } from '../services/roomCountLedger';
 // 分侧「上次看到的位置」：进房 / 一键已读写消息 id，下拉刷新一次性翻到该位置
 import { markSeen, markSeenAll } from '../services/roomSeenStore';
-import { flushOwnerFeedUnread } from '../services/messagePollers';
+import { flushOwnerFeedUnread, prefetchRefreshSharePages } from '../services/messagePollers';
+import { activeRefreshRound, beginRefreshRound, endRefreshRound } from '../services/roomRefreshShare';
 // 列表预览快扫：与 5s 通知轮询解耦，15s 内把大/小房间真实最新正文拉回列表
 import { refreshRoomListPreviews } from '../services/roomPreviewRefresh';
 // isDetailFromSide：识别「小房间请求回退到大房间频道」的串味数据（三处：首屏/上拉/静默刷新）
@@ -1653,7 +1654,9 @@ const route = useRoute<any>();
        * 首屏/重拉后立刻补一轮真实正文：列表接口的 msgContent 对回复消息只给
        * 「[回复消息]」，等 60s 详情 sweep 才变就是用户看到的「预览延迟」。
        */
-      void refreshRoomListPreviews(followedRows, { force: true });
+      // 本轮统一刷新的预览由 handlePullRefresh 那条链路承担；这里再跑一轮会等共享页慢侧、
+      // 还会和它抢 inflight，把「列表」耗时拖到 1.9~3.3s（真机 b3000068 日志）
+      if (activeRefreshRound() <= 0) void refreshRoomListPreviews(followedRows, { force: true });
       // 上麦检测：扫描关注成员房间语音状态（静默，失败忽略）。结果写入 onMicStore 供
       // 房间列表「上麦中」徽标与房间内上麦按钮共用。
       const onMicInputs = followedMembers
@@ -1784,23 +1787,38 @@ const route = useRoute<any>();
     if (roomsRefreshBusyRef.current) return; // 连拉两次只跑一轮
     roomsRefreshBusyRef.current = true;
     setRoomsRefreshing(true);
-    const timer = setTimeout(() => {
-      roomsRefreshBusyRef.current = false;
-      setRoomsRefreshing(false);
-    }, 12_000);
-    void loadFollowed(true).finally(() => {
+    /**
+     * ★ 一轮统一刷新（用户 2026-11-14「短时间内同时完成计数、预览、通知」）：
+     * 先按侧预热一次共享页，列表本体 / force 主计数 / 预览三链路并行消费同一批数据；
+     * 三者真正完成才收圈解锁。12s 定时器只作异常兜底收 UI 圈、绝不提前解业务锁，
+     * 否则弱网下会再拉一次、叠加第二轮 200 页翻页链。
+     */
+    const timer = setTimeout(() => { setRoomsRefreshing(false); }, 12_000);
+    const round = beginRefreshRound();
+    const startedAt = Date.now();
+    const pre = prefetchRefreshSharePages(followedRef.current).catch(() => 0);
+    const listTask = loadFollowed(true);
+    const countTask = flushOwnerFeedUnread(followedRef.current).catch(() => 0);
+    const previewTask = refreshRoomListPreviews(followedRef.current, { force: true }).catch(() => 0);
+    const at = { list: 0, count: 0, preview: 0 };
+    const done = (p: Promise<unknown>, key: 'list' | 'count' | 'preview') =>
+      p.then(() => { at[key] = Date.now() - startedAt; }, () => { at[key] = Date.now() - startedAt; });
+    void Promise.allSettled([
+      pre,
+      done(listTask, 'list'),
+      done(countTask, 'count'),
+      done(previewTask, 'preview'),
+    ]).finally(() => {
       clearTimeout(timer);
       roomsRefreshBusyRef.current = false;
       setRoomsRefreshing(false);
+      endRefreshRound(round);
+      logInfo(
+        `[room] 手动刷新汇总 总耗时=${Date.now() - startedAt}ms`
+        + ` 列表=${at.list}ms 计数=${at.count}ms 预览=${at.preview}ms 代次=${round}`,
+        'room',
+      );
     });
-    /**
-     * ★ 手动刷新（用户 2026-11-13「一定要一次性翻到上次看到的位置为止」）：
-     * 对每一侧跑 force 主计数 —— 忽略常规 8 页预算与跨轮断点，一次翻到该侧
-     * 「上次看到的那条消息 id」；与列表刷新并行，不阻塞 12s 收圈。
-     */
-    void flushOwnerFeedUnread(followedRef.current).catch(() => {});
-    // 手动刷新同时把大/小房间两条预览一次性拉到最新（不等分片轮转）
-    void refreshRoomListPreviews(followedRef.current, { force: true });
   }, [loadFollowed]);
 
   /**

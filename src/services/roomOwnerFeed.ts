@@ -31,8 +31,18 @@ import { claimCountId, markCountConsumed } from './roomCountLedger';
 import { advanceOwnerCountedAt, ensureOwnerCountLoaded } from './roomOwnerCount';
 import { claimCounted, ensureSeenLoaded, getSeen } from './roomSeenStore';
 import { roomChannelId, type RoomMode } from '../screens/room/roomIdentity';
+import {
+  activeRefreshRound,
+  appendPageMessages,
+  isCrossSideChannel,
+  newPageAccumulator,
+  putSharedForceFeed,
+  sharedForceFeed,
+} from './roomRefreshShare';
 
 const PAGE_LIMIT = 50;
+/** 手动刷新专用页条数：一次下拉把累积的房主流尽快翻完，请求数约减半 */
+export const FORCE_PAGE_LIMIT = 100;
 /** 常规：单次最多 8 页（400 条）；翻不完记断点，下轮接着翻 */
 const MAX_PAGES_PER_CALL = 8;
 /** 手动刷新：一次翻到「上次看到的位置」为止（200 页只是防异常死循环） */
@@ -58,8 +68,10 @@ interface FeedRequest {
   member: any;
   /** 旧房间级时间基线：新 store 还没建立该侧时兜底 */
   readFloor: number;
-  /** 调用方本轮已经拉到的 homeowner 首页（5s 轮询免费复用，省一个请求） */
+  /** 调用方本轮已经拉到的 homeowner 首页（5s 轮询 / 下拉预热免费复用，省一个请求） */
   firstPage?: any[] | null;
+  /** firstPage 实际请求的 limit：判停要与本轮页条数一致，否则「页不满」会误判 */
+  firstPageLimit?: number;
   /** 手动刷新：一次翻完，不受常规页数预算/断点续翻限制 */
   force?: boolean;
 }
@@ -99,10 +111,11 @@ async function pullOwnerFeed(
   const member = req.member || {};
   const channelId = roomChannelId(member, req.side);
   if (!channelId) return null;
+  const pageLimit = force ? FORCE_PAGE_LIMIT : PAGE_LIMIT;
   const base: any = {
     channelId,
     serverId: String(member.serverId || ''),
-    limit: PAGE_LIMIT,
+    limit: pageLimit,
     fetchAll: false, // ★ 只打 /list/homeowner
   };
   if (req.side === 'small' && member.channelId) base.fallbackChannelId = String(member.channelId);
@@ -111,29 +124,42 @@ async function pullOwnerFeed(
   const pending = force ? undefined : pendingPages.get(req.key);
   const stopSeen = pending ? pending.seen : seen;
   let nextTime = pending?.nextTime || 0;
-  let msgs: any[] = [];
+  /** 增量累加：每页只扫新页一次，替代每页 dedupeMessages(msgs.concat(list)) 全量重建 */
+  const acc = newPageAccumulator();
+  const msgs = acc.msgs;
   let pages = 0;
   let lastPageLen = 0;
+  /** 最近一页实际请求的 limit（首页可能来自共享页，条数要单独记） */
+  let curLimit = pageLimit;
   /** 累计所有已翻页消息的 id 别名：用来判断「翻到上次看到的那条了没」 */
   const pageIds = new Set<string>();
   const collect = (list: any[]) => {
     for (const m of list) for (const id of messageIdAliases(m)) pageIds.add(id);
   };
-  if (!pending && req.firstPage && req.firstPage.length) {
-    msgs = dedupeMessages(req.firstPage);
+  const firstLimit = Number(req.firstPageLimit) || pageLimit;
+  /**
+   * ⚠️ force 首页条数必须与本轮 limit 一致：shouldContinueToSeen 用「pageLength < limit」
+   * 判「没有更早的了」，50 条首页配 100 条 limit 会让第一轮循环直接 break 漏计。
+   * 不一致就丢掉首页，回落到从 nextTime=0 自己拉第一页（口径不变、只多一个请求）。
+   */
+  const canUseFirstPage = !pending && !!req.firstPage?.length
+    && (!force || firstLimit === pageLimit);
+  if (canUseFirstPage && req.firstPage) {
+    appendPageMessages(acc, req.firstPage, messageId, messageTime);
     collect(req.firstPage);
     pages = 1;
     lastPageLen = req.firstPage.length;
+    curLimit = firstLimit;
     if (!nextTime) nextTime = oldestMessageTime(req.firstPage);
   }
   let stopped = false;
   while (pages < maxPages) {
     if (pages > 0 && !shouldContinueToSeen({
       pageLength: lastPageLen,
-      limit: PAGE_LIMIT,
+      limit: curLimit,
       seen: stopSeen,
       pageIds,
-      oldestTime: oldestMessageTime(msgs),
+      oldestTime: acc.oldest,
     })) { stopped = true; break; }
     let res: any;
     try {
@@ -146,30 +172,25 @@ async function pullOwnerFeed(
     if (!isDetailFromSide(res?._request?.payload?.channelId, channelId)) return null;
     const list = unwrapList(res, LIST_KEYS) || [];
     if (!list.length) { stopped = true; break; }
-    const before = msgs.length;
-    msgs = dedupeMessages(msgs.concat(list));
+    const added = appendPageMessages(acc, list, messageId, messageTime);
     collect(list);
     pages += 1;
     lastPageLen = list.length;
+    curLimit = pageLimit;
     const next = nextTimeOf(res, list);
     if (!(next > 0) || (nextTime > 0 && next >= nextTime)) { stopped = true; break; }
     nextTime = next;
-    if (msgs.length === before) { stopped = true; break; }
+    if (added === 0) { stopped = true; break; }
   }
   const atSeen = stopped
     || reachedSeenId(pageIds, stopSeen)
     || !shouldContinueToSeen({
-      pageLength: lastPageLen, limit: PAGE_LIMIT, seen: stopSeen,
-      pageIds, oldestTime: oldestMessageTime(msgs),
+      pageLength: lastPageLen, limit: curLimit, seen: stopSeen,
+      pageIds, oldestTime: acc.oldest,
     });
   if (atSeen) pendingPages.delete(req.key);
   else pendingPages.set(req.key, { nextTime, seen: stopSeen });
-  let newest = 0;
-  for (const m of msgs) {
-    const t = messageTime(m);
-    if (t > newest) newest = t;
-  }
-  return { msgs, newest, oldest: oldestMessageTime(msgs), pages, reached: atSeen };
+  return { msgs, newest: acc.newest, oldest: acc.oldest, pages, reached: atSeen };
 }
 
 /** 同一侧并发调用共享一次网络拉取 */
@@ -177,7 +198,25 @@ function loadOwnerFeed(req: FeedRequest, seen: SeenMark | null, force: boolean):
   const cacheKey = req.key + (force ? ':force' : '');
   const running = inflight.get(cacheKey);
   if (running) return running;
+  const round = activeRefreshRound();
+  /**
+   * ★ 本轮 force 已经把房主流翻到边界了：5s 轮询 / 30s 指纹不再各起一条翻页链。
+   * 只共享「消息页」而不是 counted 数值 —— 下游照常跑 pickUnreadSinceSeen +
+   * claimCounted / claimCountId，重算出来必然是 0，绝不会重复 bump。
+   * force 返回 null / 本轮无共享数据时绝不短路，原 /list/all 兜底照常执行。
+   */
+  if (!force && round > 0) {
+    const shared = sharedForceFeed(round, req.key);
+    if (shared) {
+      if (shared.reached) pendingPages.delete(req.key);
+      return Promise.resolve({ ...shared, msgs: shared.msgs.slice() });
+    }
+  }
   const task = pullOwnerFeed(req, seen, force)
+    .then((feed) => {
+      if (feed && force && round > 0) putSharedForceFeed(round, req.key, feed);
+      return feed;
+    })
     .finally(() => { inflight.delete(cacheKey); });
   inflight.set(cacheKey, task);
   return task;
@@ -198,6 +237,12 @@ export async function countOwnerFeedUnread(opts: FeedRequest & {
   presenceId?: string;
   source: string;
 }): Promise<OwnerFeedCount | null> {
+  /**
+   * ★ 真机 b3000072：5s 轮询的 fetched 里仍带着 crossSide 项，会再对已知串味侧
+   * 调一次主计数、发 3.7s 串行回退请求。统一在这里返回 null（= 主源不可用，
+   * 与原「拿到串味页整轮丢弃」完全等价），一次覆盖 force / 轮询 / 指纹三条链路。
+   */
+  if (isCrossSideChannel(roomChannelId(opts.member || {}, opts.side))) return null;
   await Promise.all([ensureOwnerCountLoaded(), ensureSeenLoaded()]);
   // 新 store 没建立该侧基线时（老用户升级后第一次），退回旧房间级时间基线，
   // 之后进房/退房就会写入分侧消息 id。

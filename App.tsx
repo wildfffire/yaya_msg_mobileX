@@ -37,6 +37,9 @@ import { initGiftPrices } from './src/services/giftPrices';
 import { initRoomBgCache } from './src/services/roomBgCache';
 import { initRoomMetaCache } from './src/services/roomMetaCache';
 import { InAppNoticeBanner } from './src/components/InAppNoticeBanner';
+// 新版本主动提醒（用户 2026-11-19）：检测到 release 后弹窗 + 系统通知，老用户不再只能靠设置页红点
+import { UpdatePromptModal } from './src/components/UpdatePromptModal';
+import { announceUpdateIfNeeded } from './src/services/updateNotice';
 import { initRuntimeLog, logCrash, logInfo } from './src/utils/runtimeLog';
 import { fetchCoverToFile, normalizeCoverUrl } from './src/utils/coverToFile';
 import { usePalette } from './src/theme/colors';
@@ -92,6 +95,18 @@ function installGlobalErrorHandler() {
 
 installGlobalErrorHandler();
 initRuntimeLog().catch(() => {});
+
+/**
+ * 检测版本更新 → 有新版本就主动提醒（弹窗 + 系统通知），失败静默。
+ * 限流（6h）在 store 内部，启动与回前台都可以放心调用。
+ */
+function checkUpdateAndAnnounce() {
+  useUpdateStore
+    .getState()
+    .checkUpdate()
+    .then((has) => (has ? announceUpdateIfNeeded() : false))
+    .catch(() => {});
+}
 
 /**
  * 音乐前台保活桥（A2）：音乐库/全屏播放器播放时启动 RadioForegroundService
@@ -642,8 +657,8 @@ export default function App() {
     const timer = setTimeout(() => {
       runAutoCheckinIfNeeded().catch(() => {});
     }, 1200);
-    // 启动静默检测最新版本：失败/无 Release 一律不打扰，设置页版本号红点由 store 驱动
-    useUpdateStore.getState().checkUpdate().catch(() => {});
+    // 启动静默检测最新版本：无更新/失败一律不打扰；有更新则弹窗 + 系统通知（同版本只提醒一次）
+    checkUpdateAndAnnounce();
     // R2 音乐列表预取（1MB/gnz.hk 慢）：延迟到启动完全就绪后静默拉取写缓存，
     // 进音乐库秒开；任何异常均被吞，不影响启动（如 Hermes 无 AbortController polyfill 也仅拉取失败）
     const r2Timer = setTimeout(() => {
@@ -697,6 +712,8 @@ export default function App() {
       const st = useSettingsStore.getState().settings;
       if (state === 'active') {
         void ensureNotificationPermissionOnce({ allowPrompt: notifyWanted(st) });
+        // 回前台补一次版本检测（内部 6h 限流）：用户挂着 App 过夜也能及时收到新版本提醒
+        checkUpdateAndAnnounce();
       }
       void syncMessageKeepAliveForSettings(st);
     });
@@ -726,6 +743,8 @@ export default function App() {
       </SafeAreaBridge>
       {/* 软件内通知横幅（用户 2026-11-09）：前台收到新消息时的顶部提示，点按走深链 */}
       <InAppNoticeBanner />
+      {/* 新版本提醒弹窗（用户 2026-11-19）：有新 release 时提示一次，点按去下载 */}
+      <UpdatePromptModal />
       {/* v2.6: Global announcement modal */}
       <Modal visible={!!announceModal} transparent animationType="fade" onRequestClose={() => setAnnounceModal(null)}>
         <View style={anStyles.overlay}>

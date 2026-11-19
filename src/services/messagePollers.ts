@@ -45,7 +45,21 @@ import { logOwnerLag, ownerLagWanted, probeOwnerLag } from './ownerLagProbe';
 import { ROOM_UNREAD_SIDES, roomUnreadKey, type RoomUnreadSide } from '../utils/roomUnreadRules';
 import { claimMessageIds, pickIdolMessages } from '../utils/roomIdolCountRules';
 import { claimUncountedOwnerPage, ensureOwnerCountLoaded } from './roomOwnerCount';
-import { countOwnerFeedUnread, dedupeMessages, type OwnerFeedCount } from './roomOwnerFeed';
+import { countOwnerFeedUnread, dedupeMessages, FORCE_PAGE_LIMIT, type OwnerFeedCount } from './roomOwnerFeed';
+import {
+  activeRefreshRound,
+  clearCrossSideChannel,
+  exportCrossSideChannels,
+  isCrossSideChannel,
+  restoreCrossSideChannels,
+  markCrossSideChannel,
+  putSharedAllPage,
+  putSharedOwnerFirstPage,
+  putSharedSideReady,
+  sharedOwnerFirstPage,
+  sharedPageLimitMatches,
+  waitSharedSideReady,
+} from './roomRefreshShare';
 import { oldestMessageTime } from '../utils/ownerFeedRules';
 import { shouldKeepMessageAlive, type RoomNotifyMode } from '../utils/notifyRules';
 import { logInfo, logWarn } from '../utils/runtimeLog';
@@ -91,6 +105,33 @@ const MAX_DETAIL_PER_ROUND = 24;
 const DETAIL_CONCURRENCY = 4;
 /** homeowner（服务端房主过滤）详情并发 */
 const OWNER_CHECK_CONCURRENCY = 4;
+/** 手动下拉刷新专用并发：常规轮询仍是 4，只放大一次性翻页这一条链 */
+const FORCE_CONCURRENCY = 8;
+/** 串味侧负缓存实现在 roomRefreshShare（预热 / 主计数 / 预览三条链共用一份） */
+const CROSS_SIDE_STORAGE = 'yaya_room_cross_side_v1';
+let crossSideLoadPromise: Promise<void> | null = null;
+/** 冷启动第一次下拉前把负缓存读回来，避免「很久没打开」的首轮仍付 5s 串行回退 */
+function ensureCrossSideLoaded(): Promise<void> {
+  if (crossSideLoadPromise) return crossSideLoadPromise;
+  crossSideLoadPromise = (async () => {
+    try {
+      const raw = await AsyncStorage.getItem(CROSS_SIDE_STORAGE);
+      if (raw) restoreCrossSideChannels(JSON.parse(raw));
+    } catch { /* 缓存损坏就当没有，下一轮重新学习 */ }
+  })();
+  return crossSideLoadPromise;
+}
+let crossSidePersistTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleCrossSidePersist(): void {
+  if (crossSidePersistTimer) return;
+  crossSidePersistTimer = setTimeout(() => {
+    crossSidePersistTimer = null;
+    void AsyncStorage.setItem(
+      CROSS_SIDE_STORAGE,
+      JSON.stringify(exportCrossSideChannels()),
+    ).catch(() => {});
+  }, 800);
+}
 /** 每 12 轮（约 60s）无条件全量扫一次：兜住「内容完全相同、预览指纹不变」的连发 */
 const SWEEP_EVERY_ROUNDS = 12;
 // 通知重试上限见 services/notifyAttempts.ts（MAX_NOTIFY_ATTEMPTS，私信/房间共用）
@@ -423,6 +464,12 @@ async function fetchSideDetail(
   fetchAll: boolean,
   nextTime = 0,
 ): Promise<{ list: any[] | null; crossSide: boolean; res?: any }> {
+  /**
+   * ★ 真机 b3000070：预热 / 主计数 / 预览都跳过已知串味侧后，5s 轮询与滞后探针
+   * 仍会对同一频道发一次 3.5s 的串行回退请求，结果依旧被 isDetailFromSide 丢弃。
+   * 在这里统一拦掉（返回 crossSide 与原来拿到串味页的处理完全一致），省掉整轮下限。
+   */
+  if (isCrossSideChannel(s.channelId)) return { list: null, crossSide: true };
   const base: any = {
     channelId: s.channelId,
     serverId: s.serverId,
@@ -540,37 +587,140 @@ async function backfillSideDetail(
 }
 
 /**
+ * ★ 手动下拉刷新的共享页预热（用户 2026-11-14「短时间内同时完成计数、预览、通知」）：
+ * 一次下拉只按侧各拉一次 `/list/all` 最新页与 `/list/homeowner` 首页，之后 force 主计数、
+ * 预览快扫、常规轮询 / 指纹都读这一份，不再各发一整套请求、各起一条翻页链。
+ *
+ * 校验与 roomPreviewRefresh / roomOwnerFeed 完全同一套：预览只认 label 以 all 开头的页，
+ * 两种页都必须是本侧 channelId（小房间回退到大房间频道的串味页直接丢弃、回落独立拉取）。
+ * 首页按 FORCE_PAGE_LIMIT 拉，保证与 force 翻页的「页不满」判据一致。
+ */
+export async function prefetchRefreshSharePages(rows: any[] | undefined | null): Promise<number> {
+  const round = activeRefreshRound();
+  if (!(round > 0) || !Array.isArray(rows) || !rows.length) return 0;
+  await ensureCrossSideLoaded(); // 冷启动首轮也要能跳过已知的串味侧
+  const sides: Array<{
+    key: string; channelId: string; serverId: string; fallbackChannelId?: string;
+  }> = [];
+  let skippedCrossSide = 0;
+  for (const row of rows) {
+    const id = String(row?.memberId || row?.member?.id || '');
+    const member = row?.member;
+    if (!id || !member) continue;
+    for (const side of ROOM_UNREAD_SIDES) {
+      const channelId = roomChannelId(member, side as RoomMode);
+      if (!channelId) continue;
+      if (isCrossSideChannel(channelId)) { skippedCrossSide += 1; continue; }
+      sides.push({
+        key: roomUnreadKey(id, side),
+        channelId,
+        serverId: String(member.serverId || ''),
+        ...(side === 'small' && member.channelId
+          ? { fallbackChannelId: String(member.channelId) } : {}),
+      });
+    }
+  }
+  if (!sides.length) return 0;
+  let hits = 0;
+  await mapLimit(sides, FORCE_CONCURRENCY, (s) => {
+    const task = (async () => {
+      const base: any = {
+        channelId: s.channelId,
+        serverId: s.serverId,
+        nextTime: 0,
+        limit: FORCE_PAGE_LIMIT,
+        ...(s.fallbackChannelId ? { fallbackChannelId: s.fallbackChannelId } : {}),
+      };
+      const pickRes = (r: PromiseSettledResult<any>): any | null => {
+        if (r.status !== 'fulfilled') return null;
+        const res = r.value;
+        if (!isDetailFromSide(res?._request?.payload?.channelId, s.channelId)) {
+          markCrossSideChannel(s.channelId); // 服务端明确回退到别的频道 = 确定性串味
+          scheduleCrossSidePersist();
+          return null;
+        }
+        clearCrossSideChannel(s.channelId); // 拿到本侧页 → 自愈
+        return res;
+      };
+      // 同一侧两组请求并发；单侧失败不影响其它侧
+      const [allResult, ownerResult] = await Promise.allSettled([
+        pocketApi.getRoomMessages({ ...base, fetchAll: true }),
+        pocketApi.getRoomMessages({ ...base, fetchAll: false }),
+      ]);
+      const allRes = pickRes(allResult);
+      if (allRes && String(allRes?._request?.label || '').startsWith('all')) {
+        const list = unwrapList(allRes, ROOM_DETAIL_LIST_KEYS) || [];
+        if (list.length) {
+          putSharedAllPage(round, s.key, list, allRes);
+          hits += 1;
+        }
+      }
+      const ownerRes = pickRes(ownerResult);
+      if (ownerRes) {
+        const list = unwrapList(ownerRes, ROOM_DETAIL_LIST_KEYS) || [];
+        if (list.length) putSharedOwnerFirstPage(round, s.key, list, FORCE_PAGE_LIMIT);
+      }
+    })();
+    // 先登记「按侧就绪」：force 计数与预览各等自己那一侧，慢侧不拖整轮
+    putSharedSideReady(round, s.key, task);
+    return task;
+  });
+  logInfo(`[room] 共享页预热 命中=${hits} 侧=${sides.length} 跳过串味侧=${skippedCrossSide}`, 'room');
+  return hits;
+}
+
+/**
  * ★ 手动下拉刷新（用户 2026-11-13「一定要一次性翻到上次看到的位置为止」）：
  * 对当前关注列表的**每一侧**跑一次 force 主计数 —— 忽略常规 8 页预算与跨轮断点，
  * 从最新页一次翻到该侧「上次看到的那条消息 id」，边界严格、不吃任何机器进度短路。
- * 常规 5s 轮询 / 30s 指纹仍走原先的预算 + 续翻，一行没动。
+ *
+ * 2026-11-14 加速：把「房间 → 两侧」展开成一张任务表，两侧并行、并发 8；
+ * 首页用本轮预热到的共享 homeowner 页（现成的 firstPage 机制，省一个请求）。
+ * 常规 5s 轮询 / 30s 指纹仍走原先的预算 + 续翻，只是本轮内复用 force 已翻完的房主流。
+ * ⚠️ 角标仍是全部完成后一次 applyUnread，不做渐进上涨（用户明确否决）。
  */
 export async function flushOwnerFeedUnread(rows: any[]): Promise<number> {
   const readBaselines = useRoomUnreadStore.getState().lastReadAt || {};
+  const round = activeRefreshRound();
   const bump: Record<string, number> = {};
   let total = 0;
-  await mapLimit(rows || [], DETAIL_CONCURRENCY, async (row: any) => {
+  const tasks: Array<{
+    key: string; id: string; side: RoomUnreadSide; member: any;
+  }> = [];
+  for (const row of rows || []) {
     const id = String(row?.memberId || row?.member?.id || '');
     const member = row?.member;
-    if (!id || !member) return;
+    if (!id || !member) continue;
     for (const side of ROOM_UNREAD_SIDES) {
-      const key = roomUnreadKey(id, side);
-      try {
-        const r = await countOwnerFeedUnread({
-          key,
-          id,
-          side,
-          member,
-          readFloor: Number(readBaselines[id]) || 0,
-          source: '手动刷新',
-          force: true,
-        });
-        if (r && r.counted > 0) {
-          bump[key] = (bump[key] || 0) + r.counted;
-          total += r.counted;
-        }
-      } catch { /* 单个房间失败不影响其它房间 */ }
+      // 串味侧原本也会被 isDetailFromSide 整轮丢弃返回 null，跳过等价但省掉 3.4s 串行回退
+      const channelId = roomChannelId(member, side as RoomMode);
+      if (!channelId || isCrossSideChannel(channelId)) continue;
+      tasks.push({ key: roomUnreadKey(id, side), id, side, member });
     }
+  }
+  await mapLimit(tasks, FORCE_CONCURRENCY, async (t) => {
+    // 本轮刷新：只等这一侧的共享首页预热完成，不等其它房间
+    if (round > 0) await waitSharedSideReady(round, t.key);
+    const shared = round > 0 ? sharedOwnerFirstPage(round, t.key) : null;
+    const useShared = sharedPageLimitMatches(shared, FORCE_PAGE_LIMIT);
+    try {
+      const r = await countOwnerFeedUnread({
+        key: t.key,
+        id: t.id,
+        side: t.side,
+        member: t.member,
+        readFloor: Number(readBaselines[t.id]) || 0,
+        source: '手动刷新',
+        force: true,
+        ...(useShared && shared
+          ? { firstPage: shared.list, firstPageLimit: shared.limit }
+          : {}),
+      });
+      if (r && r.counted > 0) {
+        bump[t.key] = (bump[t.key] || 0) + r.counted;
+        total += r.counted;
+      }
+    } catch { /* 单个房间失败不影响其它房间 */ }
   });
   if (Object.keys(bump).length) useRoomUnreadStore.getState().applyUnread({ bump });
   return total;

@@ -156,7 +156,9 @@ try {
       src.includes('refreshing={roomsRefreshing}'),
       '★ 必须用独立 refreshing —— 复用 followedLoading 会被 30s 轮询/自动重试点亮，转圈不灭',
     );
-    assert.ok(src.includes('void loadFollowed(true).finally('), '下拉 = 一次静默完整重拉，且结束一定收圈');
+    assert.ok(src.includes('const listTask = loadFollowed(true)'), '下拉 = 一次静默完整重拉');
+    assert.ok(src.includes('Promise.allSettled([') && src.includes('endRefreshRound(round)'),
+      '★ 列表 / 计数 / 预览三链路全部完成才收圈解锁（不再由列表单独提前放行）');
     assert.ok(src.includes('12_000'), '弱网悬挂要有收圈兜底');
     assert.ok(src.includes('{ flexGrow: 1 }'), '空列表/报错态也要能下拉');
   });
